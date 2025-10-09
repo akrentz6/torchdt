@@ -1,0 +1,16 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools >= 61.0", "wheel"]
+
+[project]
+name = "torchdt"
+version = "1.0.0"
+description = "torchdt is a python package that provides custom datatypes for training and inference in PyTorch."
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Alexander Krentz", email = "alexkrentz2@gmail.com"}]
+keywords = ["python", "pytorch", "machine learning"]
+dependencies = ["torch"]
+
+[project.urls]
+"Homepage" = "https://github.com/akrentz6/torchdt"
