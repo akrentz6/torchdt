@@ -7,8 +7,7 @@ POS_INF = torch.tensor(32766, dtype=torch.int16) # largest positive value in LNS
 NEG_INF = torch.tensor(32767, dtype=torch.int16) # largest negative value in LNS
 base = 2.0 ** (2.0 ** torch.tensor(-10, dtype=torch.float64))
 
-class LNS16(DType):
-    bit_width = 16
+class LNS16(DType, bit_width=32):
 
     @staticmethod
     def from_float(t: Tensor) -> Tensor:

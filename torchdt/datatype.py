@@ -28,16 +28,11 @@ class DType(Tensor):
             cls,
             data: Any,
             *,
-            bit_width: Optional[int] = None,
             device: Optional[Union[str, torch.device]] = None,
             requires_grad: Optional[bool] = None,
             memory_format: torch.memory_format = torch.preserve_format,
     ):
-        bw = bit_width if bit_width is not None else cls.bit_width
-        if bw not in _float_dtype:
-            raise ValueError("bit_width must be 8 / 16 / 32 / 64")
-
-        f_dtype = _float_dtype[bw]
+        f_dtype = _float_dtype[cls.bit_width]
 
         if isinstance(data, torch.Tensor):
             payload = data.to(dtype=f_dtype, device=device, memory_format=memory_format)
@@ -50,8 +45,18 @@ class DType(Tensor):
             payload = payload.to(memory_format=memory_format)
 
         obj = payload.as_subclass(cls)
-        obj.bit_width = bw
         return obj
+
+    def __init_subclass__(cls, bit_width: int = 32, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+        if bit_width not in _float_dtype:
+            raise ValueError(
+                f"{cls.__name__} has invalid bit_width {bit_width}. "
+                f"Must be one of {tuple(_float_dtype.keys())}."
+            )
+
+        cls.bit_width = bit_width
 
     def backward(self, gradient=None, retain_graph=None, create_graph=False, inputs=None):
         """
