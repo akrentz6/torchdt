@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Type
 
 _float_dtype = {
     8: torch.float8_e5m2, # we have several variants to pick from
@@ -30,7 +30,7 @@ class DType(Tensor):
             *,
             bit_width: Optional[int] = None,
             device: Optional[Union[str, torch.device]] = None,
-            requires_grad: bool = False,
+            requires_grad: Optional[bool] = None,
             memory_format: torch.memory_format = torch.preserve_format,
     ):
         bw = bit_width if bit_width is not None else cls.bit_width
@@ -41,13 +41,15 @@ class DType(Tensor):
 
         if isinstance(data, torch.Tensor):
             payload = data.to(dtype=f_dtype, device=device, memory_format=memory_format)
-            payload = cls.from_float(payload).view(f_dtype)
+            payload = ToDType.apply(payload, cls)
+            if requires_grad is not None:
+                payload.requires_grad_(requires_grad)
         else:
-            payload = torch.tensor(data, dtype=f_dtype, device=device)
-            payload = cls.from_float(payload).view(f_dtype)
+            payload = torch.tensor(data, dtype=f_dtype, device=device, requires_grad=requires_grad or False)
+            payload = ToDType.apply(payload, cls)
             payload = payload.to(memory_format=memory_format)
 
-        obj = Tensor._make_subclass(cls, payload, requires_grad)
+        obj = payload.as_subclass(cls)
         obj.bit_width = bw
         return obj
 
@@ -76,3 +78,13 @@ class DType(Tensor):
             f"{self.__class__.__name__}({self.to_float(self._float)}, bit_width={self.bit_width}, "
             f"shape={tuple(self.shape)}, device={self.device})"
         )
+
+class ToDType(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, input: Tensor, dtype: Type[DType]) -> DType:
+        return dtype.from_float(input).view(_float_dtype[dtype.bit_width])
+
+    @staticmethod
+    def backward(ctx, grad_output: DType) -> Tensor:
+        return grad_output.to_float(grad_output), None
