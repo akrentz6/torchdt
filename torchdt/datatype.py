@@ -53,6 +53,36 @@ class DType(Tensor):
         obj.bit_width = bw
         return obj
 
+    def backward(self, gradient=None, retain_graph=None, create_graph=False, inputs=None):
+        """
+        Computes the gradient of current DType tensor with respect to the graph leaves.
+        This method is analogous to the standard PyTorch `Tensor.backward()` method, but
+        works with DType tensors. See
+
+        https://docs.pytorch.org/docs/stable/generated/torch.Tensor.backward.html
+
+        for more details. Note that the `gradient` parameter, if provided, will be converted
+        to the same DType as `self` before being used in the backward pass.
+        """
+
+        if gradient is None:
+
+            if self.numel() != 1:
+                raise RuntimeError("grad can be implicitly created only for scalar outputs")
+
+            # create a tensor of ones in the same dtype as self
+            gradient = type(self)(torch.ones(self.size()))
+
+        elif type(gradient) != type(self):
+            gradient = type(self)(gradient, requires_grad=False)
+
+        return super().backward(
+            gradient=gradient,
+            retain_graph=retain_graph,
+            create_graph=create_graph,
+            inputs=inputs
+        )
+
     @staticmethod
     def from_float(t: Tensor) -> Tensor:
         "Convert a standard float tensor to this datatype."
