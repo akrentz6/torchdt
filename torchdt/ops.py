@@ -1,5 +1,5 @@
 from torch import CharTensor, ShortTensor, IntTensor, LongTensor
-from typing import Union
+from typing import Union, Callable
 
 InternalTensor = Union[CharTensor, ShortTensor, IntTensor, LongTensor]
 
@@ -7,20 +7,30 @@ __all__ = [
     "OpsBase",
 ]
 
+def register_op(dtype_cls: type, method: str) -> Callable:
+    """Decorator to register an operation for a given DType subclass."""
+    def decorator(func: Callable) -> Callable:
+        ops_cls = dtype_cls.ops
+        if not hasattr(ops_cls, method):
+            raise ValueError(f"{ops_cls.__name__} has no method '{method}' to register.")
+        setattr(ops_cls, method, func)
+        return func
+    return decorator
+
 class OpsBase:
 
-    @staticmethod
-    def add(x: InternalTensor, y: InternalTensor) -> InternalTensor:
+    @classmethod
+    def add(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
         raise NotImplementedError
 
-    @staticmethod
-    def sub(x: InternalTensor, y: InternalTensor) -> InternalTensor:
+    @classmethod
+    def sub(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
         raise NotImplementedError
 
-    @staticmethod
-    def mul(x: InternalTensor, y: InternalTensor) -> InternalTensor:
+    @classmethod
+    def mul(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
         raise NotImplementedError
 
-    @staticmethod
-    def div(x: InternalTensor, y: InternalTensor) -> InternalTensor:
+    @classmethod
+    def div(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
         raise NotImplementedError
