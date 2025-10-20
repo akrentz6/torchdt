@@ -1,6 +1,9 @@
 import torch
 from torch import Tensor
 from typing import Any, Optional, Union, Type
+import sys
+
+from torchdt.ops import OpsBase
 
 _float_dtype = {
     8: torch.float8_e5m2, # we have several variants to pick from
@@ -55,8 +58,23 @@ class DType(Tensor):
                 f"{cls.__name__} has invalid bit_width {bit_width}. "
                 f"Must be one of {tuple(_float_dtype.keys())}."
             )
-
         cls.bit_width = bit_width
+
+        if cls is DType:
+            return # don't register base class
+
+        # create a subclass of Ops for this DType
+        ops_name = f"{cls.__name__}Ops"
+        namespace = {
+            '__module__': OpsBase.__module__,
+            'dtype': cls,
+        }
+        ops_cls = type(ops_name, (OpsBase,), namespace)
+        cls.ops = ops_cls
+
+        # allow normal imports to see it
+        # module = sys.modules[cls.__module__]
+        # setattr(module, ops_name, ops_cls)
 
     def backward(self, gradient=None, retain_graph=None, create_graph=False, inputs=None):
         """
