@@ -5,6 +5,7 @@ InternalTensor = Union[CharTensor, ShortTensor, IntTensor, LongTensor]
 
 __all__ = [
     "OpsBase",
+    "register_op",
 ]
 
 def register_op(dtype_cls: type, method: str) -> Callable:
@@ -13,7 +14,7 @@ def register_op(dtype_cls: type, method: str) -> Callable:
         ops_cls = dtype_cls.ops
         if not hasattr(ops_cls, method):
             raise ValueError(f"{ops_cls.__name__} has no method '{method}' to register.")
-        setattr(ops_cls, method, func)
+        setattr(ops_cls, method, classmethod(func))
         return func
     return decorator
 

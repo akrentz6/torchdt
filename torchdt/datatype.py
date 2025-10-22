@@ -3,7 +3,7 @@ from torch import Tensor
 from typing import Any, Optional, Union, Type
 import sys
 
-from torchdt.ops import OpsBase
+from torchdt.ops import OpsBase, register_op
 
 _float_dtype = {
     8: torch.float8_e5m2, # we have several variants to pick from
@@ -105,6 +105,11 @@ class DType(Tensor):
             create_graph=create_graph,
             inputs=inputs
         )
+
+    @classmethod
+    def register_op(cls, method: str):
+        """Decorator to register an operation for this DType subclass."""
+        return register_op(cls, method)
 
     @staticmethod
     def from_float(t: Tensor) -> Tensor:
