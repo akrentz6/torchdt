@@ -19,6 +19,37 @@ _int_dtype = {
     64: torch.int64
 }
 
+class GradAccumHook:
+
+    def __init__(self, tensor, dtype):
+        self.value = dtype(torch.zeros_like(tensor), requires_grad=False)
+
+        self.grad_hook_handle = tensor.register_hook(self.grad_hook)
+        if tensor.is_leaf:
+            self.grad_accum_hook_handle = tensor.register_post_accumulate_grad_hook(self.accumulate_hook)
+
+    def grad_hook(self, grad):
+        if grad is None:
+            return None
+        return self.value
+
+    def accumulate_hook(self, tensor):
+        tensor.grad.copy_(self.value)
+
+    def register_edge_hook(self, edge, arg_index):
+
+        def edge_hook(grad_inputs, grad_outputs):
+            if grad_inputs[arg_index] is not None:
+                print(type(self.value)(grad_inputs[arg_index], internal=True))
+                self.value += type(self.value)(grad_inputs[arg_index], internal=True)
+
+        edge.node.register_hook(edge_hook)
+
+    # def __del__(self):
+    #     if hasattr(self, "grad_hook_handle"):
+    #         self.grad_hook_handle.remove()
+    #     if hasattr(self, "grad_accum_hook_handle"):
+    #         self.grad_accum_hook_handle.remove()
 
 class DType(Tensor):
     """
@@ -31,23 +62,37 @@ class DType(Tensor):
             cls,
             data: Any,
             *,
+            internal: bool = False,
             device: Optional[Union[str, torch.device]] = None,
             requires_grad: Optional[bool] = None,
             memory_format: torch.memory_format = torch.preserve_format,
     ):
-        f_dtype = _float_dtype[cls.bit_width]
+        cls.float_dtype = _float_dtype[cls.bit_width]
+        cls.int_dtype = _int_dtype[cls.bit_width]
 
         if isinstance(data, torch.Tensor):
-            payload = data.to(dtype=f_dtype, device=device, memory_format=memory_format)
-            payload = ToDType.apply(payload, cls)
-            if requires_grad is not None:
-                payload.requires_grad_(requires_grad)
+            if internal:
+                if data.dtype != cls.float_dtype:
+                    payload = data.view(cls.float_dtype)
+                else:
+                    payload = data
+            else:
+                payload = data.to(dtype=cls.float_dtype, device=device, memory_format=memory_format)
+                payload = ToDType.apply(payload, cls)
         else:
-            payload = torch.tensor(data, dtype=f_dtype, device=device, requires_grad=requires_grad or False)
+            if internal:
+                payload = torch.tensor(data, dtype=cls.int_dtype, device=device).view(cls.float_dtype)
+            else:
+                payload = torch.tensor(data, dtype=cls.float_dtype, device=device)
             payload = ToDType.apply(payload, cls)
             payload = payload.to(memory_format=memory_format)
 
         obj = payload.as_subclass(cls)
+        if requires_grad is None:
+            if isinstance(data, torch.Tensor) and data.requires_grad:
+                obj.requires_grad_(True)
+        else:
+            obj.requires_grad_(requires_grad)
         return obj
 
     def __init_subclass__(cls, bit_width: int = 32, **kwargs):
@@ -76,6 +121,24 @@ class DType(Tensor):
         # module = sys.modules[cls.__module__]
         # setattr(module, ops_name, ops_cls)
 
+    def _track_operation(self, edge, arg_index):
+        """
+        Registers a hook to track the operation that produced this DType tensor.
+        This is used to accumulate gradients from different paths in the computation
+        graph since PyTorch will internally add these, but since they are DType
+        tensors we must perform our custom DType addition.
+        """
+        self._grad_accum_hook.register_edge_hook(edge, arg_index)
+
+    def requires_grad_(self, requires_grad: bool = True):
+        """Sets the requires_grad flag for this DType tensor in-place."""
+        super().requires_grad_(requires_grad)
+
+        if requires_grad:
+            self._grad_accum_hook = GradAccumHook(self, type(self))
+
+        return self
+
     def backward(self, gradient=None, retain_graph=None, create_graph=False, inputs=None):
         """
         Computes the gradient of current DType tensor with respect to the graph leaves.
@@ -98,6 +161,10 @@ class DType(Tensor):
 
         elif type(gradient) != type(self):
             gradient = type(self)(gradient, requires_grad=False)
+
+        # manually set the incoming gradients for the output
+        # tensor since no hooks will be registered for it.
+        self._grad_accum_hook.value.copy_(gradient)
 
         return super().backward(
             gradient=gradient,
@@ -141,7 +208,7 @@ class ToDType(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input: Tensor, dtype: Type[DType]) -> DType:
-        return dtype.from_float(input).view(_float_dtype[dtype.bit_width])
+        return dtype.from_float(input).view(dtype.float_dtype)
 
     @staticmethod
     def backward(ctx, grad_output: DType) -> Tensor:
