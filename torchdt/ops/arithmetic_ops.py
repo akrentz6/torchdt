@@ -1,5 +1,6 @@
 import torch
 from torchdt.autograd import DTFunction
+from torchdt.ops import register_base_op
 
 class DTAddFunction(DTFunction):
 
@@ -74,3 +75,7 @@ class DTDivFunction(DTFunction):
         grad_y = ops.neg(ops.div(ops.mul(grad_output, x), ops.mul(y, y)))
 
         return grad_x, grad_y
+
+@register_base_op("square")
+def dt_square(ops, x):
+    return ops.mul(x, x)

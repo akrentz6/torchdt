@@ -13,7 +13,18 @@ def register_op(dtype_cls: type, method: str) -> Callable:
         return func
     return decorator
 
+def register_base_op(method: str) -> Callable:
+    """Decorator to register a base operation."""
+    def decorator(func: Callable) -> Callable:
+        if not hasattr(OpsBase, method):
+            raise ValueError(f"OpsBase has no method '{method}' to register.")
+        setattr(OpsBase, method, classmethod(func))
+        return func
+    return decorator
+
 class OpsBase:
+
+    # ========== Operations to be implemented by subclasses ==========
 
     @classmethod
     def add(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
@@ -29,4 +40,11 @@ class OpsBase:
 
     @classmethod
     def div(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+
+    # ========== 'Base' operations with default implementations ==========
+
+    @classmethod
+    def square(cls, x: InternalTensor) -> InternalTensor:
         raise NotImplementedError
