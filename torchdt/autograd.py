@@ -3,7 +3,10 @@ from torch.autograd.graph import get_gradient_edge
 import functools
 from typing import Optional, Tuple
 
-__all__ = ["DTFunction"]
+__all__ = [
+    "DTFunction",
+    "DTNonDifferentiableFunction",
+]
 
 def _find_first_grad_tensor(args):
     if not isinstance(args, (list, tuple)):
@@ -195,6 +198,65 @@ class DTFunction(torch.autograd.Function):
                     continue
 
                 arg._track_operation(edge, j - 1)
+
+        if isinstance(result, torch.Tensor):
+            return dtype(
+                result, internal=True
+            ) if cls.output_indices is None or 0 in cls.output_indices else result
+
+        elif isinstance(result, list):
+            return [
+                dtype(result[i], internal=True)
+                if cls.output_indices is None or i in cls.output_indices else result[i]
+                for i in range(len(result))
+            ]
+
+        elif isinstance(result, tuple):
+            return tuple(
+                dtype(result[i], internal=True)
+                if cls.output_indices is None or i in cls.output_indices else result[i]
+                for i in range(len(result))
+            )
+
+        return result
+
+class DTNonDifferentiableFunction:
+
+    output_indices: Optional[Tuple[int, ...]] = None
+
+    @staticmethod
+    def forward(ops, *args, **kwargs):
+        """Forward pass for non-differentiable function."""
+        raise NotImplementedError
+
+    @classmethod
+    def apply(cls, *args, **kwargs):
+        from torchdt import DType # avoid circular import
+
+        if kwargs is not None:
+            raise ValueError(
+                "DTNonDifferentiableFunction does not support keyword arguments. "
+                "Please use positional arguments only."
+            )
+
+        subtypes = []
+        prepped_inputs = []
+
+        for i, arg in enumerate(args):
+            if isinstance(arg, DType):
+                subtypes.append(arg.__class__)
+                prepped_inputs.append(arg._float)
+            else:
+                prepped_inputs.append(arg)
+
+        if not subtypes:
+            raise ValueError("DTFunction.apply() requires at least one DType tensor argument.")
+
+        dtype = subtypes[0]
+        if any(st != dtype for st in subtypes):
+            raise ValueError("All DType arguments to DTFunction.apply() must be of the same type.")
+
+        result = cls.forward(dtype.ops, *prepped_inputs)
 
         if isinstance(result, torch.Tensor):
             return dtype(
