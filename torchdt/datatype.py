@@ -58,10 +58,9 @@ class GradAccumHook:
         def edge_hook(grad_inputs, grad_outputs):
             if grad_inputs[arg_index] is not None:
                 # __torch_function__ doesn't work inside hooks, so we must
-                # directly call the registered function.
-                self.value = self.dtype.torch_funcs[torch.add](
-                    self.value, grad_inputs[arg_index].as_subclass(self.dtype)
-                )
+                # re-enable it manually with a context manager.
+                with torch._C._EnableTorchFunction():
+                    self.value += grad_inputs[arg_index].as_subclass(self.dtype)
 
         edge.node.register_hook(edge_hook)
 
