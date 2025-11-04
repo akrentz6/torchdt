@@ -52,6 +52,33 @@ class OpsBase:
     def div(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
         raise NotImplementedError
 
+    @classmethod
+    def pow(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def sign(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def neg(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def ge(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def gt(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def le(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def lt(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
 
     # ========== 'Base' operations with default implementations ==========
 

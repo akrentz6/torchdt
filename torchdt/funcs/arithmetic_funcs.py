@@ -5,6 +5,7 @@ from torchdt.ops.arithmetic_ops import (
     DTSubFunction,
     DTMulFunction,
     DTDivFunction,
+    DTPowFunction,
     DTSquareFunction,
 )
 
@@ -39,6 +40,14 @@ def dt_mul(input, other, *, out=None):
 @DType.register_func(torch.div, torch.Tensor.div)
 def dt_div(input, other, *, out=None):
     result = DTDivFunction.apply(input, other)
+
+    if out is not None:
+        return out.copy_(result)
+    return result
+
+@DType.register_func(torch.pow, torch.Tensor.pow)
+def dt_pow(input, exponent, *, out=None):
+    result = DTPowFunction.apply(input, exponent)
 
     if out is not None:
         return out.copy_(result)

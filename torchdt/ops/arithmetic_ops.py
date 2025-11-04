@@ -76,6 +76,26 @@ class DTDivFunction(DTFunction):
 
         return grad_x, grad_y
 
+class DTPowFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, y):
+        return ops.pow(x, y)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, y = inputs
+        ctx.save_for_backward(x, y, output)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        x, y, output = ctx.saved_tensors
+
+        grad_x = ops.mul(grad_output, ops.mul(ops.div(output, x), y))
+        grad_y = ops.mul(grad_output, ops.mul(output, ops.log(x)))
+
+        return grad_x, grad_y
+
 @register_base_op("square")
 def dt_square(ops, x):
     return ops.mul(x, x)
