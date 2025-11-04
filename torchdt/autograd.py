@@ -157,7 +157,7 @@ class DTFunction(torch.autograd.Function):
 
         for i, arg in enumerate(args):
             if isinstance(arg, DType):
-                subtypes.append(type(arg))
+                subtypes.append(arg.__class__)
                 input_indices.append(i)
                 prepped_inputs.append(arg._float)
             else:

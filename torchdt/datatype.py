@@ -91,7 +91,7 @@ class DType(Tensor):
         cls.int_dtype = _int_dtype[cls.bit_width]
 
         if isinstance(data, DType):
-            if type(data) == cls:
+            if data.__class__ == cls:
                 payload = data
             else:
                 payload = data.to_float(data._float)
@@ -161,7 +161,7 @@ class DType(Tensor):
         super().requires_grad_(requires_grad)
 
         if requires_grad:
-            self._grad_accum_hook = GradAccumHook(self, type(self))
+            self._grad_accum_hook = GradAccumHook(self, self.__class__)
 
         return self
 
@@ -183,10 +183,10 @@ class DType(Tensor):
                 raise RuntimeError("grad can be implicitly created only for scalar outputs")
 
             # create a tensor of ones in the same dtype as self
-            gradient = type(self)(torch.ones(self.size()))
+            gradient = self.__class__(torch.ones(self.size()))
 
-        elif type(gradient) != type(self):
-            gradient = type(self)(gradient, requires_grad=False)
+        elif gradient.__class__ != self.__class__:
+            gradient = self.__class__(gradient, requires_grad=False)
 
         # manually set the incoming gradients for the output
         # tensor since no hooks will be registered for it.
@@ -204,7 +204,7 @@ class DType(Tensor):
         """The gradient of this DType tensor."""
         if super().grad is None:
             return None
-        return super().grad.as_subclass(type(self))
+        return super().grad.as_subclass(self.__class__)
 
     @classmethod
     def register_func(cls, *torch_funcs: Callable):
