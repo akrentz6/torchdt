@@ -199,6 +199,13 @@ class DType(Tensor):
             inputs=inputs
         )
 
+    @property
+    def grad(self):
+        """The gradient of this DType tensor."""
+        if super().grad is None:
+            return None
+        return super().grad.as_subclass(type(self))
+
     @classmethod
     def register_func(cls, *torch_funcs: Callable):
         """Decorator to register a custom implementation for a torch.* function."""
