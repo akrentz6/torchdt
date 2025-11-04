@@ -28,7 +28,6 @@ no_override_funcs = {
     Tensor.register_hook,
     Tensor.register_post_accumulate_grad_hook,
     Tensor.size,
-    torch.zeros_like,
 }
 # for functions that should not be overridden by __torch_function__
 # where it is hard to reference them, so we do it by name
@@ -39,7 +38,8 @@ no_override_func_names = {
 class GradAccumHook:
 
     def __init__(self, tensor, dtype):
-        self.value = dtype(torch.zeros_like(tensor), requires_grad=False)
+        self.value = dtype(torch.zeros(tensor.size()), requires_grad=False)
+        self.dtype = dtype
 
         self.grad_hook_handle = tensor.register_hook(self.grad_hook)
         if tensor.is_leaf:
@@ -57,7 +57,11 @@ class GradAccumHook:
 
         def edge_hook(grad_inputs, grad_outputs):
             if grad_inputs[arg_index] is not None:
-                self.value += type(self.value)(grad_inputs[arg_index], internal=True)
+                # __torch_function__ doesn't work inside hooks, so we must
+                # directly call the registered function.
+                self.value = self.dtype.torch_funcs[torch.add](
+                    self.value, grad_inputs[arg_index].as_subclass(self.dtype)
+                )
 
         edge.node.register_hook(edge_hook)
 
