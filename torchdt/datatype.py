@@ -60,7 +60,7 @@ class GradAccumHook:
                 # __torch_function__ doesn't work inside hooks, so we must
                 # re-enable it manually with a context manager.
                 with torch._C._EnableTorchFunction():
-                    self.value += grad_inputs[arg_index].as_subclass(self.dtype)
+                    self.value = self.value + grad_inputs[arg_index].as_subclass(self.dtype)
 
         edge.node.register_hook(edge_hook)
 
@@ -200,10 +200,11 @@ class DType(Tensor):
         )
 
     @classmethod
-    def register_func(cls, torch_func: Callable):
+    def register_func(cls, *torch_funcs: Callable):
         """Decorator to register a custom implementation for a torch.* function."""
         def decorator(func: Callable) -> Callable:
-            cls.torch_funcs[torch_func] = func
+            for torch_func in torch_funcs:
+                cls.torch_funcs[torch_func] = func
             return func
         return decorator
 
