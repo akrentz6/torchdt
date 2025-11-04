@@ -59,6 +59,29 @@ class OpsBase:
     def full_like(cls, x, fill_value):
         return torch.full_like(x, cls.from_float(fill_value), dtype=cls.dtype.int_dtype)
 
+    @classmethod
+    def sum_to_size(cls, x: InternalTensor, target_size: torch.Size) -> InternalTensor:
+        if list(x.shape) == list(target_size):
+            return x
+
+        x_shape = list(x.shape)
+        target_shape = list(target_size)
+        if x.dim() > len(target_shape):
+            target_shape = [1] * (x.dim() - len(target_shape)) + target_shape
+
+        # reduce dimensions that were broadcasted
+        leading = x.dim() - len(target_shape)
+        if leading > 0:
+            x = cls.sum(x, dim=tuple(range(leading)), keepdim=False)
+            x_shape = x_shape[leading:]
+
+        # reduce dimensions where target size is 1 but tensor has a larger size
+        reduce_dims = [i for i, (ts, gs) in enumerate(zip(x_shape, target_shape)) if gs == 1 and ts != 1]
+        if reduce_dims:
+            x = cls.sum(x, dim=tuple(reduce_dims), keepdim=True)
+
+        return x.reshape(target_size)
+
     # ========== Operations to be implemented by subclasses ==========
 
     @classmethod
@@ -106,6 +129,10 @@ class OpsBase:
         raise NotImplementedError
 
     # ========== 'Base' operations with default implementations ==========
+
+    @classmethod
+    def sum(cls, x: InternalTensor, dim=None, keepdim=False) -> InternalTensor:
+        raise NotImplementedError
 
     @classmethod
     def square(cls, x: InternalTensor) -> InternalTensor:
