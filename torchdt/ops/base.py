@@ -1,3 +1,4 @@
+import torch
 from torch import Tensor, CharTensor, ShortTensor, IntTensor, LongTensor
 from typing import Union, Callable
 
@@ -33,6 +34,30 @@ class OpsBase:
     @classmethod
     def to_float(cls, x):
         return cls.dtype.to_float(x)
+
+    @classmethod
+    def zeros(cls, size):
+        return torch.full(size, cls.from_float(0.0), dtype=cls.dtype.int_dtype)
+
+    @classmethod
+    def zeros_like(cls, x):
+        return torch.full_like(x, cls.from_float(0.0), dtype=cls.dtype.int_dtype)
+
+    @classmethod
+    def ones(cls, size):
+        return torch.full(size, cls.from_float(1.0), dtype=cls.dtype.int_dtype)
+
+    @classmethod
+    def ones_like(cls, x):
+        return torch.full_like(x, cls.from_float(1.0), dtype=cls.dtype.int_dtype)
+
+    @classmethod
+    def full(cls, size, fill_value):
+        return torch.full(size, cls.from_float(fill_value), dtype=cls.dtype.int_dtype)
+
+    @classmethod
+    def full_like(cls, x, fill_value):
+        return torch.full_like(x, cls.from_float(fill_value), dtype=cls.dtype.int_dtype)
 
     # ========== Operations to be implemented by subclasses ==========
 
