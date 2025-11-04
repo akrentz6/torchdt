@@ -79,3 +79,20 @@ class DTDivFunction(DTFunction):
 @register_base_op("square")
 def dt_square(ops, x):
     return ops.mul(x, x)
+
+class DTSquareFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x):
+        return ops.square(x)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, = inputs
+        ctx.save_for_backward(x)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        x, = ctx.saved_tensors
+        grad_x = ops.mul(grad_output, ops.mul(ops.from_float(2), x))
+        return grad_x

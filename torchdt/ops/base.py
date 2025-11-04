@@ -1,4 +1,4 @@
-from torch import CharTensor, ShortTensor, IntTensor, LongTensor
+from torch import Tensor, CharTensor, ShortTensor, IntTensor, LongTensor
 from typing import Union, Callable
 
 InternalTensor = Union[CharTensor, ShortTensor, IntTensor, LongTensor]
@@ -23,6 +23,16 @@ def register_base_op(method: str) -> Callable:
     return decorator
 
 class OpsBase:
+
+    # ========== Useful helper functions ==========
+
+    @classmethod
+    def from_float(cls, x):
+        return cls.dtype(x)._int
+
+    @classmethod
+    def to_float(cls, x):
+        return cls.dtype.to_float(x)
 
     # ========== Operations to be implemented by subclasses ==========
 
