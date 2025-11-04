@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from typing import Any, Optional, Union, Type
+from typing import Any, Optional, Union, Type, Dict, Callable
 import sys
 
 from torchdt.ops import OpsBase, register_op
@@ -17,6 +17,23 @@ _int_dtype = {
     16: torch.int16,
     32: torch.int32,
     64: torch.int64
+}
+
+# for functions that should not be overridden by __torch_function__
+no_override_funcs = {
+    Tensor.backward,
+    Tensor.copy_,
+    Tensor.numel,
+    Tensor.requires_grad_,
+    Tensor.register_hook,
+    Tensor.register_post_accumulate_grad_hook,
+    Tensor.size,
+    torch.zeros_like,
+}
+# for functions that should not be overridden by __torch_function__
+# where it is hard to reference them, so we do it by name
+no_override_func_names = {
+    "__get__",
 }
 
 class GradAccumHook:
@@ -40,7 +57,6 @@ class GradAccumHook:
 
         def edge_hook(grad_inputs, grad_outputs):
             if grad_inputs[arg_index] is not None:
-                print(type(self.value)(grad_inputs[arg_index], internal=True))
                 self.value += type(self.value)(grad_inputs[arg_index], internal=True)
 
         edge.node.register_hook(edge_hook)
@@ -57,6 +73,7 @@ class DType(Tensor):
     but expose their own semantics.
     """
     bit_width: int = 32 # subclasses override
+    torch_funcs: Dict[Callable, Callable] = {} # mapping from 'torch.' function to custom implementation
 
     def __new__(
             cls,
@@ -70,7 +87,13 @@ class DType(Tensor):
         cls.float_dtype = _float_dtype[cls.bit_width]
         cls.int_dtype = _int_dtype[cls.bit_width]
 
-        if isinstance(data, torch.Tensor):
+        if isinstance(data, DType):
+            if type(data) == cls:
+                payload = data
+            else:
+                payload = data.to_float(data._float)
+                payload = ToDType.apply(payload, cls)
+        elif isinstance(data, torch.Tensor):
             if internal:
                 if data.dtype != cls.float_dtype:
                     payload = data.view(cls.float_dtype)
@@ -172,6 +195,28 @@ class DType(Tensor):
             create_graph=create_graph,
             inputs=inputs
         )
+
+    @classmethod
+    def register_func(cls, torch_func: Callable):
+        """Decorator to register a custom implementation for a torch.* function."""
+        def decorator(func: Callable) -> Callable:
+            cls.torch_funcs[torch_func] = func
+            return func
+        return decorator
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=..., kwargs=None):
+        """Override to handle torch.* functions for this DType subclass."""
+
+        if kwargs is None:
+            kwargs = {}
+
+        if func not in cls.torch_funcs:
+            if func in no_override_funcs or func.__name__ in no_override_func_names:
+                return super().__torch_function__(func, types, args, kwargs)
+            raise NotImplementedError(f"{cls.__name__} has no implementation for torch function '{func.__name__}'.")
+
+        return cls.torch_funcs[func](*args, **kwargs)
 
     @classmethod
     def register_op(cls, method: str):
