@@ -30,7 +30,8 @@ def dt_sub(input, other, *, alpha=1, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.sum, torch.Tensor.sum)
+@DType.register_func(torch.sum, torch.Tensor.sum,
+                     cast=("input",))
 def dt_sum(input, dim=None, keepdim=False, *, out=None):
     result = DTSumFunction.apply(input, dim, keepdim)
 
@@ -38,7 +39,8 @@ def dt_sum(input, dim=None, keepdim=False, *, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.mul, torch.Tensor.mul)
+@DType.register_func(torch.mul, torch.Tensor.mul,
+                     cast=("input", "other"))
 def dt_mul(input, other, *, out=None):
     result = DTMulFunction.apply(input, other)
 
@@ -46,7 +48,8 @@ def dt_mul(input, other, *, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.div, torch.Tensor.div)
+@DType.register_func(torch.div, torch.Tensor.div,
+                     cast=("input", "other"))
 def dt_div(input, other, *, out=None):
     result = DTDivFunction.apply(input, other)
 
@@ -54,7 +57,8 @@ def dt_div(input, other, *, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.pow, torch.Tensor.pow)
+@DType.register_func(torch.pow, torch.Tensor.pow,
+                     cast=("input", "exponent"))
 def dt_pow(input, exponent, *, out=None):
     result = DTPowFunction.apply(input, exponent)
 
@@ -62,7 +66,8 @@ def dt_pow(input, exponent, *, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.square, torch.Tensor.square)
+@DType.register_func(torch.square, torch.Tensor.square,
+                     cast=("input"))
 def dt_square(input, *, out=None):
     result = DTSquareFunction.apply(input)
 

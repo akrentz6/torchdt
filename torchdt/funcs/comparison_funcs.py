@@ -7,7 +7,8 @@ from torchdt.ops.comparison_ops import (
     DTLtFunction,
 )
 
-@DType.register_func(torch.ge, torch.Tensor.ge)
+@DType.register_func(torch.ge, torch.Tensor.ge,
+                     cast=("input", "other"))
 def dt_ge(input, other, *, out=None):
     result = DTGeFunction.apply(input, other)
 
@@ -15,7 +16,8 @@ def dt_ge(input, other, *, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.gt, torch.Tensor.gt)
+@DType.register_func(torch.gt, torch.Tensor.gt,
+                     cast=("input", "other"))
 def dt_gt(input, other, *, out=None):
     result = DTGtFunction.apply(input, other)
 
@@ -23,7 +25,8 @@ def dt_gt(input, other, *, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.le, torch.Tensor.le)
+@DType.register_func(torch.le, torch.Tensor.le,
+                     cast=("input", "other"))
 def dt_le(input, other, *, out=None):
     result = DTLeFunction.apply(input, other)
 
@@ -31,7 +34,8 @@ def dt_le(input, other, *, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.lt, torch.Tensor.lt)
+@DType.register_func(torch.lt, torch.Tensor.lt,
+                     cast=("input", "other"))
 def dt_lt(input, other, *, out=None):
     result = DTLtFunction.apply(input, other)
 

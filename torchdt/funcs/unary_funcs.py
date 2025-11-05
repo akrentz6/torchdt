@@ -5,7 +5,8 @@ from torchdt.ops.unary_ops import (
     DTNegFunction,
 )
 
-@DType.register_func(torch.sign, torch.Tensor.sign)
+@DType.register_func(torch.sign, torch.Tensor.sign,
+                     cast=("input",))
 def dt_sign(input, *, out=None):
     result = DTSignFunction.apply(input)
 
@@ -13,7 +14,8 @@ def dt_sign(input, *, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.neg, torch.Tensor.neg)
+@DType.register_func(torch.neg, torch.Tensor.neg,
+                     cast=("input",))
 def dt_neg(input, *, out=None):
     result = DTNegFunction.apply(input)
 
