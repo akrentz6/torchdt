@@ -1,7 +1,8 @@
 import torch
 from torch import Tensor
-from typing import Any, Optional, Union, Type, Dict, Callable
-import sys
+from typing import Any, Optional, Union, Type, Dict, Callable, Tuple
+import functools
+import inspect
 
 from torchdt.ops import OpsBase, register_op
 
@@ -207,12 +208,45 @@ class DType(Tensor):
         return super().grad.as_subclass(self.__class__)
 
     @classmethod
-    def register_func(cls, *torch_funcs: Callable):
+    def register_func(
+        cls,
+        *torch_funcs: Callable,
+        cast: Tuple[Union[str, int]] = ()):
         """Decorator to register a custom implementation for a torch.* function."""
+
         def decorator(func: Callable) -> Callable:
+            sig = inspect.signature(func)
+            param_names = list(sig.parameters.keys())
+
+            def id_to_name(identifier: Union[str, int]):
+                if isinstance(identifier, int):
+                    try:
+                        return param_names[identifier]
+                    except IndexError:
+                        raise IndexError(f"positional index {identifier} out of range for {func.__name__}")
+                return identifier # assume string
+
+            cast_names = [id_to_name(x) for x in cast]
+
+            @functools.wraps(func)
+            def wrapped_func(*args, _dtype_cls=None, **kwargs):
+                if _dtype_cls is None:
+                    raise ValueError("_dtype_cls must be provided when calling registered torch function.")
+
+                bound = sig.bind_partial(*args, **kwargs)
+                for pname in cast_names:
+                    if pname in bound.arguments:
+                        if bound.arguments[pname] is not None and type(bound.arguments[pname]) != _dtype_cls:
+                            # convert argument to the correct DType subclass - can also handle lists, tuples, etc?
+                            bound.arguments[pname] = _dtype_cls(bound.arguments[pname])
+
+                return func(*bound.args, **bound.kwargs)
+
             for torch_func in torch_funcs:
-                cls.torch_funcs[torch_func] = func
-            return func
+                cls.torch_funcs[torch_func] = wrapped_func
+
+            return wrapped_func
+
         return decorator
 
     @classmethod
@@ -227,7 +261,8 @@ class DType(Tensor):
                 return super().__torch_function__(func, types, args, kwargs)
             raise NotImplementedError(f"{cls.__name__} has no implementation for torch function '{func.__name__}'.")
 
-        return cls.torch_funcs[func](*args, **kwargs)
+        # pass cls to cast any floating point or number arguments to tensors of this DType
+        return cls.torch_funcs[func](*args, _dtype_cls=cls, **kwargs)
 
     @classmethod
     def register_op(cls, method: str):
