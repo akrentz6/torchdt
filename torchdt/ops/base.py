@@ -113,19 +113,19 @@ class OpsBase:
         raise NotImplementedError
 
     @classmethod
-    def ge(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+    def ge(cls, x: InternalTensor, y: InternalTensor) -> Tensor:
         raise NotImplementedError
 
     @classmethod
-    def gt(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+    def gt(cls, x: InternalTensor, y: InternalTensor) -> Tensor:
         raise NotImplementedError
 
     @classmethod
-    def le(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+    def le(cls, x: InternalTensor, y: InternalTensor) -> Tensor:
         raise NotImplementedError
 
     @classmethod
-    def lt(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+    def lt(cls, x: InternalTensor, y: InternalTensor) -> Tensor:
         raise NotImplementedError
 
     # ========== 'Base' operations with default implementations ==========
@@ -172,4 +172,52 @@ class OpsBase:
 
     @classmethod
     def transpose(cls, A: InternalTensor, dim0: int, dim1: int) -> InternalTensor:
+        raise NotImplementedError
+
+
+    @classmethod
+    def equal(cls, x: InternalTensor, y: InternalTensor) -> bool:
+        raise NotImplementedError
+
+    @classmethod
+    def eq(cls, x: InternalTensor, y: InternalTensor) -> Tensor:
+        raise NotImplementedError
+
+    @classmethod
+    def ne(cls, x: InternalTensor, y: InternalTensor) -> Tensor:
+        raise NotImplementedError
+
+    @classmethod
+    def isclose(cls, x: InternalTensor, y: InternalTensor,
+                rtol: InternalTensor, atol: InternalTensor) -> Tensor:
+        raise NotImplementedError
+
+    @classmethod
+    def allclose(cls, x: InternalTensor, y: InternalTensor,
+                 rtol: InternalTensor, atol: InternalTensor) -> Tensor:
+        raise NotImplementedError
+
+    @classmethod
+    def any(cls, x: InternalTensor, dim=None, keepdim=False) -> Tensor:
+        raise NotImplementedError
+
+    @classmethod
+    def all(cls, x: InternalTensor, dim=None, keepdim=False) -> Tensor:
+        raise NotImplementedError
+
+    @classmethod
+    def isin(cls, x: InternalTensor, y: InternalTensor,
+             assume_unique = False, invert = False) -> Tensor:
+        raise NotImplementedError
+
+    @classmethod
+    def maximum(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def minimum(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def clamp(cls, x: InternalTensor, min: InternalTensor = None, max: InternalTensor = None) -> InternalTensor:
         raise NotImplementedError
