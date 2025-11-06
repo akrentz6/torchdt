@@ -137,3 +137,39 @@ class OpsBase:
     @classmethod
     def square(cls, x: InternalTensor) -> InternalTensor:
         raise NotImplementedError
+
+    @classmethod
+    def sqrt(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def reciprocal(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def exp(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def log(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def prod(cls, x: InternalTensor, dim=None, keepdim=False) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def mean(cls, x: InternalTensor, dim=None, keepdim=False) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def var(cls, x: InternalTensor, correction: InternalTensor, dim=None, keepdim=False) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def matmul(cls, A: InternalTensor, B: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def transpose(cls, A: InternalTensor, dim0: int, dim1: int) -> InternalTensor:
+        raise NotImplementedError
