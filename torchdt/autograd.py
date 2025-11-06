@@ -84,7 +84,7 @@ def setup_context_decorator(func, cls):
         ctx._input_indices = cls.input_indices
 
         cast_inputs = _cast_values(inputs, cls.input_indices, _cast_int, cls.dtype)
-        cast_output = _cast_values(output, cls.output_indices, _cast_float, cls.dtype)
+        cast_output = _cast_values(output, cls.output_indices, _cast_int, cls.dtype)
         return func(ctx, ops, cast_inputs, cast_output, **kwargs)
 
     return wrapper
