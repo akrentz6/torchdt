@@ -109,10 +109,6 @@ class OpsBase:
         raise NotImplementedError
 
     @classmethod
-    def neg(cls, x: InternalTensor) -> InternalTensor:
-        raise NotImplementedError
-
-    @classmethod
     def ge(cls, x: InternalTensor, y: InternalTensor) -> Tensor:
         raise NotImplementedError
 
@@ -172,6 +168,11 @@ class OpsBase:
 
     @classmethod
     def transpose(cls, A: InternalTensor, dim0: int, dim1: int) -> InternalTensor:
+        raise NotImplementedError
+
+
+    @classmethod
+    def neg(cls, x: InternalTensor) -> InternalTensor:
         raise NotImplementedError
 
 
