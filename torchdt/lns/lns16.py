@@ -44,3 +44,142 @@ class LNS16(DType, bit_width=16):
                     packed == NEG_INF, float('-inf'),
                     float_t)))
         return float_t.to(torch.float64)
+
+@LNS16.register_op("add")
+def lns16_add(ops, x, y):
+    max_operand = torch.max(x, y)
+
+    abs_diff = torch.abs((x >> 1) - (y >> 1))
+    sign_diff = (x ^ y) & 1
+
+    power_term = torch.pow(base, -abs_diff)
+    magnitude = torch.abs(1.0 - 2.0 * sign_diff + power_term)
+
+    log_term = torch.log(magnitude) / torch.log(base)
+    sbdb = torch.round(log_term).to(torch.int16) << 1
+
+    return torch.where(
+        x == ZERO,
+        y, torch.where(
+            y == ZERO,
+            x, max_operand + sbdb))
+
+@LNS16.register_op("sub")
+def lns16_sub(ops, x, y):
+    return ops.add(x, ops.neg(y))
+
+@LNS16.register_op("mul")
+def lns16_mul(ops, x, y):
+    return torch.where(
+        x == ZERO,
+        ZERO, torch.where(
+            y == ZERO,
+            ZERO, (x + y - (y & 1)) ^ (y & 1)))
+
+@LNS16.register_op("div")
+def lns16_div(ops, x, y):
+    return torch.where(
+        x == ZERO,
+        ZERO, torch.where(
+            y == ZERO,
+            torch.where(
+                ops.gt(x, ZERO), POS_INF, NEG_INF),
+                (x - y + (y & 1)) ^ (y & 1)))
+
+@LNS16.register_op("pow")
+def lns16_pow(ops, x, y):
+    y_float = ops.to_float(y)
+    return ((x & (-2)) * y_float).to(torch.int16) & (-2)
+
+@LNS16.register_op("sign")
+def lns16_sign(ops, x):
+    return torch.where(
+        x == ZERO, ZERO,
+        torch.where(
+            (x & 1) == 1,
+            ops.from_float(-1.0),
+            ops.from_float(1.0)))
+
+@LNS16.register_op("ge")
+def lns16_ge(ops, x, y):
+    x_log, y_log = x >> 1, y >> 1
+    x_sign, y_sign = x & 1, y & 1
+
+    both_pos = (x_sign == 0) & (y_sign == 0)
+    result_both_pos = torch.ge(x_log, y_log)
+
+    x_pos_y_neg = (x_sign == 0) & (y_sign == 1)
+    result_x_pos = torch.ones_like(x_sign, dtype=torch.bool)
+
+    x_neg_y_pos = (x_sign == 1) & (y_sign == 0)
+    result_x_neg = torch.zeros_like(x_sign, dtype=torch.bool)
+
+    # no need to check explicitly for both negative case, as it's the final case
+    result_both_neg = torch.ge(y_log, x_log)
+
+    return torch.where(both_pos, result_both_pos,
+        torch.where(x_pos_y_neg, result_x_pos,
+        torch.where(x_neg_y_pos, result_x_neg, result_both_neg)))
+
+@LNS16.register_op("gt")
+def lns16_gt(ops, x, y):
+    x_log, y_log = x >> 1, y >> 1
+    x_sign, y_sign = x & 1, y & 1
+
+    both_pos = (x_sign == 0) & (y_sign == 0)
+    result_both_pos = torch.gt(x_log, y_log)
+
+    x_pos_y_neg = (x_sign == 0) & (y_sign == 1)
+    result_x_pos = torch.ones_like(x_sign, dtype=torch.bool)
+
+    x_neg_y_pos = (x_sign == 1) & (y_sign == 0)
+    result_x_neg = torch.zeros_like(x_sign, dtype=torch.bool)
+
+    # no need to check explicitly for both negative case, as it's the final case
+    result_both_neg = torch.gt(y_log, x_log)
+
+    return torch.where(both_pos, result_both_pos,
+        torch.where(x_pos_y_neg, result_x_pos,
+        torch.where(x_neg_y_pos, result_x_neg, result_both_neg)))
+
+@LNS16.register_op("le")
+def lns16_le(ops, x, y):
+    x_log, y_log = x >> 1, y >> 1
+    x_sign, y_sign = x & 1, y & 1
+
+    both_pos = (x_sign == 0) & (y_sign == 0)
+    result_both_pos = torch.le(x_log, y_log)
+
+    x_pos_y_neg = (x_sign == 0) & (y_sign == 1)
+    result_x_pos = torch.zeros_like(x_sign, dtype=torch.bool)
+
+    x_neg_y_pos = (x_sign == 1) & (y_sign == 0)
+    result_x_neg = torch.ones_like(x_sign, dtype=torch.bool)
+
+    # no need to check explicitly for both negative case, as it's the final case
+    result_both_neg = torch.le(y_log, x_log)
+
+    return torch.where(both_pos, result_both_pos,
+        torch.where(x_pos_y_neg, result_x_pos,
+        torch.where(x_neg_y_pos, result_x_neg, result_both_neg)))
+
+@LNS16.register_op("lt")
+def lns16_lt(ops, x, y):
+    x_log, y_log = x >> 1, y >> 1
+    x_sign, y_sign = x & 1, y & 1
+
+    both_pos = (x_sign == 0) & (y_sign == 0)
+    result_both_pos = torch.lt(x_log, y_log)
+
+    x_pos_y_neg = (x_sign == 0) & (y_sign == 1)
+    result_x_pos = torch.zeros_like(x_sign, dtype=torch.bool)
+
+    x_neg_y_pos = (x_sign == 1) & (y_sign == 0)
+    result_x_neg = torch.ones_like(x_sign, dtype=torch.bool)
+
+    # no need to check explicitly for both negative case, as it's the final case
+    result_both_neg = torch.lt(y_log, x_log)
+
+    return torch.where(both_pos, result_both_pos,
+        torch.where(x_pos_y_neg, result_x_pos,
+        torch.where(x_neg_y_pos, result_x_neg, result_both_neg)))
