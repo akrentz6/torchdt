@@ -175,6 +175,10 @@ class OpsBase:
     def neg(cls, x: InternalTensor) -> InternalTensor:
         raise NotImplementedError
 
+    @classmethod
+    def abs(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
 
     @classmethod
     def equal(cls, x: InternalTensor, y: InternalTensor) -> bool:
