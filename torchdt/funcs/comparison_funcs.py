@@ -15,6 +15,10 @@ from torchdt.ops.comparison_ops import (
     DTIsinFunction,
     DTMaximumFunction,
     DTMinimumFunction,
+    DTMaxFunction,
+    DTMinFunction,
+    DTArgmaxFunction,
+    DTArgminFunction,
     DTClampFunction,
 )
 
@@ -117,7 +121,7 @@ def dt_all(input, dim=None, keepdim=False, *, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.isin, torch.Tensor.isin,
+@DType.register_func(torch.isin,
                      cast=("elements", "test_elements"))
 def dt_isin(elements, test_elements, *, out=None):
     result = DTIsinFunction.apply(elements, test_elements)
@@ -139,6 +143,42 @@ def dt_maximum(input, other, *, out=None):
                      cast=("input", "other"))
 def dt_minimum(input, other, *, out=None):
     result = DTMinimumFunction.apply(input, other)
+
+    if out is not None:
+        return out.copy_(result)
+    return result
+
+@DType.register_func(torch.max, torch.Tensor.max,
+                     cast=("input",))
+def dt_max(input, dim=None, keepdim=False, *, out=None):
+    result = DTMaxFunction.apply(input, dim, keepdim)
+
+    if out is not None:
+        return out.copy_(result)
+    return result
+
+@DType.register_func(torch.min, torch.Tensor.min,
+                     cast=("input",))
+def dt_min(input, dim=None, keepdim=False, *, out=None):
+    result = DTMinFunction.apply(input, dim, keepdim)
+
+    if out is not None:
+        return out.copy_(result)
+    return result
+
+@DType.register_func(torch.argmax, torch.Tensor.argmax,
+                     cast=("input",))
+def dt_argmax(input, dim=None, keepdim=False, *, out=None):
+    result = DTArgmaxFunction.apply(input, dim, keepdim)
+
+    if out is not None:
+        return out.copy_(result)
+    return result
+
+@DType.register_func(torch.argmin, torch.Tensor.argmin,
+                     cast=("input",))
+def dt_argmin(input, dim=None, keepdim=False, *, out=None):
+    result = DTArgminFunction.apply(input, dim, keepdim)
 
     if out is not None:
         return out.copy_(result)

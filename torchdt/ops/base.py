@@ -224,5 +224,21 @@ class OpsBase:
         raise NotImplementedError
 
     @classmethod
+    def max(cls, x: InternalTensor, dim=None, keepdim=False) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def min(cls, x: InternalTensor, dim=None, keepdim=False) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def argmax(cls, x: InternalTensor, dim=None, keepdim=False) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def argmin(cls, x: InternalTensor, dim=None, keepdim=False) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
     def clamp(cls, x: InternalTensor, min: InternalTensor = None, max: InternalTensor = None) -> InternalTensor:
         raise NotImplementedError

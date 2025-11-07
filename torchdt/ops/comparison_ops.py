@@ -76,7 +76,7 @@ def dt_isclose(ops, x, y, rtol, atol):
     eps = ops.add(atol, ops.mul(rtol, ops.abs(y)))
     return ops.le(abs_diff, eps)
 
-class DTIsCloseFunction(DTNonDifferentiableFunction):
+class DTIscloseFunction(DTNonDifferentiableFunction):
 
     output_indices = []
 
@@ -202,6 +202,224 @@ class DTMinimumFunction(DTFunction):
         grad_y = ops.sum_to_size(grad_y, y.shape)
 
         return grad_x, grad_y
+
+# todo: use tree (pairwise) reduction for sufficiently large dims
+@register_base_op("max")
+def dt_max(ops, x, dim=None, keepdim=False):
+    return_indices = dim is not None
+
+    if dim is None:
+        x = x.view(-1)
+        dim = 0
+
+    # Initial running maximum (slice 0 along the reduction dimension)
+    out = x.select(dim, 0).clone()
+
+    # if we need to return indices
+    if return_indices:
+        max_idx = torch.zeros_like(out, dtype=torch.long)
+
+    # iterate once over the dimension we are reducing
+    for i in range(1, x.size(dim)):
+        candidate = x.select(dim, i)
+        mask = ops.gt(candidate, out) # where candidate > current_max
+        out = torch.where(mask, candidate, out)
+        if return_indices:
+            max_idx = torch.where(mask, torch.full_like(max_idx, i), max_idx)
+
+    if keepdim:
+        out = out.unsqueeze(dim)
+        if return_indices:
+            max_idx = max_idx.unsqueeze(dim)
+
+    if return_indices:
+        return torch.return_types.max((out, max_idx))
+    return out
+
+class DTMaxFunction(DTFunction):
+
+    output_indices = [0]
+
+    @staticmethod
+    def forward(ops, x, dim=None, keepdim=False):
+        return ops.max(x, dim, keepdim)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, dim, keepdim = inputs
+        if dim is None:
+            ctx.save_for_backward(x, output)
+        else:
+            _, indices = output
+            ctx.save_for_backward(x, indices)
+        ctx.dim = dim
+        ctx.keepdim = keepdim
+
+    @staticmethod
+    def backward(ctx, ops, grad_output, grad_indices=None): # grad_indices is not used
+        if ctx.dim is None:
+            x, result = ctx.saved_tensors
+
+            max_values = torch.eq(x, result)
+            grad_x = ops.div(grad_output, ops.from_float(max_values.sum()))
+
+            return torch.where(max_values, grad_x, ops.from_float(0.0)), None, None, None
+
+        x, indices = ctx.saved_tensors
+
+        grad_x = ops.zeros_like(x)
+        if ctx.keepdim:
+            idx_expanded  = indices
+            grad_expanded = grad_output
+        else:
+            idx_expanded  = indices.unsqueeze(ctx.dim)
+            grad_expanded = grad_output.unsqueeze(ctx.dim)
+
+        grad_x.scatter_(ctx.dim,
+                        idx_expanded.expand(x.shape),
+                        grad_expanded.expand(x.shape))
+
+        return grad_x, None, None
+
+# todo: use tree (pairwise) reduction for sufficiently large dims
+@register_base_op("min")
+def dt_min(ops, x, dim=None, keepdim=False):
+    return_indices = dim is not None
+
+    if dim is None:
+        x = x.view(-1)
+        dim = 0
+
+    # Initial running minimum (slice 0 along the reduction dimension)
+    out = x.select(dim, 0).clone()
+
+    # if we need to return indices
+    if return_indices:
+        min_idx = torch.zeros_like(out, dtype=torch.long)
+
+    # iterate once over the dimension we are reducing
+    for i in range(1, x.size(dim)):
+        candidate = x.select(dim, i)
+        mask = ops.lt(candidate, out) # where candidate < current_min
+        out = torch.where(mask, candidate, out)
+        if return_indices:
+            min_idx = torch.where(mask, torch.full_like(min_idx, i), min_idx)
+
+    if keepdim:
+        out = out.unsqueeze(dim)
+        if return_indices:
+            min_idx = min_idx.unsqueeze(dim)
+
+    if return_indices:
+        return torch.return_types.min((out, min_idx))
+    return out
+
+class DTMinFunction(DTFunction):
+
+    output_indices = [0]
+
+    @staticmethod
+    def forward(ops, x, dim=None, keepdim=False):
+        return ops.min(x, dim, keepdim)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, dim, keepdim = inputs
+        if dim is None:
+            ctx.save_for_backward(x, output)
+        else:
+            _, indices = output
+            ctx.save_for_backward(x, indices)
+        ctx.dim = dim
+        ctx.keepdim = keepdim
+
+    @staticmethod
+    def backward(ctx, ops, grad_output, grad_indices=None): # grad_indices is not used
+        if ctx.dim is None:
+            x, result = ctx.saved_tensors
+
+            min_values = torch.eq(x, result)
+            grad_x = ops.div(grad_output, ops.from_float(min_values.sum()))
+
+            return torch.where(min_values, grad_x, ops.from_float(0.0)), None, None, None
+
+        x, indices = ctx.saved_tensors
+
+        grad_x = ops.zeros_like(x)
+        if ctx.keepdim:
+            idx_expanded  = indices
+            grad_expanded = grad_output
+        else:
+            idx_expanded  = indices.unsqueeze(ctx.dim)
+            grad_expanded = grad_output.unsqueeze(ctx.dim)
+
+        grad_x.scatter_(ctx.dim,
+                        idx_expanded.expand(x.shape),
+                        grad_expanded.expand(x.shape))
+
+        return grad_x, None, None
+
+@register_base_op("argmax")
+def dt_argmax(ops, x, dim=None, keepdim=False):
+    if dim is None:
+        x = x.view(-1)
+        dim = 0
+
+    elif dim < 0:
+        dim += x.dim()
+
+    max_val = x.select(dim, 0).clone()
+    max_idx = torch.zeros_like(max_val, dtype=torch.long)
+
+    for i in range(1, x.size(dim)):
+        candidate = x.select(dim, i)
+        mask = ops.gt(candidate, max_val) # candidate > current best
+        max_val = torch.where(mask, candidate, max_val)
+        max_idx = torch.where(mask, torch.full_like(max_idx, i), max_idx)
+
+    if keepdim:
+        max_idx = max_idx.unsqueeze(dim)
+
+    return max_idx
+
+class DTArgmaxFunction(DTNonDifferentiableFunction):
+
+    output_indices = []
+
+    @staticmethod
+    def forward(ops, x, dim=None, keepdim=False):
+        return ops.argmax(x, dim, keepdim)
+
+@register_base_op("argmin")
+def dt_argmin(ops, x, dim=None, keepdim=False):
+    if dim is None:
+        x = x.view(-1)
+        dim = 0
+
+    elif dim < 0:
+        dim += x.dim()
+
+    min_val = x.select(dim, 0).clone()
+    min_idx = torch.zeros_like(min_val, dtype=torch.long)
+
+    for i in range(1, x.size(dim)):
+        candidate = x.select(dim, i)
+        mask = ops.lt(candidate, min_val) # candidate < current best
+        min_val = torch.where(mask, candidate, min_val)
+        min_idx = torch.where(mask, torch.full_like(min_idx, i), min_idx)
+
+    if keepdim:
+        min_idx = min_idx.unsqueeze(dim)
+
+    return min_idx
+
+class DTArgminFunction(DTNonDifferentiableFunction):
+
+    output_indices = []
+
+    @staticmethod
+    def forward(ops, x, dim=None, keepdim=False):
+        return ops.argmin(x, dim, keepdim)
 
 @register_base_op("clamp")
 def dt_clamp(ops, x, min=None, max=None):
