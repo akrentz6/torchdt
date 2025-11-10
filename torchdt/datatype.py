@@ -4,6 +4,7 @@ from typing import Any, Optional, Union, Type, Dict, Callable, Tuple
 import functools
 import inspect
 
+from torchdt.transforms import register_collate_dtype_fn
 from torchdt.ops import OpsBase, register_op
 
 _float_dtype = {
@@ -134,6 +135,10 @@ class DType(Tensor):
 
         if cls is DType:
             return # don't register base class
+
+        # tell the collate function to handle this DType
+        # this is used for DataLoader batching
+        register_collate_dtype_fn(cls)
 
         # create a subclass of Ops for this DType
         ops_name = f"{cls.__name__}Ops"
