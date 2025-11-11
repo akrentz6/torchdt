@@ -242,3 +242,48 @@ class OpsBase:
     @classmethod
     def clamp(cls, x: InternalTensor, min: InternalTensor = None, max: InternalTensor = None) -> InternalTensor:
         raise NotImplementedError
+
+
+    @classmethod
+    def relu(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def leaky_relu(cls, x: InternalTensor, negative_slope: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def threshold(cls, x: InternalTensor, threshold: InternalTensor, value: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def tanh(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def sigmoid(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def logsigmoid(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def softmin(cls, x: InternalTensor, dim: int = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def softmax(cls, x: InternalTensor, dim: int = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def log_softmax(cls, x: InternalTensor, dim: int = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def hardtanh(cls, x: InternalTensor, min_val: InternalTensor, max_val: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def glu(cls, x: InternalTensor, dim: int = -1) -> InternalTensor:
+        raise NotImplementedError
