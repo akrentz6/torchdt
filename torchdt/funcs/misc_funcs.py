@@ -1,3 +1,4 @@
+import math
 import torch
 from torchdt import DType
 from torchdt.ops.misc_ops import (
@@ -10,6 +11,12 @@ from torchdt.ops.misc_ops import (
     DTChunkFunction,
     DTWhereFunction,
     DTPadFunction,
+    DTGetItemFunction,
+    DTSetItemFunction,
+    DTToFunction,
+    DTViewFunction,
+    DTContiguousFunction,
+    DTRepeatFunction,
 )
 
 @DType.register_func(torch.broadcast_to, torch.Tensor.expand,
@@ -68,3 +75,41 @@ def dt_where(condition, input, other, *, out=None):
                      cast=("input", "value"))
 def dt_pad(input, pad, mode="constant", value=0):
     return DTPadFunction.apply(input, pad, mode, value)
+
+@DType.register_func(torch.Tensor.__getitem__,
+                     cast=("input",))
+def dt_getitem(input, index):
+    return DTGetItemFunction.apply(input, index)
+
+# turns an index into a set of index tensors for each dimension
+def _make_index_tensors(index, shape):
+    flat_count = math.prod(shape)
+    labels = torch.arange(flat_count).reshape(shape)
+    flat_idx = labels[index].reshape(-1)
+    return torch.unravel_index(flat_idx, shape)
+
+@DType.register_func(torch.Tensor.__setitem__,
+                     cast=("input", "value"))
+def dt_setitem(input, index, value):
+    index = _make_index_tensors(index, input.shape)
+    return DTSetItemFunction.apply(input, index, value)
+
+@DType.register_func(torch.Tensor.to,
+                     cast=("input",))
+def dt_to(input, device=None):
+    return DTToFunction.apply(input, device)
+
+@DType.register_func(torch.Tensor.view,
+                     cast=("input",))
+def dt_view(input, *shape):
+    return DTViewFunction.apply(input, shape)
+
+@DType.register_func(torch.Tensor.contiguous,
+                     cast=("input",))
+def dt_contiguous(input, memory_format=torch.preserve_format):
+    return DTContiguousFunction.apply(input, memory_format)
+
+@DType.register_func(torch.Tensor.repeat,
+                     cast=("input",))
+def dt_repeat(input, *repeats):
+    return DTRepeatFunction.apply(input, repeats)

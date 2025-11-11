@@ -267,3 +267,167 @@ class DTPadFunction(DTFunction):
             grad_x = _unpad_along_dim(ops, grad_x, left, right, dim, ctx.mode)
 
         return grad_x, None, None, None
+
+@register_base_op("getitem")
+def dt_getitem(ops, x, index):
+    return x[index]
+
+class DTGetItemFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, index):
+        return ops.getitem(x, index)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, idx = inputs
+        ctx.is_idx_tensor = torch.is_tensor(idx)
+        if ctx.is_idx_tensor:
+            ctx.save_for_backward(x, idx)
+        else:
+            ctx.save_for_backward(x)
+            ctx.idx = idx
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        if ctx.is_idx_tensor:
+            x, idx = ctx.saved_tensors
+        else:
+            x, = ctx.saved_tensors
+            idx = ctx.idx
+
+        grad_x = torch.full_like(x, ops.from_float(0.0))
+        grad_x[idx] = grad_output
+        return grad_x, None
+
+@register_base_op("setitem")
+def dt_setitem(ops, x, index, value):
+    return torch.index_put(x, index, value)
+
+class DTSetItemFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, index, value):
+        return ops.setitem(x, index, value)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        _, idx, value, _ = inputs
+        ctx.is_idx_tensor = torch.is_tensor(idx)
+        if ctx.is_idx_tensor:
+            ctx.save_for_backward(idx, value)
+        else:
+            ctx.save_for_backward(value)
+            ctx.idx = idx
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        if ctx.is_idx_tensor:
+            idx, value = ctx.saved_tensors
+        else:
+            value, = ctx.saved_tensors
+            idx = ctx.idx
+
+        grad_x = grad_output.clone()
+        grad_x[idx] = ops.from_float(0.0)
+        grad_value = grad_output.clone()[idx]
+
+        if grad_value.shape != value.shape:
+            # Find the dims that were broadcast (= size 1 in value but >1 in grad_value)
+            extra_dims = (
+                [i for i, (gv, v) in enumerate(zip(grad_value.shape[-len(value.shape):],
+                                                   value.shape)) if v == 1 and gv != 1]
+                + list(range(len(grad_value.shape) - len(value.shape)))  # leading dims
+            )
+            grad_value = ops.sum(grad_value, dim=extra_dims, keepdim=True)
+            grad_value = grad_value.reshape(value.shape)
+
+        return grad_x, None, grad_value, None
+
+@register_base_op("to")
+def dt_to(ops, x, device):
+    return torch.to(x, device=device)
+
+class DTToFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, device):
+        return ops.to(x, device)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, _ = inputs
+        ctx.orig_device = x.device
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        return grad_output.to(ctx.orig_device), None
+
+@register_base_op("view")
+def dt_view(ops, x, shape):
+    return x.view(shape)
+
+class DTViewFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, shape):
+        return ops.view(x, shape)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, shape = inputs
+        ctx.original_shape = x.shape
+        ctx.n_shape = len(shape)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        grad_x = grad_output.contiguous().view(ctx.original_shape)
+        return grad_x, None
+
+@register_base_op("contiguous")
+def dt_contiguous(ops, x, memory_format):
+    return x.contiguous(memory_format=memory_format)
+
+class DTContiguousFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, memory_format=torch.preserve_format):
+        return ops.contiguous(x, memory_format)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        pass
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        return grad_output, None
+
+@register_base_op("repeat")
+def dt_repeat(ops, x, repeats):
+    return x.repeat(*repeats)
+
+class DTRepeatFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, repeats):
+        return ops.repeat(x, repeats)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, repeats = inputs
+        ctx.input_shape = tuple(x.shape)
+        ctx.repeats = tuple(repeats)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        grad_x = grad_output
+        for dim, rep in enumerate(ctx.repeats):
+            if rep == 1:
+                continue
+
+            new_shape = list(grad_x.shape)
+            new_shape[dim] = ctx.input_shape[dim]
+            new_shape.insert(dim + 1, rep)
+            grad_x = ops.sum(grad_x.view(*new_shape), dim=dim+1)
+
+        return grad_x, None

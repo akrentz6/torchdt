@@ -324,3 +324,27 @@ class OpsBase:
     @classmethod
     def pad(cls, x: InternalTensor, pad: tuple[int], mode: str = 'constant', value: InternalTensor = None):
         raise NotImplementedError
+
+    @classmethod
+    def getitem(cls, x: InternalTensor, index) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def setitem(cls, x: InternalTensor, index, value: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def to(cls, x: InternalTensor, device) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def view(cls, x: InternalTensor, shape) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def contiguous(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def repeat(cls, x: InternalTensor, repeats: tuple[int]) -> InternalTensor:
+        raise NotImplementedError
