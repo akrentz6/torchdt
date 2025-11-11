@@ -5,6 +5,7 @@ from . import arithmetic_ops
 from . import comparison_ops
 from . import unary_ops
 from . import activation_ops
+from . import misc_ops
 
 __all__ = [
     "OpsBase",

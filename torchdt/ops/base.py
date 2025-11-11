@@ -287,3 +287,40 @@ class OpsBase:
     @classmethod
     def glu(cls, x: InternalTensor, dim: int = -1) -> InternalTensor:
         raise NotImplementedError
+
+
+    @classmethod
+    def broadcast_to(cls, x: InternalTensor, shape) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def clone(cls, x: InternalTensor, memory_format = torch.preserve_format) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def squeeze(cls, x: InternalTensor, dim=None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def unsqueeze(cls, x: InternalTensor, dim: int) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def stack(cls, tensors: list[InternalTensor], dim: int = 0) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def cat(cls, tensors: list[InternalTensor], dim: int = 0) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def chunk(cls, x: InternalTensor, chunks: int, dim: int = 0) -> list[InternalTensor]:
+        raise NotImplementedError
+
+    @classmethod
+    def where(cls, condition: Tensor, x: InternalTensor, y: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def pad(cls, x: InternalTensor, pad: tuple[int], mode: str = 'constant', value: InternalTensor = None):
+        raise NotImplementedError
