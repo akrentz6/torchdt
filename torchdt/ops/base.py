@@ -348,3 +348,50 @@ class OpsBase:
     @classmethod
     def repeat(cls, x: InternalTensor, repeats: tuple[int]) -> InternalTensor:
         raise NotImplementedError
+
+
+    @classmethod
+    def linear(cls, x: InternalTensor, weight: InternalTensor, bias: InternalTensor = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def dropout(cls, x: InternalTensor, p: float = 0.5) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def conv2d(cls, x: InternalTensor, weight: InternalTensor,
+               bias: InternalTensor = None, stride: tuple[int] = 1,
+               padding: tuple[int] = 0, dilation: tuple[int] = 1,
+               groups: int = 1) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def avg_pool2d(cls, x: InternalTensor, kernel_size: tuple[int],
+                  stride: tuple[int] = None, padding: tuple[int] = 0,
+                  ceil_mode: bool = False, count_include_pad: bool = True,
+                  divisor_override=None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def adaptive_avg_pool2d(cls, x: InternalTensor, output_size: tuple[int]) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def max_pool2d(cls, x: InternalTensor, kernel_size: tuple[int],
+                  stride: tuple[int] = None, padding: tuple[int] = 0,
+                  dilation: tuple[int] = 1, ceil_mode: bool = False,
+                  return_indices: bool = False) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def batch_norm(cls, x: InternalTensor, running_mean: InternalTensor,
+                   running_var: InternalTensor, momentum: InternalTensor,
+                   eps: InternalTensor, weight: InternalTensor = None,
+                   bias: InternalTensor = None, training: bool = False) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def layer_norm(cls, x: InternalTensor, eps: InternalTensor,
+                   normalized_shape: tuple[int], weight: InternalTensor = None,
+                   bias: InternalTensor = None) -> InternalTensor:
+        raise NotImplementedError

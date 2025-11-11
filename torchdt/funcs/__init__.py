@@ -3,3 +3,4 @@ from . import comparison_funcs
 from . import unary_funcs
 from . import activation_funcs
 from . import misc_funcs
+from . import layer_funcs

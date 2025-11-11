@@ -6,6 +6,7 @@ from . import comparison_ops
 from . import unary_ops
 from . import activation_ops
 from . import misc_ops
+from . import layer_ops
 
 __all__ = [
     "OpsBase",
