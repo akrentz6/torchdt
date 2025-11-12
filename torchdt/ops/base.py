@@ -351,6 +351,79 @@ class OpsBase:
 
 
     @classmethod
+    def mse_loss(cls, x: InternalTensor, y: InternalTensor,
+                 reduction: str = 'mean', weight: InternalTensor = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def l1_loss(cls, x: InternalTensor, y: InternalTensor,
+                 reduction: str = 'mean', weight: InternalTensor = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def binary_cross_entropy(cls, x: InternalTensor, y: InternalTensor,
+                             weight: InternalTensor = None, reduction: str = 'mean') -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def binary_cross_entropy_with_logits(cls, x: InternalTensor, y: InternalTensor,
+                                         weight: InternalTensor = None, reduction: str = 'mean',
+                                         pos_weight: InternalTensor = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def nll_loss(cls, x: InternalTensor, y: InternalTensor,
+                 weight: InternalTensor = None, ignore_index: int = -100,
+                 reduction: str = 'mean') -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def poisson_nll_loss(cls, x: InternalTensor, y: InternalTensor,
+                         eps: InternalTensor, log_input: bool = True,
+                         full: bool = False, reduction: str = 'mean') -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def hinge_embedding_loss(cls, x: InternalTensor, y: InternalTensor,
+                             margin: InternalTensor = None, reduction: str = 'mean') -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def kl_div(cls, x: InternalTensor, y: InternalTensor,
+                reduction: str = 'mean', log_target: bool = False) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def margin_ranking_loss(cls, x1: InternalTensor, x2: InternalTensor,
+                            y: InternalTensor, margin: InternalTensor,
+                            reduction: str = 'mean') -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def gaussian_nll_loss(cls, x: InternalTensor, y: InternalTensor,
+                          var: InternalTensor, eps: InternalTensor,
+                          full: bool = False, reduction: str = 'mean') -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def huber_loss(cls, x: InternalTensor, y: InternalTensor,
+                   delta: InternalTensor, reduction: str = 'mean',
+                   weight: InternalTensor = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def smooth_l1_loss(cls, x: InternalTensor, y: InternalTensor,
+                       beta: InternalTensor, reduction: str = 'mean') -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def cross_entropy(cls, x: InternalTensor, y: InternalTensor,
+                      weight: InternalTensor = None, ignore_index: int = -100,
+                      reduction: str = 'mean', label_smoothing: InternalTensor = None) -> InternalTensor:
+        raise NotImplementedError
+
+
+    @classmethod
     def linear(cls, x: InternalTensor, weight: InternalTensor, bias: InternalTensor = None) -> InternalTensor:
         raise NotImplementedError
 
