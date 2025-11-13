@@ -5,3 +5,4 @@ from . import activation_funcs
 from . import misc_funcs
 from . import loss_funcs
 from . import layer_funcs
+from . import creation_funcs
