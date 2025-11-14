@@ -25,6 +25,8 @@ _int_dtype = {
 no_override_funcs = {
     Tensor.backward,
     Tensor.copy_,
+    Tensor.detach,
+    Tensor.dim,
     Tensor.numel,
     Tensor.requires_grad_,
     Tensor.register_hook,

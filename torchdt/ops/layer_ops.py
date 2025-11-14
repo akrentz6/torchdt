@@ -14,7 +14,7 @@ class DTLinearFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, weight, bias=None):
-        ops.linear(x, weight, bias)
+        return ops.linear(x, weight, bias)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
