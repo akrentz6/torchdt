@@ -76,15 +76,15 @@ class Madam(DTOptimizer):
                 g_clipped = torch.clamp(g_normed, -g_bound, g_bound)
                 delta = lr * g_clipped * torch.sign(p)
 
-                if maximize:
+                if not maximize:
                     delta = -delta
 
                 if use_pow:
-                    p.data = p * torch.exp(delta)
+                    mul_update = p * torch.exp(delta)
                 else:
-                    p.data = p * (1.0 + delta)
+                    mul_update = p * (1.0 + delta)
 
-                p.data = torch.clamp(p, -max, max)
+                p.data.copy_(torch.clamp(mul_update, -max, max))
 
                 state["step"] = step
                 state["exp_avg_sq"] = exp_avg_sq

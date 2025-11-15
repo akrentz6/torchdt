@@ -89,7 +89,7 @@ class Adam(DTOptimizer):
                 else:
                     denom_sq = (exp_avg_sq / (1.0 - beta2))
 
-                p.data = p - lr * exp_avg_hat / (torch.sqrt(denom_sq) + eps)
+                p.data.copy_(p - lr * exp_avg_hat / (torch.sqrt(denom_sq) + eps))
 
                 state["exp_avg"] = exp_avg
                 state["exp_avg_sq"] = exp_avg_sq
