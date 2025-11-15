@@ -233,7 +233,7 @@ class DTNonDifferentiableFunction:
     def apply(cls, *args, **kwargs):
         from torchdt import DType # avoid circular import
 
-        if kwargs is not None:
+        if kwargs:
             raise ValueError(
                 "DTNonDifferentiableFunction does not support keyword arguments. "
                 "Please use positional arguments only."
@@ -245,7 +245,7 @@ class DTNonDifferentiableFunction:
         for i, arg in enumerate(args):
             if isinstance(arg, DType):
                 subtypes.append(arg.__class__)
-                prepped_inputs.append(arg._float)
+                prepped_inputs.append(arg._int)
             else:
                 prepped_inputs.append(arg)
 
