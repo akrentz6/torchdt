@@ -35,7 +35,7 @@ class DTMSELossFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, y, reduction='mean', weight=None):
-        return ops.mse_loss(ops, x, y, reduction, weight)
+        return ops.mse_loss(x, y, reduction, weight)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -100,7 +100,7 @@ class DTL1LossFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, y, reduction='mean', weight=None):
-        return ops.l1_loss(ops, x, y, reduction, weight)
+        return ops.l1_loss(x, y, reduction, weight)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -170,7 +170,7 @@ class DTBCELossFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, y, weight=None, reduction='mean'):
-        return ops.binary_cross_entropy(ops, x, y, weight, reduction)
+        return ops.binary_cross_entropy(x, y, weight, reduction)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -264,7 +264,7 @@ class DTBCEWithLogitsLossFunction(DTFunction):
     
     @staticmethod
     def forward(ops, x, y, weight=None, reduction='mean', pos_weight=None):
-        return ops.binary_cross_entropy_with_logits(ops, x, y, weight, reduction, pos_weight)
+        return ops.binary_cross_entropy_with_logits(x, y, weight, reduction, pos_weight)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -343,7 +343,7 @@ class DTNLLLossFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
-        return ops.nll_loss(ops, x, y, weight, reduction, ignore_index)
+        return ops.nll_loss(x, y, weight, reduction, ignore_index)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -433,7 +433,7 @@ class DTPoissonNLLLossFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, y, eps, log_input=True, full=False, reduction='mean'):
-        return ops.poisson_nll_loss(ops, x, y, eps, log_input, full, reduction)
+        return ops.poisson_nll_loss(x, y, eps, log_input, full, reduction)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -549,7 +549,7 @@ class DTKLDivLossFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, y, reduction='mean', log_target=False):
-        return ops.kl_div(ops, x, y, reduction, log_target)
+        return ops.kl_div(x, y, reduction, log_target)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -609,7 +609,7 @@ class DTMarginRankingLossFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x1, x2, y, margin, reduction='mean'):
-        return ops.margin_ranking_loss(ops, x1, x2, y, margin, reduction)
+        return ops.margin_ranking_loss(x1, x2, y, margin, reduction)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -671,7 +671,7 @@ class DTGaussianNLLLossFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, y, var, eps, full=False, reduction='mean'):
-        return ops.gaussian_nll_loss(ops, x, y, var, eps, full, reduction)
+        return ops.gaussian_nll_loss(x, y, var, eps, full, reduction)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -893,7 +893,7 @@ class DTCrossEntropyLossFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, y, weight=None, ignore_index=-100, reduction='mean', label_smoothing=None):
-        return ops.cross_entropy(ops, x, y, weight, ignore_index, reduction, label_smoothing)
+        return ops.cross_entropy(x, y, weight, ignore_index, reduction, label_smoothing)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
