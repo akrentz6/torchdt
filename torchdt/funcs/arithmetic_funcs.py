@@ -30,6 +30,11 @@ def dt_add(input, other, *, alpha=1, out=None):
         return out.copy_(result)
     return result
 
+@DType.register_func(torch.Tensor.__radd__,
+                     cast=("self", "other"))
+def dt_radd(self, other):
+    return torch.add(other, self)
+
 @DType.register_func(torch.sub, torch.Tensor.sub,
                      cast=("input", "other"))
 def dt_sub(input, other, *, alpha=1, out=None):
@@ -40,6 +45,11 @@ def dt_sub(input, other, *, alpha=1, out=None):
     if out is not None:
         return out.copy_(result)
     return result
+
+@DType.register_func(torch.Tensor.__rsub__,
+                     cast=("self", "other"))
+def dt_rsub(self, other):
+    return torch.sub(other, self)
 
 @DType.register_func(torch.sum, torch.Tensor.sum,
                      cast=("input",))
@@ -59,6 +69,11 @@ def dt_mul(input, other, *, out=None):
         return out.copy_(result)
     return result
 
+@DType.register_func(torch.Tensor.__rmul__,
+                     cast=("self", "other"))
+def dt_rmul(self, other):
+    return torch.mul(other, self)
+
 @DType.register_func(torch.div, torch.Tensor.div,
                      cast=("input", "other"))
 def dt_div(input, other, *, out=None):
@@ -68,7 +83,12 @@ def dt_div(input, other, *, out=None):
         return out.copy_(result)
     return result
 
-@DType.register_func(torch.pow, torch.Tensor.pow,
+@DType.register_func(torch.Tensor.__rdiv__,
+                     cast=("self", "other"))
+def dt_rdiv(self, other):
+    return torch.div(other, self)
+
+@DType.register_func(torch.pow, torch.Tensor.pow, torch.Tensor.__pow__,
                      cast=("input", "exponent"))
 def dt_pow(input, exponent, *, out=None):
     result = DTPowFunction.apply(input, exponent)
@@ -76,6 +96,11 @@ def dt_pow(input, exponent, *, out=None):
     if out is not None:
         return out.copy_(result)
     return result
+
+@DType.register_func(torch.Tensor.__rpow__,
+                     cast=("self", "other"))
+def dt_rpow(self, other):
+    return torch.pow(other, self)
 
 @DType.register_func(torch.square, torch.Tensor.square,
                      cast=("input"))

@@ -439,7 +439,7 @@ class DTClampFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, min=None, max=None):
-        return ops.clamp(ops, x, min, max)
+        return ops.clamp(x, min, max)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
