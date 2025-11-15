@@ -5,6 +5,8 @@ from torchdt import DType
 def dt_zeros(*size, out=None, dtype=None, device=None, requires_grad=False):
     if not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
+    if isinstance(size[0], tuple):
+        size = size[0]
 
     result = dtype(torch.zeros(size), device=device, requires_grad=requires_grad)
 
@@ -22,6 +24,8 @@ def dt_zeros_like(input, *, dtype=None, device=None, requires_grad=False):
 def dt_ones(*size, out=None, dtype=None, device=None, requires_grad=False):
     if not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
+    if isinstance(size[0], tuple):
+        size = size[0]
 
     result = dtype(torch.ones(size), device=device, requires_grad=requires_grad)
 
@@ -39,6 +43,8 @@ def dt_ones_like(input, *, dtype=None, device=None, requires_grad=False):
 def dt_full(size, fill_value, *, out=None, dtype=None, device=None, requires_grad=False):
     if not isinstance(out, DType) and not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
+    if isinstance(size[0], tuple):
+        size = size[0]
 
     result = dtype(torch.full(size, fill_value), device=device, requires_grad=requires_grad)
 
@@ -56,6 +62,8 @@ def dt_full_like(input, fill_value, *, dtype=None, device=None, requires_grad=Fa
 def dt_rand(*size, out=None, dtype=None, device=None, requires_grad=False):
     if not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
+    if isinstance(size[0], tuple):
+        size = size[0]
 
     result = dtype(torch.rand(size), device=device, requires_grad=requires_grad)
 
@@ -73,6 +81,8 @@ def dt_rand_like(input, *, dtype=None, device=None, requires_grad=False):
 def dt_randn(*size, out=None, dtype=None, device=None, requires_grad=False):
     if not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
+    if isinstance(size[0], tuple):
+        size = size[0]
 
     result = dtype(torch.randn(size), device=device, requires_grad=requires_grad)
 
@@ -90,6 +100,8 @@ def dt_randn_like(input, *, dtype=None, device=None, requires_grad=False):
 def dt_empty(*size, out=None, dtype=None, device=None, requires_grad=False):
     if not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
+    if isinstance(size[0], tuple):
+        size = size[0]
 
     result = dtype(torch.empty(size), device=device, requires_grad=requires_grad)
 
