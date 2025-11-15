@@ -2,7 +2,7 @@ import torch
 from torchdt import DType
 
 @DType.register_func(torch.zeros)
-def dt_zeros(size, *, out=None, dtype=None, device=None, requires_grad=False):
+def dt_zeros(*size, out=None, dtype=None, device=None, requires_grad=False):
     if not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
 
@@ -19,7 +19,7 @@ def dt_zeros_like(input, *, dtype=None, device=None, requires_grad=False):
     return torch.zeros(input.size(), dtype=dtype, device=device, requires_grad=requires_grad)
 
 @DType.register_func(torch.ones)
-def dt_ones(size, *, out=None, dtype=None, device=None, requires_grad=False):
+def dt_ones(*size, out=None, dtype=None, device=None, requires_grad=False):
     if not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
 
@@ -53,7 +53,7 @@ def dt_full_like(input, fill_value, *, dtype=None, device=None, requires_grad=Fa
     return torch.full(input.size(), fill_value, dtype=dtype, device=device, requires_grad=requires_grad)
 
 @DType.register_func(torch.rand)
-def dt_rand(size, *, out=None, dtype=None, device=None, requires_grad=False):
+def dt_rand(*size, out=None, dtype=None, device=None, requires_grad=False):
     if not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
 
@@ -70,7 +70,7 @@ def dt_rand_like(input, *, dtype=None, device=None, requires_grad=False):
     return torch.rand(input.size(), dtype=dtype, device=device, requires_grad=requires_grad)
 
 @DType.register_func(torch.randn)
-def dt_randn(size, *, out=None, dtype=None, device=None, requires_grad=False):
+def dt_randn(*size, out=None, dtype=None, device=None, requires_grad=False):
     if not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
 
@@ -87,7 +87,7 @@ def dt_randn_like(input, *, dtype=None, device=None, requires_grad=False):
     return torch.randn(input.size(), dtype=dtype, device=device, requires_grad=requires_grad)
 
 @DType.register_func(torch.empty)
-def dt_empty(size, *, out=None, dtype=None, device=None, requires_grad=False):
+def dt_empty(*size, out=None, dtype=None, device=None, requires_grad=False):
     if not issubclass(dtype, DType):
         raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
 
