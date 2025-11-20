@@ -14,6 +14,7 @@ class BuildCxxExtension(BuildExtension):
     """
     def build_extensions(self):
         src_dir = Path(__file__).resolve().parent / "csrc"
+        include_dir = Path(__file__).resolve().parent / "include"
         cpp_files = [str(p) for p in src_dir.glob("*.cpp")]
 
         torch_includes = include_paths()
@@ -21,6 +22,8 @@ class BuildCxxExtension(BuildExtension):
         for ext in self.extensions:
             if ext.name == "torchdt._C":
                 ext.sources = cpp_files
-            ext.include_dirs = list(ext.include_dirs or []) + torch_includes + [str(Path(__file__).resolve().parent / "include")]
+            ext.include_dirs = list(ext.include_dirs or [])
+            ext.include_dirs += torch_includes
+            ext.include_dirs += [str(include_dir)]
 
         super().build_extensions()
