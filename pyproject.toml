@@ -1,6 +1,11 @@
 [build-system]
+requires = [
+    "setuptools>=69.0",
+    "wheel",
+    "torch>=2.0",
+    "ninja",
+]
 build-backend = "setuptools.build_meta"
-requires = ["setuptools >= 61.0", "wheel"]
 
 [project]
 name = "torchdt"
@@ -10,7 +15,17 @@ readme = "README.md"
 license = {file = "LICENSE"}
 authors = [{name = "Alexander Krentz", email = "alexkrentz2@gmail.com"}]
 keywords = ["python", "pytorch", "machine learning"]
-dependencies = ["torch"]
+dependencies = ["torch>=2.0", "numpy"]
 
 [project.urls]
 "Homepage" = "https://github.com/akrentz6/torchdt"
+
+[[tool.setuptools.ext-modules]]
+name = "torchdt._C"
+sources = []  # Filled dynamically
+language = "c++"
+extra-compile-args = ["-O3", "-std=c++17", "-ffast-math"]
+optional = false
+
+[tool.setuptools.cmdclass]
+build_ext = "torchdt._build_ext.BuildCxxExtension"
