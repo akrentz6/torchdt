@@ -21,6 +21,6 @@ class BuildCxxExtension(BuildExtension):
         for ext in self.extensions:
             if ext.name == "torchdt._C":
                 ext.sources = cpp_files
-            ext.include_dirs = list(ext.include_dirs or []) + torch_includes
+            ext.include_dirs = list(ext.include_dirs or []) + torch_includes + [str(Path(__file__).resolve().parent / "include")]
 
         super().build_extensions()

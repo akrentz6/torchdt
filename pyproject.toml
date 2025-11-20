@@ -20,6 +20,12 @@ dependencies = ["torch>=2.0", "numpy"]
 [project.urls]
 "Homepage" = "https://github.com/akrentz6/torchdt"
 
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"torchdt" = ["include/torchdt/*.h"]
+
 [[tool.setuptools.ext-modules]]
 name = "torchdt._C"
 sources = []  # Filled dynamically
