@@ -1,6 +1,8 @@
 #ifndef REGISTRY_H
 #define REGISTRY_H
 
+#include <torch/extension.h>
+
 #include <cstdint>
 #include <type_traits>
 #include <string>
@@ -45,13 +47,27 @@ struct Ops {
 
 struct OpsBase {
     virtual ~OpsBase() = default;
+
+    virtual torch::Tensor add(const torch::Tensor&, const torch::Tensor&) const {
+        throw std::runtime_error("add not implemented");
+    }
+
+    virtual torch::Tensor sub(const torch::Tensor&, const torch::Tensor&) const {
+        throw std::runtime_error("sub not implemented");
+    }
+
+    virtual torch::Tensor mul(const torch::Tensor&, const torch::Tensor&) const {
+        throw std::runtime_error("mul not implemented");
+    }
+
+    virtual torch::Tensor div(const torch::Tensor&, const torch::Tensor&) const {
+        throw std::runtime_error("div not implemented");
+    }
 };
 
+// Forward declaration
 template <size_t bitwidth>
-struct OpsImpl : public OpsBase {
-    OpsImpl(const Ops<bitwidth>& o) : ops(o) {}
-    Ops<bitwidth> ops;
-};
+struct OpsImpl;
 
 // simple key construction
 inline std::string make_key(const std::string &name, size_t bitwidth) {
