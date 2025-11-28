@@ -22,12 +22,12 @@ struct StorageFor {
     );
 
     using type = typename std::conditional<
-        bitwidth == 8, uint8_t,
+        bitwidth == 8, int8_t,
         typename std::conditional<
-            bitwidth == 16, uint16_t,
+            bitwidth == 16, int16_t,
             typename std::conditional<
-                bitwidth == 32, uint32_t,
-                uint64_t
+                bitwidth == 32, int32_t,
+                int64_t
             >::type
         >::type
     >::type;
@@ -67,7 +67,23 @@ struct OpsBase {
 
 // Forward declaration
 template <size_t bitwidth>
-struct OpsImpl;
+struct OpsImpl : public OpsBase {
+    using StorageT = typename StorageFor<bitwidth>::type;
+    using BinOp = StorageT(*)(StorageT, StorageT);
+
+    Ops<bitwidth> ops;
+
+    OpsImpl(const Ops<bitwidth>& o) : ops(o) {}
+
+    template<typename F>
+    torch::Tensor run_binary_kernel(const torch::Tensor& x, const torch::Tensor& y, F f) const;
+
+    torch::Tensor add(const torch::Tensor& x, const torch::Tensor& y) const;
+    torch::Tensor sub(const torch::Tensor& x, const torch::Tensor& y) const;
+    torch::Tensor mul(const torch::Tensor& x, const torch::Tensor& y) const;
+    torch::Tensor div(const torch::Tensor& x, const torch::Tensor& y) const;
+
+};
 
 // simple key construction
 inline std::string make_key(const std::string &name, size_t bitwidth) {

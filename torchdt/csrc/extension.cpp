@@ -2,6 +2,7 @@
 #include <torchdt/registry.h>
 
 #include "ops_kernels.h"
+#include "lns16.h"
 
 torch::Tensor dispatch_add(
     const std::string& dtype_name,
@@ -69,3 +70,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Division for custom dtypes"
     );
 }
+
+REGISTER_DTYPE("lns", 16, get_lns16_ops());
