@@ -79,7 +79,7 @@ class DType(Tensor):
     Parent class for custom dtypes (posit, LNS, etc) that live in a Tensor
     but expose their own semantics.
     """
-    bit_width: int = 32 # subclasses override
+    bitwidth: int = 32 # subclasses override
     torch_funcs: Dict[Callable, Callable] = {} # mapping from 'torch.' function to custom implementation
 
     def __new__(
@@ -91,8 +91,8 @@ class DType(Tensor):
             requires_grad: Optional[bool] = None,
             memory_format: torch.memory_format = torch.preserve_format,
     ):
-        cls.float_dtype = _float_dtype[cls.bit_width]
-        cls.int_dtype = _int_dtype[cls.bit_width]
+        cls.float_dtype = _float_dtype[cls.bitwidth]
+        cls.int_dtype = _int_dtype[cls.bitwidth]
 
         if isinstance(data, DType):
             if data.__class__ == cls:
@@ -125,15 +125,15 @@ class DType(Tensor):
             obj.requires_grad_(requires_grad)
         return obj
 
-    def __init_subclass__(cls, bit_width: int = 32, **kwargs):
+    def __init_subclass__(cls, bitwidth: int = 32, **kwargs):
         super().__init_subclass__(**kwargs)
 
-        if bit_width not in _float_dtype:
+        if bitwidth not in _float_dtype:
             raise ValueError(
-                f"{cls.__name__} has invalid bit_width {bit_width}. "
+                f"{cls.__name__} has invalid bitwidth {bitwidth}. "
                 f"Must be one of {tuple(_float_dtype.keys())}."
             )
-        cls.bit_width = bit_width
+        cls.bitwidth = bitwidth
 
         if cls is DType:
             return # don't register base class
@@ -294,11 +294,11 @@ class DType(Tensor):
     @property
     def _int(self) -> Tensor:
         "Integer bit-view of the same storage (no copy)."
-        return self._float.view(_int_dtype[self.bit_width])
+        return self._float.view(_int_dtype[self.bitwidth])
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}({self.to_float(self._float)}, bit_width={self.bit_width}, "
+            f"{self.__class__.__name__}({self.to_float(self._float)}, bitwidth={self.bitwidth}, "
             f"shape={tuple(self.shape)}, device={self.device})"
         )
 
