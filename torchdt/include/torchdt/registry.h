@@ -39,6 +39,9 @@ struct Ops {
     using StorageT = typename StorageFor<bitwidth>::type;
     using BinOp = StorageT(*)(StorageT, StorageT);
 
+    StorageT(*from_float)(float) = nullptr;
+    float(*to_float)(StorageT) = nullptr;
+
     BinOp add = nullptr;
     BinOp sub = nullptr;
     BinOp mul = nullptr;
@@ -63,6 +66,14 @@ struct OpsBase {
     virtual torch::Tensor div(const torch::Tensor&, const torch::Tensor&) const {
         throw std::runtime_error("div not implemented");
     }
+
+    virtual torch::Tensor from_float(const torch::Tensor&) const {
+        throw std::runtime_error("from_float not implemented");
+    }
+
+    virtual torch::Tensor to_float(const torch::Tensor&) const {
+        throw std::runtime_error("to_float not implemented");
+    }
 };
 
 // Forward declaration
@@ -76,7 +87,13 @@ struct OpsImpl : public OpsBase {
     OpsImpl(const Ops<bitwidth>& o) : ops(o) {}
 
     template<typename F>
+    torch::Tensor run_unary_kernel(const torch::Tensor& x, F f) const;
+
+    template<typename F>
     torch::Tensor run_binary_kernel(const torch::Tensor& x, const torch::Tensor& y, F f) const;
+
+    torch::Tensor from_float(const torch::Tensor& x) const;
+    torch::Tensor to_float(const torch::Tensor& x) const;
 
     torch::Tensor add(const torch::Tensor& x, const torch::Tensor& y) const;
     torch::Tensor sub(const torch::Tensor& x, const torch::Tensor& y) const;

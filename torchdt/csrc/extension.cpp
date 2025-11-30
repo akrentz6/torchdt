@@ -4,6 +4,26 @@
 #include "ops_kernels.h"
 #include "lns16.h"
 
+torch::Tensor dispatch_from_float(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& x
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->from_float(x);
+}
+
+torch::Tensor dispatch_to_float(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& x
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->to_float(x);
+}
+
 torch::Tensor dispatch_add(
     const std::string& dtype_name,
     size_t bitwidth,
@@ -49,6 +69,16 @@ torch::Tensor dispatch_div(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def(
+        "from_float", &dispatch_from_float,
+        py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"),
+        "Convert from float to custom dtype"
+    );
+    m.def(
+        "to_float", &dispatch_to_float,
+        py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"),
+        "Convert from custom dtype to float"
+    );
     m.def(
         "add", &dispatch_add,
         py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"), py::arg("y"),

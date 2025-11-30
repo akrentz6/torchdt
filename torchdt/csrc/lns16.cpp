@@ -4,6 +4,30 @@ int16_t zero = -32768;
 int16_t pos_inf = 32766;
 int16_t neg_inf = 32767;
 double base = std::pow(2.0, std::pow(2.0, -10));
+double inv_log_base = 1.0 / std::log(base);
+
+int16_t from_float16(float x) {
+
+    if (x == 0.0f) return zero;
+    if (std::isinf(x)) return (x > 0.0f) ? pos_inf : neg_inf;
+
+    int16_t sign_bit = (x < 0.0f) ? 1 : 0;
+    int16_t exponent = static_cast<int16_t>(std::round(std::log(std::abs(x)) * inv_log_base));
+
+    return (exponent << 1) | sign_bit;
+}
+
+float to_float16(int16_t x) {
+
+    if (x == zero) return 0.0f;
+    if (x == pos_inf) return std::numeric_limits<float>::infinity();
+    if (x == neg_inf) return -std::numeric_limits<float>::infinity();
+
+    float exponent = static_cast<float>(x >> 1);
+    float sign = (x & 1) ? -1.0f : 1.0f;
+
+    return sign * std::pow(base, exponent); 
+}
 
 int16_t neg(int16_t x) {
     return x ^ 1;
@@ -20,7 +44,7 @@ int16_t add16(int16_t x, int16_t y) {
 
     double power_term = std::pow(base, -abs_diff);
     double magnitude = std::abs(1.0 - 2.0 * sign_diff + power_term);
-    double log_term = std::log(magnitude) / std::log(base);
+    double log_term = std::log(magnitude) * inv_log_base;
     double rounded_value = std::clamp(
         std::round(log_term),
         (double)(std::numeric_limits<int16_t>::min()),
@@ -47,6 +71,8 @@ int16_t div16(int16_t x, int16_t y) {
 
 Ops<16> ops16 = []{
     Ops<16> o;
+    o.from_float = from_float16;
+    o.to_float = to_float16;
     o.add = add16;
     o.sub = sub16;
     o.mul = mul16;
