@@ -5,7 +5,7 @@ import functools
 import inspect
 
 from torchdt.transforms import register_collate_dtype_fn
-from torchdt.ops import OpsBase, register_op
+from torchdt.ops import OpsBase, register_op, register_cpp_ops
 
 _float_dtype = {
     8: torch.float8_e5m2, # we have several variants to pick from
@@ -125,7 +125,7 @@ class DType(Tensor):
             obj.requires_grad_(requires_grad)
         return obj
 
-    def __init_subclass__(cls, bitwidth: int = 32, **kwargs):
+    def __init_subclass__(cls, bitwidth: int = 32, cpp_backend=None, **kwargs):
         super().__init_subclass__(**kwargs)
 
         if bitwidth not in _float_dtype:
@@ -134,6 +134,7 @@ class DType(Tensor):
                 f"Must be one of {tuple(_float_dtype.keys())}."
             )
         cls.bitwidth = bitwidth
+        cls.cpp_backend = cpp_backend
 
         if cls is DType:
             return # don't register base class
@@ -154,6 +155,12 @@ class DType(Tensor):
         # allow normal imports to see it
         # module = sys.modules[cls.__module__]
         # setattr(module, ops_name, ops_cls)
+
+    @classmethod
+    def enable_cpp_backend(cls, backend=None):
+        if cls.cpp_backend is None and backend is None:
+            raise ValueError(f"{cls.__name__} has no C++ backend to enable.")
+        register_cpp_ops(cls, backend or cls.cpp_backend)
 
     def _track_operation(self, edge, arg_index):
         """
