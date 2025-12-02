@@ -74,6 +74,14 @@ struct OpsBase {
     virtual torch::Tensor to_float(const torch::Tensor&) const {
         throw std::runtime_error("to_float not implemented");
     }
+
+    virtual torch::Tensor sum(
+        const torch::Tensor& x,
+        c10::optional<std::vector<int64_t>> dim,
+        bool keepdim = false
+    ) const {
+        throw std::runtime_error("sum not implemented");
+    }
 };
 
 // Forward declaration
@@ -99,6 +107,11 @@ struct OpsImpl : public OpsBase {
     torch::Tensor sub(const torch::Tensor& x, const torch::Tensor& y) const;
     torch::Tensor mul(const torch::Tensor& x, const torch::Tensor& y) const;
     torch::Tensor div(const torch::Tensor& x, const torch::Tensor& y) const;
+
+    torch::Tensor sum(
+        const torch::Tensor& x,
+        c10::optional<std::vector<int64_t>> dim,
+        bool keepdim = false) const;
 
 };
 

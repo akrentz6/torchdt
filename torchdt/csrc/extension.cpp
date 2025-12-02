@@ -68,6 +68,18 @@ torch::Tensor dispatch_div(
     return ops->div(x, y);
 }
 
+torch::Tensor dispatch_sum(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& x,
+    c10::optional<std::vector<int64_t>> dim,
+    bool keepdim
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->sum(x, dim, keepdim);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "from_float", &dispatch_from_float,
@@ -98,6 +110,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "div", &dispatch_div,
         py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"), py::arg("y"),
         "Division for custom dtypes"
+    );
+    m.def(
+        "sum", &dispatch_sum,
+        py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"),
+        py::arg("dim") = c10::nullopt, py::arg("keepdim") = false,
+        "Summation for custom dtypes"
     );
 }
 
