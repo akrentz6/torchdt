@@ -124,6 +124,13 @@ class OpsBase:
     def lt(cls, x: InternalTensor, y: InternalTensor) -> Tensor:
         raise NotImplementedError
 
+    # ========== Backward operations for c++ ops ==========
+
+    @classmethod
+    def matmul_backward(cls, grad_output: InternalTensor, A: InternalTensor,
+                        B: InternalTensor) -> tuple[InternalTensor, InternalTensor]:
+        raise NotImplementedError
+
     # ========== 'Base' operations with default implementations ==========
 
     @classmethod

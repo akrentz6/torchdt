@@ -82,6 +82,17 @@ struct OpsBase {
     ) const {
         throw std::runtime_error("sum not implemented");
     }
+
+    virtual torch::Tensor matmul(const torch::Tensor& A, const torch::Tensor& B) const {
+        throw std::runtime_error("matmul_forward not implemented");
+    }
+
+    virtual std::vector<torch::Tensor> matmul_backward(
+        const torch::Tensor& grad_out,
+        const torch::Tensor& A,
+        const torch::Tensor& B) const {
+        throw std::runtime_error("matmul_backward not implemented");
+    }
 };
 
 // Forward declaration
@@ -113,6 +124,11 @@ struct OpsImpl : public OpsBase {
         c10::optional<std::vector<int64_t>> dim,
         bool keepdim = false) const;
 
+    torch::Tensor matmul(const torch::Tensor& A, const torch::Tensor& B) const;
+    std::vector<torch::Tensor> matmul_backward(
+        const torch::Tensor& grad_out,
+        const torch::Tensor& A,
+        const torch::Tensor& B) const;
 };
 
 // simple key construction

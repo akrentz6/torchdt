@@ -80,6 +80,29 @@ torch::Tensor dispatch_sum(
     return ops->sum(x, dim, keepdim);
 }
 
+torch::Tensor dispatch_matmul(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& A,
+    const torch::Tensor& B
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->matmul(A, B);
+}
+
+std::vector<torch::Tensor> dispatch_matmul_backward(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& grad_out,
+    const torch::Tensor& A,
+    const torch::Tensor& B
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->matmul_backward(grad_out, A, B);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "from_float", &dispatch_from_float,
@@ -116,6 +139,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"),
         py::arg("dim") = c10::nullopt, py::arg("keepdim") = false,
         "Summation for custom dtypes"
+    );
+    m.def(
+        "matmul", &dispatch_matmul,
+        py::arg("dtype_name"), py::arg("bitwidth"), py::arg("A"), py::arg("B"),
+        "Matrix multiplication for custom dtypes"
+    );
+    m.def(
+        "matmul_backward", &dispatch_matmul_backward,
+        py::arg("dtype_name"), py::arg("bitwidth"),
+        py::arg("grad_out"), py::arg("A"), py::arg("B"),
+        "Matrix multiplication backward for custom dtypes"
     );
 }
 
