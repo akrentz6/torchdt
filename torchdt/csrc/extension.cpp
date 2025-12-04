@@ -68,6 +68,50 @@ torch::Tensor dispatch_div(
     return ops->div(x, y);
 }
 
+torch::Tensor dispatch_ge(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& x,
+    const torch::Tensor& y
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->ge(x, y);
+}
+
+torch::Tensor dispatch_gt(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& x,
+    const torch::Tensor& y
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->gt(x, y);
+}
+
+torch::Tensor dispatch_le(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& x,
+    const torch::Tensor& y
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->le(x, y);
+}
+
+torch::Tensor dispatch_lt(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& x,
+    const torch::Tensor& y
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->lt(x, y);
+}
+
 torch::Tensor dispatch_sum(
     const std::string& dtype_name,
     size_t bitwidth,
@@ -133,6 +177,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "div", &dispatch_div,
         py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"), py::arg("y"),
         "Division for custom dtypes"
+    );
+    m.def(
+        "ge", &dispatch_ge,
+        py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"), py::arg("y"),
+        "Greater-than-or-equal comparison for custom dtypes"
+    );
+    m.def(
+        "gt", &dispatch_gt,
+        py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"), py::arg("y"),
+        "Greater-than comparison for custom dtypes"
+    );
+    m.def(
+        "le", &dispatch_le,
+        py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"), py::arg("y"),
+        "Less-than-or-equal comparison for custom dtypes"
+    );
+    m.def(
+        "lt", &dispatch_lt,
+        py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"), py::arg("y"),
+        "Less-than comparison for custom dtypes"
     );
     m.def(
         "sum", &dispatch_sum,

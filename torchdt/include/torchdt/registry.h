@@ -38,6 +38,7 @@ template<size_t bitwidth>
 struct Ops {
     using StorageT = typename StorageFor<bitwidth>::type;
     using BinOp = StorageT(*)(StorageT, StorageT);
+    using BoolBinOp = bool(*)(StorageT, StorageT);
 
     StorageT(*from_float)(float) = nullptr;
     float(*to_float)(StorageT) = nullptr;
@@ -46,6 +47,11 @@ struct Ops {
     BinOp sub = nullptr;
     BinOp mul = nullptr;
     BinOp div = nullptr;
+
+    BoolBinOp ge = nullptr;
+    BoolBinOp gt = nullptr;
+    BoolBinOp le = nullptr;
+    BoolBinOp lt = nullptr;
 };
 
 struct OpsBase {
@@ -65,6 +71,22 @@ struct OpsBase {
 
     virtual torch::Tensor div(const torch::Tensor&, const torch::Tensor&) const {
         throw std::runtime_error("div not implemented");
+    }
+
+    virtual torch::Tensor ge(const torch::Tensor&, const torch::Tensor&) const {
+        throw std::runtime_error("ge not implemented");
+    }
+
+    virtual torch::Tensor gt(const torch::Tensor&, const torch::Tensor&) const {
+        throw std::runtime_error("gt not implemented");
+    }
+
+    virtual torch::Tensor le(const torch::Tensor&, const torch::Tensor&) const {
+        throw std::runtime_error("le not implemented");
+    }
+
+    virtual torch::Tensor lt(const torch::Tensor&, const torch::Tensor&) const {
+        throw std::runtime_error("lt not implemented");
     }
 
     virtual torch::Tensor from_float(const torch::Tensor&) const {
@@ -111,6 +133,9 @@ struct OpsImpl : public OpsBase {
     template<typename F>
     torch::Tensor run_binary_kernel(const torch::Tensor& x, const torch::Tensor& y, F f) const;
 
+    template<typename F>
+    torch::Tensor run_binary_bool_kernel(const torch::Tensor& x, const torch::Tensor& y, F f) const;
+
     torch::Tensor from_float(const torch::Tensor& x) const;
     torch::Tensor to_float(const torch::Tensor& x) const;
 
@@ -118,6 +143,11 @@ struct OpsImpl : public OpsBase {
     torch::Tensor sub(const torch::Tensor& x, const torch::Tensor& y) const;
     torch::Tensor mul(const torch::Tensor& x, const torch::Tensor& y) const;
     torch::Tensor div(const torch::Tensor& x, const torch::Tensor& y) const;
+
+    torch::Tensor ge(const torch::Tensor& x, const torch::Tensor& y) const;
+    torch::Tensor gt(const torch::Tensor& x, const torch::Tensor& y) const;
+    torch::Tensor le(const torch::Tensor& x, const torch::Tensor& y) const;
+    torch::Tensor lt(const torch::Tensor& x, const torch::Tensor& y) const;
 
     torch::Tensor sum(
         const torch::Tensor& x,

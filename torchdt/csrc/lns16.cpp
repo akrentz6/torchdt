@@ -69,6 +69,54 @@ int16_t div16(int16_t x, int16_t y) {
     return (x - y + (y & 1)) ^ (y & 1);
 }
 
+bool ge16(int16_t x, int16_t y) {
+    const int16_t x_log  = x >> 1;
+    const int16_t y_log  = y >> 1;
+    const int x_sign = x & 1;
+    const int y_sign = y & 1;
+
+    if ((x_sign | y_sign) == 0) return x_log >= y_log; // both positive
+    if ((x_sign == 0) & (y_sign == 1)) return true; // x positive, y negative
+    if ((x_sign == 1) & (y_sign == 0)) return false; // x negative, y positive
+    return y_log >= x_log; // both negative
+}
+
+bool gt16(int16_t x, int16_t y) {
+    const int16_t x_log = x >> 1;
+    const int16_t y_log = y >> 1;
+    const int x_sign = x & 1;
+    const int y_sign = y & 1;
+
+    if ((x_sign | y_sign) == 0) return x_log > y_log; // both positive
+    if ((x_sign == 0) & (y_sign == 1)) return true; // x positive, y negative
+    if ((x_sign == 1) & (y_sign == 0)) return false; // x negative, y positive
+    return y_log > x_log; // both negative
+}
+
+bool le16(int16_t x, int16_t y) {
+    const int16_t x_log = x >> 1;
+    const int16_t y_log = y >> 1;
+    const int x_sign = x & 1;
+    const int y_sign = y & 1;
+
+    if ((x_sign | y_sign) == 0) return x_log <= y_log; // both positive
+    if ((x_sign == 0) & (y_sign == 1)) return false; // x positive, y negative
+    if ((x_sign == 1) & (y_sign == 0)) return true; // x negative, y positive
+    return y_log <= x_log; // both negative
+}
+
+bool lt16(int16_t x, int16_t y) {
+    const int16_t x_log = x >> 1;
+    const int16_t y_log = y >> 1;
+    const int x_sign = x & 1;
+    const int y_sign = y & 1;
+
+    if ((x_sign | y_sign) == 0) return x_log < y_log; // both positive
+    if ((x_sign == 0) & (y_sign == 1)) return false; // x positive, y negative
+    if ((x_sign == 1) & (y_sign == 0)) return true; // x negative, y positive
+    return y_log < x_log; // both negative
+}
+
 Ops<16> ops16 = []{
     Ops<16> o;
     o.from_float = from_float16;
@@ -77,6 +125,10 @@ Ops<16> ops16 = []{
     o.sub = sub16;
     o.mul = mul16;
     o.div = div16;
+    o.ge = ge16;
+    o.gt = gt16;
+    o.le = le16;
+    o.lt = lt16;
     return o;
 }();
 

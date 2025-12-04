@@ -85,6 +85,25 @@ torch::Tensor OpsImpl<bitwidth>::run_binary_kernel(const torch::Tensor& x, const
 }
 
 template <size_t bitwidth>
+template <typename F>
+torch::Tensor OpsImpl<bitwidth>::run_binary_bool_kernel(const torch::Tensor& x, const torch::Tensor& y, F f) const {
+    auto out = at::empty_like(x, x.options().dtype(torch::kBool));
+
+    auto iter = at::TensorIteratorConfig()
+        .add_output(out)
+        .add_input(x)
+        .add_input(y)
+        .check_all_same_dtype(false)
+        .build();
+
+    at::native::cpu_kernel(iter, [f](StorageT a, StorageT b) -> bool {
+        return f(a, b);
+    });
+
+    return out;
+}
+
+template <size_t bitwidth>
 torch::Tensor OpsImpl<bitwidth>::add(const torch::Tensor& x, const torch::Tensor& y) const {
     return run_binary_kernel(x, y, ops.add);
 }
@@ -102,6 +121,26 @@ torch::Tensor OpsImpl<bitwidth>::mul(const torch::Tensor& x, const torch::Tensor
 template <size_t bitwidth>
 torch::Tensor OpsImpl<bitwidth>::div(const torch::Tensor& x, const torch::Tensor& y) const {
     return run_binary_kernel(x, y, ops.div);
+}
+
+template <size_t bitwidth>
+torch::Tensor OpsImpl<bitwidth>::ge(const torch::Tensor& x, const torch::Tensor& y) const {
+    return run_binary_bool_kernel(x, y, ops.ge);
+}
+
+template <size_t bitwidth>
+torch::Tensor OpsImpl<bitwidth>::gt(const torch::Tensor& x, const torch::Tensor& y) const {
+    return run_binary_bool_kernel(x, y, ops.gt);
+}
+
+template <size_t bitwidth>
+torch::Tensor OpsImpl<bitwidth>::le(const torch::Tensor& x, const torch::Tensor& y) const {
+    return run_binary_bool_kernel(x, y, ops.le);
+}
+
+template <size_t bitwidth>
+torch::Tensor OpsImpl<bitwidth>::lt(const torch::Tensor& x, const torch::Tensor& y) const {
+    return run_binary_bool_kernel(x, y, ops.lt);
 }
 
 static inline std::vector<int64_t> _canonicalize_dims(std::vector<int64_t> dims, int64_t ndim) {

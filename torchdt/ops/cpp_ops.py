@@ -9,6 +9,10 @@ def register_cpp_ops(dtype_cls: type, backend: str) -> None:
     dtype_cls.register_op("sub")(lambda ops, x, y: sub_op(backend, bitwidth, ops, x, y))
     dtype_cls.register_op("mul")(lambda ops, x, y: mul_op(backend, bitwidth, ops, x, y))
     dtype_cls.register_op("div")(lambda ops, x, y: div_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("ge")(lambda ops, x, y: ge_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("gt")(lambda ops, x, y: gt_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("le")(lambda ops, x, y: le_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("lt")(lambda ops, x, y: lt_op(backend, bitwidth, ops, x, y))
     dtype_cls.register_op("sum")(lambda ops, x, dim=None, keepdim=False: sum_op(backend, bitwidth, ops, x, dim, keepdim))
     dtype_cls.register_op("matmul")(lambda ops, A, B: matmul_op(backend, bitwidth, ops, A, B))
     dtype_cls.register_op("matmul_backward")(lambda ops, grad_output, A, B: matmul_backward_op(backend, bitwidth, ops, grad_output, A, B))
@@ -27,6 +31,18 @@ def mul_op(backend, bitwidth, _, x, y):
 
 def div_op(backend, bitwidth, _, x, y):
     return C.div(backend, bitwidth, x, y)
+
+def ge_op(backend, bitwidth, _, x, y):
+    return C.ge(backend, bitwidth, x, y)
+
+def gt_op(backend, bitwidth, _, x, y):
+    return C.gt(backend, bitwidth, x, y)
+
+def le_op(backend, bitwidth, _, x, y):
+    return C.le(backend, bitwidth, x, y)
+
+def lt_op(backend, bitwidth, _, x, y):
+    return C.lt(backend, bitwidth, x, y)
 
 def sum_op(backend, bitwidth, _, x, dim=None, keepdim=False):
     return C.sum(backend, bitwidth, x, dim, keepdim)
