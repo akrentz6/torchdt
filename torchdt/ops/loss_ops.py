@@ -28,7 +28,7 @@ def dt_mse_loss(ops, x, y, reduction='mean', weight=None):
 
         else:
             num_elements = x.numel()
-            mean = ops.div(squared_error_sum, ops.from_float(num_elements))
+            mean = ops.div(squared_error_sum, ops.scalar_from_float(num_elements))
             return mean
 
 class DTMSELossFunction(DTFunction):
@@ -49,7 +49,7 @@ class DTMSELossFunction(DTFunction):
 
         if weight is not None:
             grad = ops.sub(x, y)
-            grad = ops.mul(grad, ops.from_float(2.0))
+            grad = ops.mul(grad, ops.scalar_from_float(2.0))
             grad = ops.mul(grad, weight)
 
             if ctx.reduction == 'mean':
@@ -58,11 +58,11 @@ class DTMSELossFunction(DTFunction):
 
         else:
             grad = ops.sub(x, y)
-            grad = ops.mul(grad, ops.from_float(2.0))
+            grad = ops.mul(grad, ops.scalar_from_float(2.0))
 
             if ctx.reduction == 'mean':
                 num_elements = x.numel()
-                grad = ops.div(grad, ops.from_float(num_elements))
+                grad = ops.div(grad, ops.scalar_from_float(num_elements))
 
         grad_x = ops.mul(grad, grad_output)
         grad_y = ops.neg(grad_x)
@@ -93,7 +93,7 @@ def dt_l1_loss(ops, x, y, reduction='mean', weight=None):
 
         else:
             num_elements = x.numel()
-            mean = ops.div(abs_error_sum, ops.from_float(num_elements))
+            mean = ops.div(abs_error_sum, ops.scalar_from_float(num_elements))
             return mean
 
 class DTL1LossFunction(DTFunction):
@@ -126,7 +126,7 @@ class DTL1LossFunction(DTFunction):
 
             if ctx.reduction == 'mean':
                 num_elements = x.numel()
-                grad = ops.div(grad, ops.from_float(num_elements))
+                grad = ops.div(grad, ops.scalar_from_float(num_elements))
 
         grad_x = ops.mul(grad, grad_output)
         grad_y = ops.neg(grad_x)
@@ -136,9 +136,9 @@ class DTL1LossFunction(DTFunction):
 def dt_binary_cross_entropy(ops, x, y, weight=None, reduction='mean'):
     log_x = ops.log(x)
     pos_log_prob = ops.mul(y, log_x)
-    x2 = ops.sub(ops.from_float(1.0), x)
+    x2 = ops.sub(ops.scalar_from_float(1.0), x)
     log_x2 = ops.log(x2)
-    y2 = ops.sub(ops.from_float(1.0), y)
+    y2 = ops.sub(ops.scalar_from_float(1.0), y)
     neg_log_prob = ops.mul(y2, log_x2)
 
     loss = ops.add(pos_log_prob, neg_log_prob)
@@ -163,7 +163,7 @@ def dt_binary_cross_entropy(ops, x, y, weight=None, reduction='mean'):
 
         else:
             num_elements = x.numel()
-            mean = ops.div(loss_sum, ops.from_float(num_elements))
+            mean = ops.div(loss_sum, ops.scalar_from_float(num_elements))
             return mean
 
 class DTBCELossFunction(DTFunction):
@@ -183,8 +183,8 @@ class DTBCELossFunction(DTFunction):
         x, y, weight = ctx.saved_tensors
 
         if weight is not None:
-            one_minus_x = ops.sub(ops.from_float(1.0), x)
-            one_minus_y = ops.sub(ops.from_float(1.0), y)
+            one_minus_x = ops.sub(ops.scalar_from_float(1.0), x)
+            one_minus_y = ops.sub(ops.scalar_from_float(1.0), y)
             term1 = ops.div(one_minus_y, one_minus_x)
             term2 = ops.div(y, x)
 
@@ -202,8 +202,8 @@ class DTBCELossFunction(DTFunction):
                 grad_y = ops.div(grad_y, weight_sum)
 
         else:
-            one_minus_x = ops.sub(ops.from_float(1.0), x)
-            one_minus_y = ops.sub(ops.from_float(1.0), y)
+            one_minus_x = ops.sub(ops.scalar_from_float(1.0), x)
+            one_minus_y = ops.sub(ops.scalar_from_float(1.0), y)
             term1 = ops.div(one_minus_y, one_minus_x)
             term2 = ops.div(y, x)
 
@@ -213,7 +213,7 @@ class DTBCELossFunction(DTFunction):
             grad_y = ops.neg(grad_y)
 
             if ctx.reduction == 'mean':
-                num_elements = ops.from_float(x.numel())
+                num_elements = ops.scalar_from_float(x.numel())
                 grad_x = ops.div(grad_x, num_elements)
                 grad_y = ops.div(grad_y, num_elements)
 
@@ -230,9 +230,9 @@ def dt_binary_cross_entropy_with_logits(ops, x, y, weight=None, reduction='mean'
     log_sigmoid_x = ops.log(sigmoid_x)
     pos_log_prob = ops.mul(y, log_sigmoid_x)
 
-    sigmoid_x2 = ops.sub(ops.from_float(1.0), sigmoid_x)
+    sigmoid_x2 = ops.sub(ops.scalar_from_float(1.0), sigmoid_x)
     log_sigmoid_x2 = ops.log(sigmoid_x2)
-    y2 = ops.sub(ops.from_float(1.0), y)
+    y2 = ops.sub(ops.scalar_from_float(1.0), y)
     neg_log_prob = ops.mul(y2, log_sigmoid_x2)
 
     loss = ops.add(pos_log_prob, neg_log_prob)
@@ -256,7 +256,7 @@ def dt_binary_cross_entropy_with_logits(ops, x, y, weight=None, reduction='mean'
             return weighted_mean
 
         else:
-            num_elements = ops.from_float(x.numel())
+            num_elements = ops.scalar_from_float(x.numel())
             mean = ops.div(loss_sum, num_elements)
             return mean
 
@@ -295,7 +295,7 @@ class DTBCEWithLogitsLossFunction(DTFunction):
             grad_y = ops.neg(x)
 
             if ctx.reduction == 'mean':
-                num_elements = ops.from_float(x.numel())
+                num_elements = ops.scalar_from_float(x.numel())
                 grad_x = ops.div(grad_x, num_elements)
                 grad_y = ops.div(grad_y, num_elements)
 
@@ -335,7 +335,7 @@ def dt_nll_loss(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
             return weighted_mean
 
         else:
-            batch_size = ops.from_float(y.size(0))
+            batch_size = ops.scalar_from_float(y.size(0))
             mean = ops.div(loss_sum, batch_size)
             return mean
 
@@ -372,15 +372,15 @@ class DTNLLLossFunction(DTFunction):
         else:
             grad_x = ops.zeros_like(x)
             if grad_x.dim() == 1:
-                grad_x[y] = ops.from_float(-1.0)
+                grad_x[y] = ops.scalar_from_float(-1.0)
 
             else:
                 batch_size = y.size(0)
                 indices = torch.arange(batch_size)
-                grad_x[indices, y] = ops.from_float(-1.0)
+                grad_x[indices, y] = ops.scalar_from_float(-1.0)
 
             if ctx.reduction == 'mean':
-                batch_size = ops.from_float(y.size(0))
+                batch_size = ops.scalar_from_float(y.size(0))
                 grad_x = ops.div(grad_x, batch_size)
 
         if ctx.reduction == 'none':
@@ -407,11 +407,11 @@ def dt_poisson_nll_loss(ops, x, y, eps, log_input=True, full=False, reduction='m
         loss = ops.sub(x, ops.mul(y, log_x))
 
     if full:
-        y_clamped = torch.where(ops.gt(y, ops.from_float(1.0)), y, ops.from_float(1.0))
+        y_clamped = torch.where(ops.gt(y, ops.scalar_from_float(1.0)), y, ops.scalar_from_float(1.0))
 
-        two_pi = ops.from_float(2.0 * math.pi)
+        two_pi = ops.scalar_from_float(2.0 * math.pi)
         stirling_term1 = ops.mul(y_clamped, ops.log(y_clamped))
-        stirling_term3 = ops.mul(ops.log(ops.mul(two_pi, y_clamped)), ops.from_float(0.5))
+        stirling_term3 = ops.mul(ops.log(ops.mul(two_pi, y_clamped)), ops.scalar_from_float(0.5))
         stirling = ops.add(ops.sub(stirling_term1, y_clamped), stirling_term3)
 
         loss = ops.add(loss, stirling)
@@ -425,7 +425,7 @@ def dt_poisson_nll_loss(ops, x, y, eps, log_input=True, full=False, reduction='m
 
     elif reduction == 'mean':
         loss_sum = ops.sum(loss)
-        num_elements = ops.from_float(x.numel())
+        num_elements = ops.scalar_from_float(x.numel())
         mean = ops.div(loss_sum, num_elements)
         return mean
 
@@ -453,18 +453,18 @@ class DTPoissonNLLLossFunction(DTFunction):
 
         else:
             grad_x = ops.div(y, ops.add(x, eps))
-            grad_x = ops.sub(ops.from_float(1.0), grad_x)
+            grad_x = ops.sub(ops.scalar_from_float(1.0), grad_x)
             grad_y = ops.neg(ops.log(ops.add(x, eps)))
 
         if ctx.full:
-            stirling_grad = torch.where(ops.gt(y, ops.from_float(1.0)),
+            stirling_grad = torch.where(ops.gt(y, ops.scalar_from_float(1.0)),
                                         ops.add(ops.log(y), ops.div(
-                                            ops.from_float(0.5), y)),
-                                       ops.from_float(0.0))
+                                            ops.scalar_from_float(0.5), y)),
+                                       ops.scalar_from_float(0.0))
             grad_y = ops.add(grad_y, stirling_grad)
 
         if ctx.reduction == 'mean':
-            num_elements = ops.from_float(x.numel())
+            num_elements = ops.scalar_from_float(x.numel())
             grad_x = ops.div(grad_x, num_elements)
 
         grad_x = ops.mul(grad_x, grad_output)
@@ -474,8 +474,8 @@ class DTPoissonNLLLossFunction(DTFunction):
 
 @register_base_op("hinge_embedding_loss")
 def dt_hinge_embedding_loss(ops, x, y, margin=None, reduction='mean'):
-    positive_mask = ops.eq(y, ops.from_float(1.0))
-    loss = torch.where(positive_mask, x, ops.maximum(ops.from_float(0.0), ops.sub(margin, x)))
+    positive_mask = ops.eq(y, ops.scalar_from_float(1.0))
+    loss = torch.where(positive_mask, x, ops.maximum(ops.scalar_from_float(0.0), ops.sub(margin, x)))
 
     if reduction == 'none':
         return loss
@@ -486,7 +486,7 @@ def dt_hinge_embedding_loss(ops, x, y, margin=None, reduction='mean'):
 
     elif reduction == 'mean':
         loss_sum = ops.sum(loss)
-        num_elements = ops.from_float(x.numel())
+        num_elements = ops.scalar_from_float(x.numel())
         mean = ops.div(loss_sum, num_elements)
         return mean
 
@@ -506,13 +506,13 @@ class DTHingeEmbeddingLossFunction(DTFunction):
     def backward(ctx, ops, grad_output):
         x, y, margin = ctx.saved_tensors
 
-        grad_x = torch.where(ops.eq(y, ops.from_float(1.0)),
-                             ops.from_float(1.0),
-                             torch.where(ops.gt(ops.sub(margin, x), ops.from_float(0.0)),
-                                         ops.from_float(-1.0), ops.from_float(0.0)))
+        grad_x = torch.where(ops.eq(y, ops.scalar_from_float(1.0)),
+                             ops.scalar_from_float(1.0),
+                             torch.where(ops.gt(ops.sub(margin, x), ops.scalar_from_float(0.0)),
+                                         ops.scalar_from_float(-1.0), ops.scalar_from_float(0.0)))
 
         if ctx.reduction == 'mean':
-            num_elements = ops.from_float(x.numel())
+            num_elements = ops.scalar_from_float(x.numel())
             grad_x = ops.div(grad_x, num_elements)
 
         grad_x = ops.mul(grad_x, grad_output)
@@ -535,13 +535,13 @@ def dt_kl_div(ops, x, y, reduction='mean', log_target=False):
 
     elif reduction == 'mean':
         loss_sum = ops.sum(loss)
-        num_elements = ops.from_float(x.numel())
+        num_elements = ops.scalar_from_float(x.numel())
         mean = ops.div(loss_sum, num_elements)
         return mean
 
     elif reduction == 'batchmean':
         loss_sum = ops.sum(loss)
-        num_elements = ops.from_float(x.size(0))
+        num_elements = ops.scalar_from_float(x.size(0))
         batch_mean = ops.div(loss_sum, num_elements)
         return batch_mean
 
@@ -565,18 +565,18 @@ class DTKLDivLossFunction(DTFunction):
         if ctx.log_target:
             exp_y = ops.exp(y)
             grad_x = ops.neg(exp_y)
-            grad_y = ops.mul(exp_y, ops.add(ops.sub(y, x), ops.from_float(1.0)))
+            grad_y = ops.mul(exp_y, ops.add(ops.sub(y, x), ops.scalar_from_float(1.0)))
         else:
             grad_x = ops.neg(y)
-            grad_y = ops.add(ops.sub(ops.log(y), x), ops.from_float(1.0))
+            grad_y = ops.add(ops.sub(ops.log(y), x), ops.scalar_from_float(1.0))
 
         if ctx.reduction == 'mean':
-            num_elements = ops.from_float(x.numel())
+            num_elements = ops.scalar_from_float(x.numel())
             grad_x = ops.div(grad_x, num_elements)
             grad_y = ops.div(grad_y, num_elements)
 
         elif ctx.reduction == 'batchmean':
-            num_elements = ops.from_float(x.size(0))
+            num_elements = ops.scalar_from_float(x.size(0))
             grad_x = ops.div(grad_x, num_elements)
             grad_y = ops.div(grad_y, num_elements)
 
@@ -590,7 +590,7 @@ def dt_margin_ranking_loss(ops, x1, x2, y, margin, reduction='mean'):
     loss = ops.sub(x1, x2)
     loss = ops.mul(loss, y)
     loss = ops.sub(margin, loss)
-    loss = ops.maximum(ops.from_float(0.0), loss)
+    loss = ops.maximum(ops.scalar_from_float(0.0), loss)
 
     if reduction == 'none':
         return loss
@@ -601,7 +601,7 @@ def dt_margin_ranking_loss(ops, x1, x2, y, margin, reduction='mean'):
 
     elif reduction == 'mean':
         loss_sum = ops.sum(loss)
-        num_elements = ops.from_float(x1.numel())
+        num_elements = ops.scalar_from_float(x1.numel())
         mean = ops.div(loss_sum, num_elements)
         return mean
 
@@ -624,14 +624,14 @@ class DTMarginRankingLossFunction(DTFunction):
         loss = ops.sub(x1, x2)
         loss = ops.mul(loss, y)
         loss = ops.sub(margin, loss)
-        gt_zero_mask = ops.gt(loss, ops.from_float(0.0))
+        gt_zero_mask = ops.gt(loss, ops.scalar_from_float(0.0))
 
-        grad_x1 = torch.where(gt_zero_mask, ops.neg(y), ops.from_float(0.0))
-        grad_x2 = torch.where(gt_zero_mask, y, ops.from_float(0.0))
-        grad_y = torch.where(gt_zero_mask, ops.sub(x2, x1), ops.from_float(0.0))
+        grad_x1 = torch.where(gt_zero_mask, ops.neg(y), ops.scalar_from_float(0.0))
+        grad_x2 = torch.where(gt_zero_mask, y, ops.scalar_from_float(0.0))
+        grad_y = torch.where(gt_zero_mask, ops.sub(x2, x1), ops.scalar_from_float(0.0))
 
         if ctx.reduction == 'mean':
-            num_elements = ops.from_float(x1.numel())
+            num_elements = ops.scalar_from_float(x1.numel())
             grad_x1 = ops.div(grad_x1, num_elements)
             grad_x2 = ops.div(grad_x2, num_elements)
             grad_y = ops.div(grad_y, num_elements)
@@ -649,10 +649,10 @@ def dt_gaussian_nll_loss(ops, x, y, var, eps, full=False, reduction='mean'):
     loss = ops.add(ops.log(var_eps), ops.div(loss, var_eps))
 
     if full:
-        two_pi = ops.from_float(2.0 * math.pi)
+        two_pi = ops.scalar_from_float(2.0 * math.pi)
         loss = ops.add(loss, ops.log(two_pi))
 
-    loss = ops.div(loss, ops.from_float(2.0))
+    loss = ops.div(loss, ops.scalar_from_float(2.0))
 
     if reduction == 'none':
         return loss
@@ -664,7 +664,7 @@ def dt_gaussian_nll_loss(ops, x, y, var, eps, full=False, reduction='mean'):
     elif reduction == 'mean':
         loss_sum = ops.sum(loss)
         num_elements = x.numel()
-        mean = ops.div(loss_sum, ops.from_float(num_elements))
+        mean = ops.div(loss_sum, ops.scalar_from_float(num_elements))
         return mean
 
 class DTGaussianNLLLossFunction(DTFunction):
@@ -689,10 +689,10 @@ class DTGaussianNLLLossFunction(DTFunction):
 
         grad_var = ops.square(ops.div(ops.sub(x, y), var))
         grad_var = ops.sub(ops.reciprocal(var), grad_var)
-        grad_var = ops.div(grad_var, ops.from_float(2.0))
+        grad_var = ops.div(grad_var, ops.scalar_from_float(2.0))
 
         if ctx.reduction == 'mean':
-            num_elements = ops.from_float(x.numel())
+            num_elements = ops.scalar_from_float(x.numel())
             grad_x = ops.div(grad_x, num_elements)
             grad_y = ops.div(grad_y, num_elements)
             grad_var = ops.div(grad_var, num_elements)
@@ -705,7 +705,7 @@ class DTGaussianNLLLossFunction(DTFunction):
 
 @register_base_op("huber_loss")
 def dt_huber_loss(ops, x, y, delta, reduction='mean', weight=None):
-    two = ops.from_float(2.0)
+    two = ops.scalar_from_float(2.0)
 
     abs_diff = ops.abs(ops.sub(x, y))
     l1_term = ops.sub(abs_diff, ops.div(delta, two))
@@ -727,7 +727,7 @@ def dt_huber_loss(ops, x, y, delta, reduction='mean', weight=None):
 
     elif reduction == 'mean':
         loss_sum = ops.sum(loss)
-        num_elements = ops.from_float(x.numel())
+        num_elements = ops.scalar_from_float(x.numel())
         mean = ops.div(loss_sum, num_elements)
         return mean
 
@@ -746,7 +746,7 @@ class DTHuberLossFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, y, delta, weight = ctx.saved_tensors
-        two = ops.from_float(2.0)
+        two = ops.scalar_from_float(2.0)
 
         l2_loss_grad_x = ops.sub(x, y)
         l2_loss_grad_y = ops.neg(l2_loss_grad_x)
@@ -772,7 +772,7 @@ class DTHuberLossFunction(DTFunction):
             grad_y = ops.mul(grad_y, weight)
 
         if ctx.reduction == 'mean':
-            num_elements = ops.from_float(x.numel())
+            num_elements = ops.scalar_from_float(x.numel())
             grad_x = ops.div(grad_x, num_elements)
             grad_y = ops.div(grad_y, num_elements)
             if weight is not None:
@@ -787,7 +787,7 @@ class DTHuberLossFunction(DTFunction):
 
 @register_base_op("smooth_l1_loss")
 def dt_smooth_l1_loss(ops, x, y, beta, reduction='mean'):
-    two = ops.from_float(2.0)
+    two = ops.scalar_from_float(2.0)
 
     abs_diff = ops.abs(ops.sub(x, y))
     l1_term = ops.sub(abs_diff, ops.div(beta, two))
@@ -804,7 +804,7 @@ def dt_smooth_l1_loss(ops, x, y, beta, reduction='mean'):
 
     elif reduction == 'mean':
         loss_sum = ops.sum(loss)
-        num_elements = ops.from_float(x.numel())
+        num_elements = ops.scalar_from_float(x.numel())
         mean = ops.div(loss_sum, num_elements)
         return mean
 
@@ -835,7 +835,7 @@ class DTSmoothL1LossFunction(DTFunction):
         grad_y = torch.where(l2_mask, l2_loss_grad_y, l1_loss_grad_y)
 
         if ctx.reduction == 'mean':
-            num_elements = ops.from_float(x.numel())
+            num_elements = ops.scalar_from_float(x.numel())
             grad_x = ops.div(grad_x, num_elements)
             grad_y = ops.div(grad_y, num_elements)
 
@@ -885,7 +885,7 @@ def dt_cross_entropy(ops, x, y, weight = None, ignore_index = -100, reduction = 
             return weighted_mean
 
         else:
-            batch_size = ops.from_float(y.size(0))
+            batch_size = ops.scalar_from_float(y.size(0))
             mean = ops.div(loss_sum, batch_size)
             return mean
 
@@ -926,7 +926,7 @@ class DTCrossEntropyLossFunction(DTFunction):
                 grad_x = ops.mul(grad_x, sample_weights)
                 grad_x[y] = ops.sub(grad_x[y], sample_weights)
             else:
-                grad_x[y] = ops.sub(grad_x[y], ops.from_float(1.0))
+                grad_x[y] = ops.sub(grad_x[y], ops.scalar_from_float(1.0))
 
         else:
             idx = torch.arange(y.size(0))
@@ -934,13 +934,13 @@ class DTCrossEntropyLossFunction(DTFunction):
                 grad_x = ops.mul(grad_x, sample_weights.view(-1, 1))
                 grad_x[idx, y] = ops.sub(grad_x[idx, y], sample_weights)
             else:
-                grad_x[idx, y] = ops.sub(grad_x[idx, y], ops.from_float(1.0))
+                grad_x[idx, y] = ops.sub(grad_x[idx, y], ops.scalar_from_float(1.0))
 
         if ctx.reduction == 'mean':
             if sample_weights is not None:
                 denom = ops.sum(sample_weights)
             else:
-                denom = ops.from_float(y.size(0))
+                denom = ops.scalar_from_float(y.size(0))
             grad_x = ops.div(grad_x, denom)
 
         elif ctx.reduction == 'none':

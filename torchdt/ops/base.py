@@ -28,36 +28,33 @@ class OpsBase:
     # ========== Useful helper functions ==========
 
     @classmethod
-    def from_float(cls, x):
-        return cls.dtype(x)._int
-
-    @classmethod
-    def to_float(cls, x):
-        return cls.dtype.to_float(x)
+    def scalar_from_float(cls, x: Union[float, int]) -> InternalTensor:
+        x_tensor = torch.tensor(x, dtype=torch.float32)
+        return cls.from_float(x_tensor)
 
     @classmethod
     def zeros(cls, size):
-        return torch.full(size, cls.from_float(0.0), dtype=cls.dtype.int_dtype)
+        return torch.full(size, cls.scalar_from_float(0.0), dtype=cls.dtype.int_dtype)
 
     @classmethod
     def zeros_like(cls, x):
-        return torch.full_like(x, cls.from_float(0.0), dtype=cls.dtype.int_dtype)
+        return torch.full_like(x, cls.scalar_from_float(0.0), dtype=cls.dtype.int_dtype)
 
     @classmethod
     def ones(cls, size):
-        return torch.full(size, cls.from_float(1.0), dtype=cls.dtype.int_dtype)
+        return torch.full(size, cls.scalar_from_float(1.0), dtype=cls.dtype.int_dtype)
 
     @classmethod
     def ones_like(cls, x):
-        return torch.full_like(x, cls.from_float(1.0), dtype=cls.dtype.int_dtype)
+        return torch.full_like(x, cls.scalar_from_float(1.0), dtype=cls.dtype.int_dtype)
 
     @classmethod
     def full(cls, size, fill_value):
-        return torch.full(size, cls.from_float(fill_value), dtype=cls.dtype.int_dtype)
+        return torch.full(size, cls.scalar_from_float(fill_value), dtype=cls.dtype.int_dtype)
 
     @classmethod
     def full_like(cls, x, fill_value):
-        return torch.full_like(x, cls.from_float(fill_value), dtype=cls.dtype.int_dtype)
+        return torch.full_like(x, cls.scalar_from_float(fill_value), dtype=cls.dtype.int_dtype)
 
     @classmethod
     def sum_to_size(cls, x: InternalTensor, target_size: torch.Size) -> InternalTensor:
@@ -83,6 +80,14 @@ class OpsBase:
         return x.reshape(target_size)
 
     # ========== Operations to be implemented by subclasses ==========
+
+    @classmethod
+    def from_float(cls, x: Tensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def to_float(cls, x: InternalTensor) -> Tensor:
+        raise NotImplementedError
 
     @classmethod
     def add(cls, x: InternalTensor, y: InternalTensor) -> InternalTensor:

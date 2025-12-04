@@ -5,6 +5,8 @@ import torch
 def register_cpp_ops(dtype_cls: type, backend: str) -> None:
     bitwidth = dtype_cls.bitwidth
 
+    dtype_cls.register_op("from_float")(lambda ops, x: from_float(backend, bitwidth, ops, x))
+    dtype_cls.register_op("to_float")(lambda ops, x: to_float(backend, bitwidth, ops, x))
     dtype_cls.register_op("add")(lambda ops, x, y: add_op(backend, bitwidth, ops, x, y))
     dtype_cls.register_op("sub")(lambda ops, x, y: sub_op(backend, bitwidth, ops, x, y))
     dtype_cls.register_op("mul")(lambda ops, x, y: mul_op(backend, bitwidth, ops, x, y))
@@ -19,6 +21,12 @@ def register_cpp_ops(dtype_cls: type, backend: str) -> None:
 
     # also register new torch. funcs to call ops that call into c++ for backward
     dtype_cls.register_func(torch.matmul, torch.Tensor.matmul, cast=("input", "other"))(matmul_func)
+
+def from_float(backend, bitwidth, _, x):
+    return C.from_float(backend, bitwidth, x)
+
+def to_float(backend, bitwidth, _, x):
+    return C.to_float(backend, bitwidth, x)
 
 def add_op(backend, bitwidth, _, x, y):
     return C.add(backend, bitwidth, x, y)

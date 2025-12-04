@@ -98,7 +98,7 @@ class DType(Tensor):
             if data.__class__ == cls:
                 payload = data
             else:
-                payload = data.to_float(data._float)
+                payload = data.to_float()
                 payload = ToDType.apply(payload, cls)
         elif isinstance(data, torch.Tensor):
             if internal:
@@ -107,13 +107,13 @@ class DType(Tensor):
                 else:
                     payload = data
             else:
-                payload = data.to(dtype=cls.float_dtype, device=device, memory_format=memory_format)
+                payload = data.to(dtype=torch.float32, device=device, memory_format=memory_format)
                 payload = ToDType.apply(payload, cls)
         else:
             if internal:
                 payload = torch.tensor(data, dtype=cls.int_dtype, device=device).view(cls.float_dtype)
             else:
-                payload = torch.tensor(data, dtype=cls.float_dtype, device=device)
+                payload = torch.tensor(data, dtype=torch.float32, device=device)
             payload = ToDType.apply(payload, cls)
             payload = payload.to(memory_format=memory_format)
 
@@ -283,16 +283,6 @@ class DType(Tensor):
         """Decorator to register an operation for this DType subclass."""
         return register_op(cls, method)
 
-    @staticmethod
-    def from_float(t: Tensor) -> Tensor:
-        "Convert a standard float tensor to this datatype."
-        raise NotImplementedError
-
-    @staticmethod
-    def to_float(t: Tensor) -> Tensor:
-        "Convert this datatype tensor to a standard float tensor."
-        raise NotImplementedError
-
     @property
     def _float(self) -> Tensor:
         "Return the underlying storage as a plain *float* tensor."
@@ -303,9 +293,12 @@ class DType(Tensor):
         "Integer bit-view of the same storage (no copy)."
         return self._float.view(_int_dtype[self.bitwidth])
 
+    def to_float(self):
+        return self.ops.to_float(self._int)
+
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}({self.to_float(self._float)}, bitwidth={self.bitwidth}, "
+            f"{self.__class__.__name__}({self.to_float()}, bitwidth={self.bitwidth}, "
             f"shape={tuple(self.shape)}, device={self.device})"
         )
 
@@ -313,8 +306,8 @@ class ToDType(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input: Tensor, dtype: Type[DType]) -> DType:
-        return dtype.from_float(input).view(dtype.float_dtype)
+        return dtype.ops.from_float(input).view(dtype.float_dtype)
 
     @staticmethod
     def backward(ctx, grad_output: DType) -> Tensor:
-        return grad_output.to_float(grad_output), None
+        return grad_output.to_float(), None
