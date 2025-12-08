@@ -1,8 +1,6 @@
 #ifndef REGISTRY_H
 #define REGISTRY_H
 
-#include <torch/extension.h>
-
 #include <cstdint>
 #include <type_traits>
 #include <string>
@@ -54,196 +52,6 @@ struct Ops {
     BoolBinOp lt = nullptr;
 };
 
-struct OpsBase {
-    virtual ~OpsBase() = default;
-
-    virtual torch::Tensor add(const torch::Tensor&, const torch::Tensor&) const {
-        throw std::runtime_error("add not implemented");
-    }
-
-    virtual torch::Tensor sub(const torch::Tensor&, const torch::Tensor&) const {
-        throw std::runtime_error("sub not implemented");
-    }
-
-    virtual torch::Tensor mul(const torch::Tensor&, const torch::Tensor&) const {
-        throw std::runtime_error("mul not implemented");
-    }
-
-    virtual torch::Tensor div(const torch::Tensor&, const torch::Tensor&) const {
-        throw std::runtime_error("div not implemented");
-    }
-
-    virtual torch::Tensor ge(const torch::Tensor&, const torch::Tensor&) const {
-        throw std::runtime_error("ge not implemented");
-    }
-
-    virtual torch::Tensor gt(const torch::Tensor&, const torch::Tensor&) const {
-        throw std::runtime_error("gt not implemented");
-    }
-
-    virtual torch::Tensor le(const torch::Tensor&, const torch::Tensor&) const {
-        throw std::runtime_error("le not implemented");
-    }
-
-    virtual torch::Tensor lt(const torch::Tensor&, const torch::Tensor&) const {
-        throw std::runtime_error("lt not implemented");
-    }
-
-    virtual torch::Tensor from_float(const torch::Tensor&) const {
-        throw std::runtime_error("from_float not implemented");
-    }
-
-    virtual torch::Tensor to_float(const torch::Tensor&) const {
-        throw std::runtime_error("to_float not implemented");
-    }
-
-    virtual torch::Tensor sum(
-        const torch::Tensor& x,
-        c10::optional<std::vector<int64_t>> dim,
-        bool keepdim = false
-    ) const {
-        throw std::runtime_error("sum not implemented");
-    }
-
-    virtual torch::Tensor matmul(const torch::Tensor& A, const torch::Tensor& B) const {
-        throw std::runtime_error("matmul_forward not implemented");
-    }
-
-    virtual std::vector<torch::Tensor> matmul_backward(
-        const torch::Tensor& grad_out,
-        const torch::Tensor& A,
-        const torch::Tensor& B) const {
-        throw std::runtime_error("matmul_backward not implemented");
-    }
-
-    virtual torch::Tensor conv2d(
-        const torch::Tensor& input,
-        const torch::Tensor& weight,
-        const c10::optional<torch::Tensor>& bias,
-        const std::vector<int64_t>& stride,
-        const std::vector<int64_t>& padding,
-        const std::vector<int64_t>& dilation,
-        int64_t groups
-    ) const {
-        throw std::runtime_error("conv2d not implemented");
-    }
-
-    torch::Tensor col2im_accumulate(
-        const torch::Tensor& cols,
-        int64_t C_per_group,
-        int64_t H, int64_t W,
-        int64_t KH, int64_t KW,
-        int64_t dil_h, int64_t dil_w,
-        int64_t pad_h, int64_t pad_w,
-        int64_t stride_h, int64_t stride_w,
-        int64_t OH, int64_t OW
-    ) const {
-        throw std::runtime_error("col2im_accumulate not implemented");
-    }
-
-    virtual std::vector<torch::Tensor> conv2d_backward(
-        const torch::Tensor& grad_out,
-        const torch::Tensor& input,
-        const torch::Tensor& weight,
-        const std::vector<int64_t>& stride,
-        const std::vector<int64_t>& padding,
-        const std::vector<int64_t>& dilation,
-        bool has_bias,
-        int64_t groups
-    ) const {
-        throw std::runtime_error("conv2d_backward not implemented");
-    }
-};
-
-// Forward declaration
-template <size_t bitwidth>
-struct OpsImpl : public OpsBase {
-    using StorageT = typename StorageFor<bitwidth>::type;
-    using BinOp = StorageT(*)(StorageT, StorageT);
-
-    Ops<bitwidth> ops;
-
-    OpsImpl(const Ops<bitwidth>& o) : ops(o) {}
-
-    template<typename F>
-    torch::Tensor run_unary_kernel(const torch::Tensor& x, F f) const;
-
-    template<typename F>
-    torch::Tensor run_binary_kernel(const torch::Tensor& x, const torch::Tensor& y, F f) const;
-
-    template<typename F>
-    torch::Tensor run_binary_bool_kernel(const torch::Tensor& x, const torch::Tensor& y, F f) const;
-
-    torch::Tensor from_float(const torch::Tensor& x) const;
-    torch::Tensor to_float(const torch::Tensor& x) const;
-
-    torch::Tensor add(const torch::Tensor& x, const torch::Tensor& y) const;
-    torch::Tensor sub(const torch::Tensor& x, const torch::Tensor& y) const;
-    torch::Tensor mul(const torch::Tensor& x, const torch::Tensor& y) const;
-    torch::Tensor div(const torch::Tensor& x, const torch::Tensor& y) const;
-
-    torch::Tensor ge(const torch::Tensor& x, const torch::Tensor& y) const;
-    torch::Tensor gt(const torch::Tensor& x, const torch::Tensor& y) const;
-    torch::Tensor le(const torch::Tensor& x, const torch::Tensor& y) const;
-    torch::Tensor lt(const torch::Tensor& x, const torch::Tensor& y) const;
-
-    torch::Tensor sum(
-        const torch::Tensor& x,
-        c10::optional<std::vector<int64_t>> dim,
-        bool keepdim = false) const;
-
-    torch::Tensor matmul(const torch::Tensor& A, const torch::Tensor& B) const;
-    std::vector<torch::Tensor> matmul_backward(
-        const torch::Tensor& grad_out,
-        const torch::Tensor& A,
-        const torch::Tensor& B) const;
-
-    torch::Tensor im2col_tile(
-        const StorageT* __restrict in_ptr, // pointer to (C, H, W) for the sample
-        int64_t C_per_group,
-        int64_t H, int64_t W,
-        int64_t KH, int64_t KW,
-        int64_t dil_h, int64_t dil_w,
-        int64_t pad_h, int64_t pad_w,
-        int64_t stride_h, int64_t stride_w,
-        int64_t tile_col_start,
-        int64_t tile_col_end,
-        int64_t OH, int64_t OW
-    ) const;
-
-    torch::Tensor conv2d(
-        const torch::Tensor& input,
-        const torch::Tensor& weight,
-        const c10::optional<torch::Tensor>& bias,
-        const std::vector<int64_t>& stride,
-        const std::vector<int64_t>& padding,
-        const std::vector<int64_t>& dilation,
-        int64_t groups
-    ) const;
-
-    torch::Tensor col2im_accumulate(
-        const torch::Tensor& cols,
-        int64_t C_per_group,
-        int64_t H, int64_t W,
-        int64_t KH, int64_t KW,
-        int64_t dil_h, int64_t dil_w,
-        int64_t pad_h, int64_t pad_w,
-        int64_t stride_h, int64_t stride_w,
-        int64_t OH, int64_t OW
-    ) const;
-
-    std::vector<torch::Tensor> conv2d_backward(
-        const torch::Tensor& grad_out,
-        const torch::Tensor& input,
-        const torch::Tensor& weight,
-        const std::vector<int64_t>& stride,
-        const std::vector<int64_t>& padding,
-        const std::vector<int64_t>& dilation,
-        bool has_bias,
-        const int64_t groups
-    ) const;
-};
-
 // simple key construction
 inline std::string make_key(const std::string &name, size_t bitwidth) {
     std::ostringstream ss;
@@ -259,13 +67,13 @@ public:
         return r;
     }
 
-    // register (take ownership)
-    void register_ops(const std::string &name, size_t bitwidth, std::unique_ptr<OpsBase> impl) {
+    template <size_t bitwidth>
+    void register_ops(const std::string &name, std::shared_ptr<Ops<bitwidth>> ops) {
         std::lock_guard<std::mutex> guard(mutex_);
         std::string key = make_key(name, bitwidth);
         if (map_.count(key))
             std::cerr << "Warning: overriding registration for " << key << "\n";
-        map_[key] = std::move(impl);
+        map_[key] = ops;
     }
 
     // typed getter, returns nullptr if not found or if wrong bitwidth
@@ -275,22 +83,12 @@ public:
         std::string key = make_key(name, bitwidth);
         auto it = map_.find(key);
         if (it == map_.end()) return nullptr;
-        OpsImpl<bitwidth>* p = dynamic_cast<OpsImpl<bitwidth>*>(it->second.get());
-        if (!p) return nullptr;
-        return &(p->ops);
-    }
-
-    // runtime getter by bitwidth: returns OpsBase* (less type-safe)
-    OpsBase* get_ops_base(const std::string &name, size_t bitwidth) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        auto it = map_.find(make_key(name, bitwidth));
-        if (it == map_.end()) return nullptr;
-        return it->second.get();
+        return static_cast<Ops<bitwidth>*>(it->second.get());
     }
 
 private:
     Registry() = default;
-    std::map<std::string, std::unique_ptr<OpsBase>> map_;
+    std::map<std::string, std::shared_ptr<void>> map_;
     std::mutex mutex_;
 };
 
@@ -299,8 +97,8 @@ private:
 namespace {                                                                             \
     struct _reg_helper_##BITWIDTH##_##__LINE__ {                                        \
         _reg_helper_##BITWIDTH##_##__LINE__() {                                         \
-            auto ptr = std::make_unique< OpsImpl<BITWIDTH> >((OPS_VAR));                \
-            Registry::instance().register_ops((NAME_STR), (BITWIDTH), std::move(ptr));  \
+            auto ptr = std::make_shared< Ops<BITWIDTH> >((OPS_VAR));                    \
+            Registry::instance().register_ops<BITWIDTH>((NAME_STR), ptr);               \
         }                                                                               \
     };                                                                                  \
     static _reg_helper_##BITWIDTH##_##__LINE__ _reg_instance_##BITWIDTH##_##__LINE__;   \

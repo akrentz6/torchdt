@@ -1,7 +1,7 @@
 #include <torch/extension.h>
 #include <torchdt/registry.h>
 
-#include "ops_kernels.h"
+#include "dispatcher.h"
 #include "lns16.h"
 
 torch::Tensor dispatch_from_float(
@@ -9,7 +9,7 @@ torch::Tensor dispatch_from_float(
     size_t bitwidth,
     const torch::Tensor& x
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->from_float(x);
 }
@@ -19,7 +19,7 @@ torch::Tensor dispatch_to_float(
     size_t bitwidth,
     const torch::Tensor& x
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->to_float(x);
 }
@@ -30,7 +30,7 @@ torch::Tensor dispatch_add(
     const torch::Tensor& x,
     const torch::Tensor& y
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->add(x, y);
 }
@@ -41,7 +41,7 @@ torch::Tensor dispatch_sub(
     const torch::Tensor& x,
     const torch::Tensor& y
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->sub(x, y);
 }
@@ -52,7 +52,7 @@ torch::Tensor dispatch_mul(
     const torch::Tensor& x,
     const torch::Tensor& y
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->mul(x, y);
 }
@@ -63,7 +63,7 @@ torch::Tensor dispatch_div(
     const torch::Tensor& x,
     const torch::Tensor& y
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->div(x, y);
 }
@@ -74,7 +74,7 @@ torch::Tensor dispatch_ge(
     const torch::Tensor& x,
     const torch::Tensor& y
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->ge(x, y);
 }
@@ -85,7 +85,7 @@ torch::Tensor dispatch_gt(
     const torch::Tensor& x,
     const torch::Tensor& y
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->gt(x, y);
 }
@@ -96,7 +96,7 @@ torch::Tensor dispatch_le(
     const torch::Tensor& x,
     const torch::Tensor& y
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->le(x, y);
 }
@@ -107,7 +107,7 @@ torch::Tensor dispatch_lt(
     const torch::Tensor& x,
     const torch::Tensor& y
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->lt(x, y);
 }
@@ -119,7 +119,7 @@ torch::Tensor dispatch_sum(
     c10::optional<std::vector<int64_t>> dim,
     bool keepdim
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->sum(x, dim, keepdim);
 }
@@ -130,7 +130,7 @@ torch::Tensor dispatch_matmul(
     const torch::Tensor& A,
     const torch::Tensor& B
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->matmul(A, B);
 }
@@ -142,7 +142,7 @@ std::vector<torch::Tensor> dispatch_matmul_backward(
     const torch::Tensor& A,
     const torch::Tensor& B
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->matmul_backward(grad_out, A, B);
 }
@@ -158,7 +158,7 @@ torch::Tensor dispatch_conv2d(
     const std::vector<int64_t>& dilation,
     int64_t groups
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->conv2d(
         input, weight, bias, stride, padding, dilation, groups
@@ -177,7 +177,7 @@ std::vector<torch::Tensor> dispatch_conv2d_backward(
     bool has_bias,
     int64_t groups
 ) {
-    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    OpsBase* ops = get_ops_impl(dtype_name, bitwidth);
     if (!ops) throw std::runtime_error("No ops registered");
     return ops->conv2d_backward(
         grad_out, input, weight, stride, padding, dilation, has_bias, groups

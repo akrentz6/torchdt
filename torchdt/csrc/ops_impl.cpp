@@ -1,7 +1,8 @@
-#include "ops_kernels.h"
 #include <torch/extension.h>
 #include <ATen/native/cpu/Reduce.h>
 #include <ATen/native/ReduceOpsUtils.h>
+
+#include "ops_impl.h"
 
 template <size_t bitwidth>
 constexpr torch::ScalarType int_type_from_bitwidth() {
@@ -27,40 +28,6 @@ torch::Tensor OpsImpl<bitwidth>::run_unary_kernel(const torch::Tensor& x, F f) c
 
     at::native::cpu_kernel(iter, [f](StorageT a) -> StorageT {
         return f(a);
-    });
-
-    return out;
-}
-
-template <size_t bitwidth>
-torch::Tensor OpsImpl<bitwidth>::from_float(const torch::Tensor& x) const {
-    auto out = at::empty_like(x, x.options().dtype(int_type_from_bitwidth<bitwidth>()));
-
-    auto iter = at::TensorIteratorConfig()
-        .add_output(out)
-        .add_input(x)
-        .check_all_same_dtype(false)
-        .build();
-
-    at::native::cpu_kernel(iter, [this](float a) -> StorageT {
-        return ops.from_float(a);
-    });
-
-    return out;
-}
-
-template <size_t bitwidth>
-torch::Tensor OpsImpl<bitwidth>::to_float(const torch::Tensor& x) const {
-    auto out = at::empty_like(x, x.options().dtype(torch::kFloat32));
-
-    auto iter = at::TensorIteratorConfig()
-        .add_output(out)
-        .add_input(x)
-        .check_all_same_dtype(false)
-        .build();
-
-    at::native::cpu_kernel(iter, [this](StorageT a) -> float {
-        return ops.to_float(a);
     });
 
     return out;
@@ -98,6 +65,40 @@ torch::Tensor OpsImpl<bitwidth>::run_binary_bool_kernel(const torch::Tensor& x, 
 
     at::native::cpu_kernel(iter, [f](StorageT a, StorageT b) -> bool {
         return f(a, b);
+    });
+
+    return out;
+}
+
+template <size_t bitwidth>
+torch::Tensor OpsImpl<bitwidth>::from_float(const torch::Tensor& x) const {
+    auto out = at::empty_like(x, x.options().dtype(int_type_from_bitwidth<bitwidth>()));
+
+    auto iter = at::TensorIteratorConfig()
+        .add_output(out)
+        .add_input(x)
+        .check_all_same_dtype(false)
+        .build();
+
+    at::native::cpu_kernel(iter, [this](float a) -> StorageT {
+        return ops.from_float(a);
+    });
+
+    return out;
+}
+
+template <size_t bitwidth>
+torch::Tensor OpsImpl<bitwidth>::to_float(const torch::Tensor& x) const {
+    auto out = at::empty_like(x, x.options().dtype(torch::kFloat32));
+
+    auto iter = at::TensorIteratorConfig()
+        .add_output(out)
+        .add_input(x)
+        .check_all_same_dtype(false)
+        .build();
+
+    at::native::cpu_kernel(iter, [this](StorageT a) -> float {
+        return ops.to_float(a);
     });
 
     return out;
@@ -566,7 +567,7 @@ std::vector<torch::Tensor> OpsImpl<bitwidth>::conv2d_backward(
     const std::vector<int64_t>& padding,
     const std::vector<int64_t>& dilation,
     bool has_bias,
-    const int64_t groups
+    int64_t groups
 ) const {
 
     torch::Tensor input_prepped;
