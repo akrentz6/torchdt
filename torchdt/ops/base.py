@@ -136,6 +136,13 @@ class OpsBase:
                         B: InternalTensor) -> tuple[InternalTensor, InternalTensor]:
         raise NotImplementedError
 
+    @classmethod
+    def conv2d_backward(cls, grad_output: InternalTensor, input: InternalTensor,
+                        weight: InternalTensor, stride: tuple[int], padding: tuple[int],
+                        dilation: tuple[int], has_bias: bool, groups: int
+                        ) -> tuple[InternalTensor, InternalTensor, InternalTensor]:
+        raise NotImplemented
+
     # ========== 'Base' operations with default implementations ==========
 
     @classmethod

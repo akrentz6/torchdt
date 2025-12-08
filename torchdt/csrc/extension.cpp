@@ -147,6 +147,43 @@ std::vector<torch::Tensor> dispatch_matmul_backward(
     return ops->matmul_backward(grad_out, A, B);
 }
 
+torch::Tensor dispatch_conv2d(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const c10::optional<torch::Tensor>& bias,
+    const std::vector<int64_t>& stride,
+    const std::vector<int64_t>& padding,
+    const std::vector<int64_t>& dilation,
+    int64_t groups
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->conv2d(
+        input, weight, bias, stride, padding, dilation, groups
+    );
+}
+
+std::vector<torch::Tensor> dispatch_conv2d_backward(
+    const std::string& dtype_name,
+    size_t bitwidth,
+    const torch::Tensor& grad_out,
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const std::vector<int64_t>& stride,
+    const std::vector<int64_t>& padding,
+    const std::vector<int64_t>& dilation,
+    bool has_bias,
+    int64_t groups
+) {
+    OpsBase* ops = Registry::instance().get_ops_base(dtype_name, bitwidth);
+    if (!ops) throw std::runtime_error("No ops registered");
+    return ops->conv2d_backward(
+        grad_out, input, weight, stride, padding, dilation, has_bias, groups
+    );
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "from_float", &dispatch_from_float,
@@ -214,6 +251,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("dtype_name"), py::arg("bitwidth"),
         py::arg("grad_out"), py::arg("A"), py::arg("B"),
         "Matrix multiplication backward for custom dtypes"
+    );
+    m.def(
+        "conv2d", &dispatch_conv2d,
+        py::arg("dtype_name"), py::arg("bitwidth"),
+        py::arg("input"), py::arg("weight"), py::arg("bias"),
+        py::arg("stride"), py::arg("padding"), py::arg("dilation"),
+        py::arg("groups"),
+        "2D convolution forward for custom dtypes"
+    );
+    m.def(
+        "conv2d_backward", &dispatch_conv2d_backward,
+        py::arg("dtype_name"), py::arg("bitwidth"),
+        py::arg("grad_out"), py::arg("input"), py::arg("weight"),
+        py::arg("stride"), py::arg("padding"), py::arg("dilation"),
+        py::arg("has_bias"), py::arg("groups"),
+        "2D convolution backward for custom dtypes"
     );
 }
 

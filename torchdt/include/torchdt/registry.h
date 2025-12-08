@@ -115,6 +115,44 @@ struct OpsBase {
         const torch::Tensor& B) const {
         throw std::runtime_error("matmul_backward not implemented");
     }
+
+    virtual torch::Tensor conv2d(
+        const torch::Tensor& input,
+        const torch::Tensor& weight,
+        const c10::optional<torch::Tensor>& bias,
+        const std::vector<int64_t>& stride,
+        const std::vector<int64_t>& padding,
+        const std::vector<int64_t>& dilation,
+        int64_t groups
+    ) const {
+        throw std::runtime_error("conv2d not implemented");
+    }
+
+    torch::Tensor col2im_accumulate(
+        const torch::Tensor& cols,
+        int64_t C_per_group,
+        int64_t H, int64_t W,
+        int64_t KH, int64_t KW,
+        int64_t dil_h, int64_t dil_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t stride_h, int64_t stride_w,
+        int64_t OH, int64_t OW
+    ) const {
+        throw std::runtime_error("col2im_accumulate not implemented");
+    }
+
+    virtual std::vector<torch::Tensor> conv2d_backward(
+        const torch::Tensor& grad_out,
+        const torch::Tensor& input,
+        const torch::Tensor& weight,
+        const std::vector<int64_t>& stride,
+        const std::vector<int64_t>& padding,
+        const std::vector<int64_t>& dilation,
+        bool has_bias,
+        int64_t groups
+    ) const {
+        throw std::runtime_error("conv2d_backward not implemented");
+    }
 };
 
 // Forward declaration
@@ -159,6 +197,51 @@ struct OpsImpl : public OpsBase {
         const torch::Tensor& grad_out,
         const torch::Tensor& A,
         const torch::Tensor& B) const;
+
+    torch::Tensor im2col_tile(
+        const StorageT* __restrict in_ptr, // pointer to (C, H, W) for the sample
+        int64_t C_per_group,
+        int64_t H, int64_t W,
+        int64_t KH, int64_t KW,
+        int64_t dil_h, int64_t dil_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t stride_h, int64_t stride_w,
+        int64_t tile_col_start,
+        int64_t tile_col_end,
+        int64_t OH, int64_t OW
+    ) const;
+
+    torch::Tensor conv2d(
+        const torch::Tensor& input,
+        const torch::Tensor& weight,
+        const c10::optional<torch::Tensor>& bias,
+        const std::vector<int64_t>& stride,
+        const std::vector<int64_t>& padding,
+        const std::vector<int64_t>& dilation,
+        int64_t groups
+    ) const;
+
+    torch::Tensor col2im_accumulate(
+        const torch::Tensor& cols,
+        int64_t C_per_group,
+        int64_t H, int64_t W,
+        int64_t KH, int64_t KW,
+        int64_t dil_h, int64_t dil_w,
+        int64_t pad_h, int64_t pad_w,
+        int64_t stride_h, int64_t stride_w,
+        int64_t OH, int64_t OW
+    ) const;
+
+    std::vector<torch::Tensor> conv2d_backward(
+        const torch::Tensor& grad_out,
+        const torch::Tensor& input,
+        const torch::Tensor& weight,
+        const std::vector<int64_t>& stride,
+        const std::vector<int64_t>& padding,
+        const std::vector<int64_t>& dilation,
+        bool has_bias,
+        const int64_t groups
+    ) const;
 };
 
 // simple key construction
