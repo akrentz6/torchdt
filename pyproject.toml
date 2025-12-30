@@ -31,7 +31,7 @@ name = "torchdt._C"
 sources = []  # Filled dynamically
 language = "c++"
 extra-compile-args = ["-O3", "-std=c++17"]
-optional = false
+optional = true
 
 [tool.setuptools.cmdclass]
 build_ext = "torchdt._build_ext.BuildCxxExtension"

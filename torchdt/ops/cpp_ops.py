@@ -1,8 +1,14 @@
-import torchdt._C as C
+try:
+    import torchdt._C as C
+except ImportError:
+    C = None
 from torchdt.autograd import DTFunction
 import torch
 
 def register_cpp_ops(dtype_cls: type, backend: str) -> None:
+    if C is None:
+        raise ImportError("C++ extension is not built. Please build the C++ extension to use C++ backend.")
+
     bitwidth = dtype_cls.bitwidth
 
     dtype_cls.register_op("from_float")(lambda ops, x: from_float(backend, bitwidth, ops, x))

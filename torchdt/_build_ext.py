@@ -1,18 +1,32 @@
 from torch.utils.cpp_extension import BuildExtension, include_paths
 from pathlib import Path
-import shutil
-
-def copy_headers(src_dir: Path, dst_dir: Path):
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    for header in src_dir.glob("*.h"):
-        shutil.copy(header, dst_dir)
+import os
 
 class BuildCxxExtension(BuildExtension):
     """
     Build all .cpp files in csrc/ and include Torch headers.
     Fails hard if compilation fails.
     """
+
+    user_options = BuildExtension.user_options + [
+        ("no-cpp", None, "Do not build the C++ extension"),
+    ]
+    boolean_options = getattr(BuildExtension, "boolean_options", []) + ["no-cpp"]
+
+    def initialize_options(self):
+        super().initialize_options()
+        self.no_cpp = False
+
+    def finalize_options(self):
+        super().finalize_options()
+        if os.environ.get("TORCHDT_NO_CPP", "").lower() in {"1", "true", "yes", "on"}:
+            self.no_cpp = True
+
     def build_extensions(self):
+        if self.no_cpp:
+            self.extensions = []
+            return
+
         src_dir = Path(__file__).resolve().parent / "csrc"
         include_dir = Path(__file__).resolve().parent / "include"
         cpp_files = [str(p) for p in src_dir.glob("*.cpp")]
