@@ -6,69 +6,22 @@ try:
 except ImportError:
     HAS_TRITON = False
 
-class TritonOps:
-
-    @staticmethod
-    def from_float(x):
-        pass
-
-    @staticmethod
-    def to_float(x):
-        pass
-
-    @staticmethod
-    def add(x, y):
-        pass
-
-    @staticmethod
-    def sub(x, y):
-        pass
-
-    @staticmethod
-    def mul(x, y):
-        pass
-
-    @staticmethod
-    def div(x, y):
-        pass
-
-    @staticmethod
-    def sqrt(x):
-        pass
-
-    @staticmethod
-    def gt(x, y):
-        pass
-
-    @staticmethod
-    def ge(x, y):
-        pass
-
-    @staticmethod
-    def lt(x, y):
-        pass
-
-    @staticmethod
-    def le(x, y):
-        pass
-
-def register_triton_ops(dtype_cls: type, ops: type) -> None:
+def register_triton_ops(
+    dtype_cls: type,
+    from_float=None,
+    to_float=None,
+    add=None,
+    sub=None,
+    mul=None,
+    div=None,
+    sqrt=None,
+    gt=None,
+    ge=None,
+    lt=None,
+    le=None,
+) -> None:
     if not HAS_TRITON:
         raise ImportError("Triton is not installed. Please install Triton to use Triton backend.")
-
-    from_float = ops.from_float
-    to_float = ops.to_float
-
-    add = ops.add
-    sub = ops.sub
-    mul = ops.mul
-    div = ops.div
-    sqrt = ops.sqrt
-
-    gt = ops.gt
-    ge = ops.ge
-    lt = ops.lt
-    le = ops.le
 
     @triton.jit
     def from_float_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):

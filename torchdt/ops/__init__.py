@@ -1,6 +1,6 @@
 from .base import OpsBase, register_op, register_base_op
 from .cpp_ops import register_cpp_ops
-from .triton_ops import register_triton_ops, TritonOps
+from .triton_ops import register_triton_ops
 
 # import all operation modules to register their implementations
 from . import arithmetic_ops
@@ -17,5 +17,4 @@ __all__ = [
     "register_base_op",
     "register_cpp_ops",
     "register_triton_ops",
-    "TritonOps",
 ]
