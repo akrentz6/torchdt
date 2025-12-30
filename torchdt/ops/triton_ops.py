@@ -23,6 +23,8 @@ def register_triton_ops(
     lt=None,
     le=None,
     _ZERO=None,
+    _NEG_INF=None,
+    _ONE=None,
 ) -> None:
     if not HAS_TRITON:
         raise ImportError("Triton is not installed. Please install Triton to use Triton backend.")
@@ -287,7 +289,7 @@ def register_triton_ops(
             tl.store(y_ptr + pid * s_y_r, acc)
 
     @dtype_cls.register_op("sum")
-    def dt_sum(x, dim=None, keepdim=False):
+    def dt_sum(ops, x, dim=None, keepdim=False):
         orig_shape = x.shape
         ndim = x.dim()
 
@@ -393,12 +395,6 @@ def register_triton_ops(
         for k0 in range(0, tl.cdiv(K, BLOCK_K)):
             k_offs = k0 * BLOCK_K + tl.arange(0, BLOCK_K)
             mask_k = k_offs < K
-
-            a_ptrs = base_a + offs_m[:, None] * stride_am + k_offs[None, :] * stride_ak
-            b_ptrs = base_b + k_offs[:, None] * stride_bk + offs_n[None, :] * stride_bn
-
-            # prod = lns_mul(a_blk[:, :, None], b_blk[None, :, :])
-            # acc = lns_add(acc, tl.reduce(prod, axis=1, combine_fn=lns_add))
 
             for kk in tl.static_range(0, BLOCK_K):
                 k = k0 * BLOCK_K + kk
@@ -569,7 +565,7 @@ def register_triton_ops(
         tl.store(out_ptrs, acc, mask=mask_oc[:, None] & mask_hw & mask_n & mask_group)
 
     @dtype_cls.register_op("conv2d")
-    def dt_conv2d(x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+    def dt_conv2d(ops, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         if bias is None:
             bias = torch.full((weight.shape[0],), _ZERO.value, device=x.device, dtype=x.dtype)
 
@@ -931,3 +927,995 @@ def register_triton_ops(
                              cast=("input", "weight", "bias"))
     def dt_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         return DTConv2dFunction.apply(input, weight, bias, stride, padding, dilation, groups)
+
+
+    @triton.jit
+    def max_pool2d_kernel(
+        X_ptr, Y_ptr, idx_ptr,
+        N, C, H, W,
+        Hout, Wout,
+        Kh, Kw,
+        s_x_n, s_x_c, s_x_h, s_x_w,
+        s_y_n, s_y_c, s_y_h, s_y_w,
+        sh, sw,
+        ph, pw,
+        dh, dw,
+        BLOCK_HW: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+        pid2 = tl.program_id(2)
+
+        offs = tl.arange(0, BLOCK_HW)
+
+        n = pid0 // C
+        c = pid0 - n * C
+
+        ow = pid2 * BLOCK_HW + offs
+        ow_mask = ow < Wout
+
+        hstart = pid1 * sh - ph
+        wstart = ow * sw - pw
+
+        maxv = tl.full((BLOCK_HW,), _NEG_INF, tl_int_dtype)
+        maxidx = tl.zeros([BLOCK_HW], tl.int64)
+
+        base = X_ptr + n * s_x_n + c * s_x_c
+
+        for kh in range(Kh):
+            ih = hstart + kh * dh
+            ih_ok = (ih >= 0) & (ih < H)
+
+            for kw in range(Kw):
+                iw = wstart + kw * dw
+                iw_ok = (iw >= 0) & (iw < W)
+
+                in_mask = ow_mask & ih_ok & iw_ok
+                x_off = ih * s_x_h + iw * s_x_w
+                xv = tl.load(base + x_off, mask=in_mask, other=_NEG_INF)
+
+                better = gt(xv, maxv)
+                maxv = tl.where(better, xv, maxv)
+
+                cand_idx = ih * W + iw
+                maxidx = tl.where(better, cand_idx, maxidx)
+
+        y_off = n * s_y_n + c * s_y_c + pid1 * s_y_h + ow * s_y_w
+        tl.store(Y_ptr + y_off, maxv, mask=ow_mask)
+        tl.store(idx_ptr + y_off, maxidx, mask=ow_mask)
+
+    def _pool_out_dim(in_size, kernel_size, padding, stride, dilation, ceil_mode):
+        eff_k = dilation * (kernel_size - 1) + 1
+        if ceil_mode:
+            out = (in_size + 2 * padding - eff_k + stride - 1) // stride + 1
+            if (out - 1) * stride >= in_size + padding:
+                out -= 1
+        else:
+            out = (in_size + 2 * padding - eff_k) // stride + 1
+        return max(out, 0)
+
+    @dtype_cls.register_op("max_pool2d")
+    def dt_max_pool2d(ops, x, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
+        if isinstance(kernel_size, int):
+            kernel_size = (kernel_size, kernel_size)
+        if isinstance(padding, int):
+            padding = (padding, padding)
+        if isinstance(dilation, int):
+            dilation = (dilation, dilation)
+
+        if stride is None:
+            stride = kernel_size
+
+        N, C, H, W = x.shape
+        Kh, Kw = kernel_size[0], kernel_size[1]
+        sh, sw = stride[0], stride[1]
+        ph, pw = padding[0], padding[1]
+        dh, dw = dilation[0], dilation[1]
+
+        Hout = _pool_out_dim(H, Kh, ph, sh, dh, ceil_mode)
+        Wout = _pool_out_dim(W, Kw, pw, sw, dw, ceil_mode)
+
+        output = torch.empty((N, C, Hout, Wout), device=x.device, dtype=dtype_cls.int_dtype)
+        indices = torch.empty((N, C, Hout, Wout), device=x.device, dtype=torch.int64)
+
+        s_x_n, s_x_c, s_x_h, s_x_w = x.stride()
+        s_y_n, s_y_c, s_y_h, s_y_w = output.stride()
+
+        BLOCK = 64
+        grid = (N * C, Hout, triton.cdiv(Wout, BLOCK))
+
+        max_pool2d_kernel[grid](
+            x, output, indices,
+            N, C, H, W,
+            Hout, Wout,
+            Kh, Kw,
+            s_x_n, s_x_c, s_x_h, s_x_w,
+            s_y_n, s_y_c, s_y_h, s_y_w,
+            sh, sw,
+            ph, pw,
+            dh, dw,
+            BLOCK,
+            num_warps=4,
+        )
+
+        return (output, indices) if return_indices else output
+
+    @triton.jit
+    def max_pool2d_dinput_kernel(
+        dY_ptr, dX_ptr, idx_ptr,
+        N, C, H, W,
+        Hout, Wout,
+        s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+        s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+        BLOCK_W: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+        pid2 = tl.program_id(2)
+
+        offs_w = tl.arange(0, BLOCK_W)
+        ow = pid2 * BLOCK_W + offs_w
+        m_ow = ow < Wout
+        oh = pid1
+
+        n = pid0 // C
+        c = pid0 - n * C
+
+        dy_base = dY_ptr + n * s_dy_n + c * s_dy_c
+        dx_base = dX_ptr + n * s_dx_n + c * s_dx_c
+        idx_base = idx_ptr + n * s_dy_n + c * s_dy_c
+
+        y_off = oh * s_dy_h + ow * s_dy_w
+        got_idx = tl.load(idx_base + y_off, mask=m_ow, other=-1)
+        dy = tl.load(dy_base + y_off, mask=m_ow, other=_ZERO)
+
+        valid = m_ow & (got_idx >= 0)
+
+        ih = got_idx // W
+        iw = got_idx - ih * W
+
+        ptr_x = dx_base + ih * s_dx_h + iw * s_dx_w
+        atomic_add(ptr_x, dy, valid)
+
+    def max_pool2d_dinput(grad_output, indices, input_shape):
+        N, C, H, W = input_shape
+        Hout = grad_output.shape[2]
+        Wout = grad_output.shape[3]
+
+        grad_input = torch.full((N, C, H, W), _ZERO.value, device=grad_output.device, dtype=dtype_cls.int_dtype)
+
+        s_dy_n, s_dy_c, s_dy_h, s_dy_w = grad_output.stride()
+        s_dx_n, s_dx_c, s_dx_h, s_dx_w = grad_input.stride()
+
+        BLOCK_W = 128
+        grid = (N * C, Hout, triton.cdiv(Wout, BLOCK_W))
+
+        max_pool2d_dinput_kernel[grid](
+            grad_output, grad_input, indices,
+            N, C, H, W,
+            Hout, Wout,
+            s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+            s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+            BLOCK_W=BLOCK_W,
+            num_warps=4,
+        )
+
+        return grad_input
+
+    class DTMaxPool2dFunction(DTFunction):
+
+        output_indices = [0]
+
+        @staticmethod
+        def forward(ctx, ops, input, kernel_size, stride, padding, dilation, ceil_mode, return_indices):
+            ctx.input_shape = input.shape
+            output, indices = ops.max_pool2d(
+                input, kernel_size,
+                stride, padding, dilation,
+                ceil_mode, return_indices=True
+            )
+            ctx.save_for_backward(indices)
+
+            return (output, indices) if return_indices else output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            indices, = ctx.saved_tensors
+            input_shape = ctx.input_shape
+
+            if ctx.needs_input_grad[0]:
+                grad_input = max_pool2d_dinput(grad_output, indices, input_shape)
+            else:
+                grad_input = None
+
+            return grad_input, None, None, None, None, None, None
+
+    @dtype_cls.register_func(torch.nn.functional.max_pool2d,
+                             cast=("input",))
+    def dt_max_pool2d(input, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
+        return DTMaxPool2dFunction.apply(input, kernel_size, stride, padding, dilation, ceil_mode, return_indices)
+
+
+    @triton.jit
+    def adaptive_avg_pool2d_kernel(
+        X_ptr, Y_ptr,
+        N, C, H, W,
+        Hout, Wout,
+        Kh_max, Kw_max,
+        s_x_n, s_x_c, s_x_h, s_x_w,
+        s_y_n, s_y_c, s_y_h, s_y_w,
+        BLOCK_C: tl.constexpr,
+        BLOCK_HW: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+
+        hw_tiles = tl.cdiv(Hout * Wout, BLOCK_HW)
+
+        hw_block = pid0 % hw_tiles
+        c_block = pid0 // hw_tiles
+
+        c_offsets = c_block * BLOCK_C + tl.arange(0, BLOCK_C)
+        hw_offsets = hw_block * BLOCK_HW + tl.arange(0, BLOCK_HW)
+        oh = hw_offsets // Wout
+        ow = hw_offsets % Wout
+
+        mask_n = pid1 < N
+        mask_c = c_offsets < C
+        mask_hw = hw_offsets < (Hout * Wout)
+
+        mask_c = mask_c[:, None]
+        mask_hw = mask_hw[None, :]
+        in_mask = mask_c & mask_n
+        out_mask = in_mask & mask_hw
+
+        Xb = X_ptr + pid1 * s_x_n
+        Yb = Y_ptr + pid1 * s_y_n
+
+        h_start = (oh * H) // Hout
+        h_end = ((oh + 1) * H + (Hout - 1)) // Hout
+        w_start = (ow * W) // Wout
+        w_end = ((ow + 1) * W + (Wout - 1)) // Wout
+
+        kh_len = h_end - h_start
+        kw_len = w_end - w_start
+        area = kh_len * kw_len
+
+        acc = tl.full((BLOCK_C, BLOCK_HW), _ZERO, tl_int_dtype)
+
+        for ky in range(Kh_max):
+            ky_in = ky < kh_len
+            in_h = h_start + ky
+
+            for kx in range(Kw_max):
+                kx_in = kx < kw_len
+                in_w = w_start + kx
+
+                valid_hw = ky_in & kx_in
+                load_mask = in_mask & valid_hw[None, :]
+
+                x_ptrs = Xb + c_offsets[:, None] * s_x_c + in_h[None, :] * s_x_h + in_w[None, :] * s_x_w
+                x_vals = tl.load(x_ptrs, mask=load_mask, other=_ZERO)
+
+                acc = add(x_vals, acc)
+
+        area = tl.maximum(area, 1).to(tl.float32)
+        acc = div(acc, from_float(area[None, :]))
+
+        y_ptrs = Yb + c_offsets[:, None] * s_y_c + oh[None, :] * s_y_h + ow[None, :] * s_y_w
+        tl.store(y_ptrs, acc, mask=out_mask)
+
+    def _max_adaptive_window(in_size, out_size):
+        m = 0
+        for i in range(out_size):
+            start = (i * in_size) // out_size
+            end = ((i + 1) * in_size + (out_size - 1)) // out_size
+            m = max(m, end - start)
+        return m
+
+    @dtype_cls.register_op("adaptive_avg_pool2d")
+    def dt_adaptive_avg_pool2d(ops, x, output_size):
+        N, C, H, W = x.shape
+        Hout, Wout = output_size
+
+        output = torch.empty((N, C, Hout, Wout), device=x.device, dtype=dtype_cls.int_dtype)
+
+        s_x_n, s_x_c, s_x_h, s_x_w = x.stride()
+        s_y_n, s_y_c, s_y_h, s_y_w = output.stride()
+
+        Kh_max = _max_adaptive_window(H, Hout)
+        Kw_max = _max_adaptive_window(W, Wout)
+
+        BLOCK_HW = 128
+        BLOCK_C = 8
+        hw_tiles = triton.cdiv(Hout * Wout, BLOCK_HW)
+        c_tiles = triton.cdiv(C, BLOCK_C)
+        grid = (hw_tiles * c_tiles, N)
+
+        adaptive_avg_pool2d_kernel[grid](
+            x, output,
+            N, C, H, W,
+            Hout, Wout,
+            Kh_max, Kw_max,
+            s_x_n, s_x_c, s_x_h, s_x_w,
+            s_y_n, s_y_c, s_y_h, s_y_w,
+            BLOCK_C, BLOCK_HW,
+            num_warps=4,
+        )
+
+        return output
+
+    @triton.jit
+    def adaptive_avg_pool2d_dinput_kernel(
+        dY_ptr,
+        dX_ptr,
+        N, C, H, W,
+        Hout, Wout,
+        s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+        s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+        BLOCK_C: tl.constexpr,
+        BLOCK_HW: tl.constexpr,
+        OVERLAP_H_MAX: tl.constexpr,
+        OVERLAP_W_MAX: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+
+        hw_tiles_in = tl.cdiv(H * W, BLOCK_HW)
+
+        hw_block = pid0 % hw_tiles_in
+        c_block = pid0 // hw_tiles_in
+
+        c_offsets = c_block * BLOCK_C + tl.arange(0, BLOCK_C)
+        hw_offsets = hw_block * BLOCK_HW + tl.arange(0, BLOCK_HW)
+
+        ih = hw_offsets // W
+        iw = hw_offsets % W
+
+        mask_n = pid1 < N
+        mask_c = c_offsets < C
+        mask_hw = hw_offsets < (H * W)
+
+        mask_c_2d = mask_c[:, None]
+        mask_hw_2d = mask_hw[None, :]
+        in_mask = mask_c_2d & mask_hw_2d & mask_n
+
+        dYb = dY_ptr + pid1 * s_dy_n
+        dXb = dX_ptr + pid1 * s_dx_n
+
+        oh_low = tl.cdiv(ih * Hout + 1, H) - 1
+        oh_high = tl.cdiv((ih + 1) * Hout, H) - 1
+        oh_low = tl.maximum(oh_low, 0)
+        oh_high = tl.minimum(oh_high, Hout - 1)
+        oh_len = oh_high - oh_low + 1
+
+        ow_low = tl.cdiv(iw * Wout + 1, W) - 1
+        ow_high = tl.cdiv((iw + 1) * Wout, W) - 1
+        ow_low = tl.maximum(ow_low, 0)
+        ow_high = tl.minimum(ow_high, Wout - 1)
+        ow_len = ow_high - ow_low + 1
+
+        acc = tl.full((BLOCK_C, BLOCK_HW), _ZERO, tl_int_dtype)
+
+        for dh in tl.static_range(OVERLAP_H_MAX):
+            oh = oh_low + dh
+            valid_oh = dh < oh_len
+
+            h_start = (oh * H) // Hout
+            h_end = ((oh + 1) * H + (Hout - 1)) // Hout
+            kh_len = h_end - h_start
+
+            for dw in tl.static_range(OVERLAP_W_MAX):
+                ow = ow_low + dw
+                valid_ow = dw < ow_len
+
+                valid_hw = valid_oh & valid_ow
+                load_mask = in_mask & valid_hw[None, :]
+
+                w_start = (ow * W) // Wout
+                w_end = ((ow + 1) * W + (Wout - 1)) // Wout
+                kw_len = w_end - w_start
+
+                area = kh_len * kw_len
+                area = tl.maximum(area, 1).to(tl.float32)
+                area_dt = from_float(area)[None, :]
+
+                dy_ptrs = dYb + c_offsets[:, None] * s_dy_c + oh[None, :] * s_dy_h + ow[None, :] * s_dy_w
+                dy_vals = tl.load(dy_ptrs, mask=load_mask, other=_ZERO)
+
+                contrib = div(dy_vals, area_dt)
+                acc = add(acc, contrib)
+
+        dx_ptrs = dXb + c_offsets[:, None] * s_dx_c + ih[None, :] * s_dx_h + iw[None, :] * s_dx_w
+        tl.store(dx_ptrs, acc, mask=in_mask)
+
+    def _max_adaptive_overlap(in_size: int, out_size: int) -> int:
+        m = 1
+        for i in range(in_size):
+            low = ((i * out_size + 1 + in_size - 1) // in_size) - 1
+            high = (((i + 1) * out_size + in_size - 1) // in_size) - 1
+            low = max(low, 0)
+            high = min(high, out_size - 1)
+            m = max(m, high - low + 1)
+        return m
+
+    def adaptive_avg_pool2d_dinput(grad_output, input_shape):
+        N, C, H, W = input_shape
+        Hout, Wout = grad_output.shape[2], grad_output.shape[3]
+
+        grad_input = torch.empty((N, C, H, W), device=grad_output.device, dtype=dtype_cls.int_dtype)
+
+        s_dy_n, s_dy_c, s_dy_h, s_dy_w = grad_output.stride()
+        s_dx_n, s_dx_c, s_dx_h, s_dx_w = grad_input.stride()
+
+        OVERLAP_H_MAX = _max_adaptive_overlap(H, Hout)
+        OVERLAP_W_MAX = _max_adaptive_overlap(W, Wout)
+
+        BLOCK_HW = 128
+        BLOCK_C = 8
+
+        hw_tiles_in = triton.cdiv(H * W, BLOCK_HW)
+        c_tiles = triton.cdiv(C, BLOCK_C)
+        grid = (hw_tiles_in * c_tiles, N)
+
+        adaptive_avg_pool2d_dinput_kernel[grid](
+            grad_output, grad_input,
+            N, C, H, W,
+            Hout, Wout,
+            s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+            s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+            BLOCK_C=BLOCK_C,
+            BLOCK_HW=BLOCK_HW,
+            OVERLAP_H_MAX=OVERLAP_H_MAX,
+            OVERLAP_W_MAX=OVERLAP_W_MAX,
+            num_warps=4,
+        )
+
+        return grad_input
+
+    class DTAdaptiveAvgPool2dFunction(DTFunction):
+
+        @staticmethod
+        def forward(ctx, ops, input, output_size):
+            ctx.input_shape = input.shape
+            return ops.adaptive_avg_pool2d(input, output_size)
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            input_shape = ctx.input_shape
+
+            if ctx.needs_input_grad[0]:
+                grad_input = adaptive_avg_pool2d_dinput(grad_output, input_shape)
+            else:
+                grad_input = None
+
+            return grad_input, None
+
+    @dtype_cls.register_func(torch.nn.functional.adaptive_avg_pool2d,
+                             cast=("input",))
+    def dt_adaptive_avg_pool2d(input, output_size):
+        return DTAdaptiveAvgPool2dFunction.apply(input, output_size)
+
+
+    @triton.jit
+    def batch_norm2d_partials_kernel(
+        X_ptr, partial_sum_ptr, partial_sum_sq_ptr,
+        HW, W, count,
+        s_x_n, s_x_c, s_x_h, s_x_w,
+        ps_s0, ps_s1,
+        pq_s0, pq_s1,
+        BLOCK: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+
+        lane = tl.arange(0, BLOCK)
+
+        idx = pid1 * BLOCK + lane
+        mask = idx < count
+
+        n = idx // HW
+        rem = idx - n * HW
+        h = rem // W
+        w = rem - h * W
+
+        x_ptrs = X_ptr + n * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
+        x = tl.load(x_ptrs, mask=mask, other=_ZERO)
+
+        block_sum = tl.reduce(x, axis=0, combine_fn=add)
+        block_sum_sq = tl.reduce(mul(x, x), axis=0, combine_fn=add)
+
+        tl.store(partial_sum_ptr + pid0 * ps_s0 + pid1 * ps_s1, block_sum)
+        tl.store(partial_sum_sq_ptr + pid0 * pq_s0 + pid1 * pq_s1, block_sum_sq)
+
+    @triton.jit
+    def batch_norm2d_finalize_kernel(
+        partial_sum_ptr, partial_sum_sq_ptr,
+        rm_ptr, rv_ptr,
+        sm_ptr, sis_ptr,
+        eps, momentum,
+        count, count_dt,
+        ntiles,
+        ps_s0, ps_s1,
+        pq_s0, pq_s1,
+        BLOCK_T: tl.constexpr,
+        TRAINING: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        lane = tl.arange(0, BLOCK_T)
+
+        acc_sum = _ZERO
+        acc_sum_sq = _ZERO
+
+        for t0 in range(0, ntiles, BLOCK_T):
+            t = t0 + lane
+            mask = t < ntiles
+
+            s = tl.load(partial_sum_ptr + pid * ps_s0 + t * ps_s1, mask=mask, other=_ZERO)
+            q = tl.load(partial_sum_sq_ptr + pid * pq_s0 + t * pq_s1, mask=mask, other=_ZERO)
+
+            acc_sum = add(acc_sum, tl.reduce(s, axis=0, combine_fn=add))
+            acc_sum_sq = add(acc_sum_sq, tl.reduce(q, axis=0, combine_fn=add))
+
+        mean = div(acc_sum, count_dt)
+        var = sub(div(acc_sum_sq, count_dt), mul(mean, mean))
+        var = tl.where(gt(_ZERO, var), _ZERO, var)
+
+        if TRAINING:
+            if count > 1:
+                sample_var = mul(var, div(count_dt, sub(count_dt, _ONE)))
+            else:
+                sample_var = _ZERO
+
+            rm = tl.load(rm_ptr + pid)
+            rv = tl.load(rv_ptr + pid)
+
+            one_minus_m = sub(_ONE, momentum)
+            new_rm = add(mul(one_minus_m, rm), mul(momentum, mean))
+            new_rv = add(mul(one_minus_m, rv), mul(momentum, sample_var))
+            new_rv = tl.where(gt(_ZERO, new_rv), _ZERO, new_rv)
+
+            tl.store(rm_ptr + pid, new_rm)
+            tl.store(rv_ptr + pid, new_rv)
+
+        else:
+            mean = tl.load(rm_ptr + pid)
+            var = tl.load(rv_ptr + pid)
+
+        invstd = sqrt(add(var, eps))
+        tl.store(sm_ptr + pid, mean)
+        tl.store(sis_ptr + pid, invstd)
+
+    @triton.jit
+    def batch_norm2d_apply_kernel(
+        X_ptr, Y_ptr,
+        w_ptr, b_ptr,
+        sm_ptr, sis_ptr,
+        HW, W, count,
+        s_x_n, s_x_c, s_x_h, s_x_w,
+        s_y_n, s_y_c, s_y_h, s_y_w,
+        has_weight, has_bias,
+        BLOCK: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+        lane = tl.arange(0, BLOCK)
+
+        mean = tl.load(sm_ptr + pid0)
+        invstd = tl.load(sis_ptr + pid0)
+
+        if has_weight:
+            weight = tl.load(w_ptr + pid0)
+        else:
+            weight = _ONE
+
+        if has_bias:
+            bias = tl.load(b_ptr + pid0)
+        else:
+            bias = _ZERO
+
+        idx = pid1 * BLOCK + lane
+        mask = idx < count
+
+        n = idx // HW
+        rem = idx - n * HW
+        h = rem // W
+        w = rem - h * W
+
+        x_ptrs = X_ptr + n * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
+        x = tl.load(x_ptrs, mask=mask, other=_ZERO)
+
+        y = div(sub(x, mean), invstd)
+        y = add(mul(y, weight), bias)
+
+        y_ptrs = Y_ptr + n * s_y_n + pid0 * s_y_c + h * s_y_h + w * s_y_w
+        tl.store(y_ptrs, y, mask=mask)
+
+    @dtype_cls.register_op("batch_norm")
+    def dt_batch_norm(ops, x, running_mean, running_var, momentum, eps, weight=None, bias=None, training=False):
+        BLOCK=128
+        BLOCK_T=128
+        num_warps_partials=4
+        num_warps_apply=4
+        num_warps_finalize=1
+
+        N, C, H, W = x.shape
+        HW = H * W
+        count = N * H * W
+        ntiles = triton.cdiv(count, BLOCK)
+
+        has_weight = weight is not None
+        has_bias = bias is not None
+
+        count_dt = dtype_cls(count, device=x.device)._int.item()
+        momentum = momentum._int.item()
+        eps = eps._int.item()
+
+        if not has_weight:
+            weight = torch.empty(0, device=x.device)
+        if not has_bias:
+            bias = torch.empty(0, device=x.device)
+
+        output = torch.empty((N, C, H, W), device=x.device, dtype=dtype_cls.int_dtype)
+        save_mean = torch.empty((C,), device=x.device, dtype=dtype_cls.int_dtype)
+        save_invstd = torch.empty((C,), device=x.device, dtype=dtype_cls.int_dtype)
+
+        partial_sum = torch.empty((C, ntiles), device=x.device, dtype=dtype_cls.int_dtype)
+        partial_sum_sq = torch.empty((C, ntiles), device=x.device, dtype=dtype_cls.int_dtype)
+
+        s_x_n, s_x_c, s_x_h, s_x_w = x.stride()
+        s_y_n, s_y_c, s_y_h, s_y_w = output.stride()
+        ps_s0, ps_s1 = partial_sum.stride()
+        pq_s0, pq_s1 = partial_sum_sq.stride()
+
+        grid_partials = (C, ntiles)
+        batch_norm2d_partials_kernel[grid_partials](
+            x, partial_sum, partial_sum_sq,
+            HW, W, count,
+            s_x_n, s_x_c, s_x_h, s_x_w,
+            ps_s0, ps_s1,
+            pq_s0, pq_s1,
+            BLOCK=BLOCK,
+            num_warps=num_warps_partials,
+        )
+
+        grid_finalize = (C,)
+        batch_norm2d_finalize_kernel[grid_finalize](
+            partial_sum, partial_sum_sq,
+            running_mean, running_var,
+            save_mean, save_invstd,
+            eps, momentum,
+            count, count_dt,
+            ntiles,
+            ps_s0, ps_s1,
+            pq_s0, pq_s1,
+            BLOCK_T=BLOCK_T,
+            TRAINING=training,
+            num_warps=num_warps_finalize,
+        )
+
+        grid_apply = (C, ntiles)
+        batch_norm2d_apply_kernel[grid_apply](
+            x, output,
+            weight, bias,
+            save_mean, save_invstd,
+            HW, W, count,
+            s_x_n, s_x_c, s_x_h, s_x_w,
+            s_y_n, s_y_c, s_y_h, s_y_w,
+            has_weight,
+            has_bias,
+            BLOCK=BLOCK,
+            num_warps=num_warps_apply,
+        )
+
+        return output, save_mean, save_invstd
+
+    @triton.jit
+    def batch_norm2d_backward_partials_kernel(
+        X_ptr, dY_ptr,
+        p_dy_ptr, p_dy_xhat_ptr,
+        sm_ptr, sis_ptr,
+        N, HW, W,
+        s_x_n, s_x_c, s_x_h, s_x_w,
+        s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+        BLOCK: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+        pid2 = tl.program_id(2)
+
+        base = tl.arange(0, BLOCK)
+        hw = pid2 * BLOCK + base
+        mask = hw < HW
+
+        mean = tl.load(sm_ptr + pid0)
+        invstd = tl.load(sis_ptr + pid0)
+
+        h = hw // W
+        w = hw - h * W
+        x_ptrs  = X_ptr + pid1 * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
+        dy_ptrs = dY_ptr + pid1 * s_dy_n + pid0 * s_dy_c + h * s_dy_h + w * s_dy_w
+
+        x = tl.load(x_ptrs, mask=mask, other=_ZERO)
+        dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
+
+        xhat = div(sub(x, mean), invstd)
+
+        partial_dy = tl.reduce(dy, axis=0, combine_fn=add)
+        partial_dy_xhat = tl.reduce(mul(dy, xhat), axis=0, combine_fn=add)
+
+        num_hw_blks = tl.cdiv(HW, BLOCK)
+        tile_id = pid1 * num_hw_blks + pid2
+
+        tl.store(p_dy_ptr + pid0 * (N * num_hw_blks) + tile_id, partial_dy)
+        tl.store(p_dy_xhat_ptr + pid0 * (N * num_hw_blks) + tile_id, partial_dy_xhat)
+
+    @triton.jit
+    def batch_norm2d_backward_reduce_kernel(
+        p_dy_ptr, p_dy_xhat_ptr,
+        dB_ptr, dW_ptr,
+        m_dy_ptr, m_dy_xhat_ptr,
+        count_dt, K,
+        has_weight, has_bias,
+        BLOCK_R: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        base = tl.arange(0, BLOCK_R)
+
+        sum_dy = _ZERO
+        sum_dy_xhat = _ZERO
+
+        for start in range(0, K, BLOCK_R):
+            idx = start + base
+            mask = idx < K
+
+            pdy = tl.load(p_dy_ptr + pid * K + idx, mask=mask, other=_ZERO)
+            pdyx = tl.load(p_dy_xhat_ptr + pid * K + idx, mask=mask, other=_ZERO)
+
+            sum_dy = add(sum_dy, tl.reduce(pdy, axis=0, combine_fn=add))
+            sum_dy_xhat = add(sum_dy_xhat, tl.reduce(pdyx, axis=0, combine_fn=add))
+
+        if has_bias:
+            tl.store(dB_ptr + pid, sum_dy)
+        if has_weight:
+            tl.store(dW_ptr + pid, sum_dy_xhat)
+
+        inv_count = div(_ONE, count_dt)
+        tl.store(m_dy_ptr + pid, mul(sum_dy, inv_count))
+        tl.store(m_dy_xhat_ptr + pid, mul(sum_dy_xhat, inv_count))
+
+    @triton.jit
+    def batch_norm2d_backward_dx_kernel(
+        X_ptr, dY_ptr, dX_ptr,
+        w_ptr, sm_ptr, sis_ptr,
+        m_dy_ptr, m_dy_xhat_ptr,
+        HW, W,
+        s_x_n, s_x_c, s_x_h, s_x_w,
+        s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+        s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+        has_weight,
+        BLOCK: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+        pid2 = tl.program_id(2)
+
+        base = tl.arange(0, BLOCK)
+        hw = pid2 * BLOCK + base
+        mask = hw < HW
+
+        mean = tl.load(sm_ptr + pid0)
+        invstd = tl.load(sis_ptr + pid0)
+
+        if has_weight:
+            weight = tl.load(w_ptr + pid0)
+        else:
+            weight = _ONE
+        w_over_invstd = div(weight, invstd)
+
+        mean_dy = tl.load(m_dy_ptr + pid0)
+        mean_dy_xhat = tl.load(m_dy_xhat_ptr + pid0)
+
+        h = hw // W
+        w = hw - h * W
+        x_ptrs  = X_ptr + pid1 * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
+        dy_ptrs = dY_ptr + pid1 * s_dy_n + pid0 * s_dy_c + h * s_dy_h + w * s_dy_w
+        dx_ptrs = dX_ptr + pid1 * s_dx_n + pid0 * s_dx_c + h * s_dx_h + w * s_dx_w
+
+        x = tl.load(x_ptrs, mask=mask, other=_ZERO)
+        dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
+
+        xhat = div(sub(x, mean), invstd)
+
+        inner = sub(dy, mean_dy)
+        inner = sub(inner, mul(xhat, mean_dy_xhat))
+        dx = mul(w_over_invstd, inner)
+
+        tl.store(dx_ptrs, dx, mask=mask)
+
+    @triton.jit
+    def batch_norm2d_backward_dx_eval_kernel(
+        dY_ptr, dX_ptr,
+        w_ptr, sis_ptr,
+        HW, W,
+        s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+        s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+        has_weight,
+        BLOCK: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+        pid2 = tl.program_id(2)
+
+        base = tl.arange(0, BLOCK)
+        hw = pid2 * BLOCK + base
+        mask = hw < HW
+
+        invstd = tl.load(sis_ptr + pid0)
+
+        if has_weight:
+            weight = tl.load(w_ptr + pid0)
+        else:
+            weight = _ONE
+        w_over_invstd = div(weight, invstd)
+
+        h = hw // W
+        w = hw - h * W
+        dy_ptrs = dY_ptr + pid1 * s_dy_n + pid0 * s_dy_c + h * s_dy_h + w * s_dy_w
+        dx_ptrs = dX_ptr + pid1 * s_dx_n + pid0 * s_dx_c + h * s_dx_h + w * s_dx_w
+
+        dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
+        dx = mul(w_over_invstd, dy)
+        tl.store(dx_ptrs, dx, mask=mask)
+
+    def batch_norm2d_backward(
+        input, grad_output,
+        save_mean, save_invstd,
+        weight=None, bias=None,
+        training=False, eps=1e-5,
+    ):
+        BLOCK=256
+        BLOCK_R=128
+        num_warps=4
+        num_stages=2
+
+        N, C, H, W = input.shape
+        HW = H * W
+        count = N * H * W
+
+        has_weight = weight is not None
+        has_bias = bias is not None
+
+        count_dt = dtype_cls(count, device=input.device)._int.item()
+        eps = eps._int.item()
+
+        if not has_weight:
+            weight = torch.empty(0, device=input.device, dtype=dtype_cls.int_dtype)
+        if not has_bias:
+            bias = torch.empty(0, device=input.device, dtype=dtype_cls.int_dtype)
+
+        grad_input = torch.empty((N, C, H, W), device=input.device, dtype=dtype_cls.int_dtype)
+
+        if has_weight:
+            grad_weight = torch.empty((C,), device=input.device, dtype=dtype_cls.int_dtype)
+        else:
+            grad_weight = torch.empty(0, device=input.device, dtype=dtype_cls.int_dtype)
+
+        if has_bias:
+            grad_bias = torch.empty((C,), device=input.device, dtype=dtype_cls.int_dtype)
+        else:
+            grad_bias = torch.empty(0, device=input.device, dtype=dtype_cls.int_dtype)
+
+        s_x_n, s_x_c, s_x_h, s_x_w  = input.stride()
+        s_dy_n, s_dy_c, s_dy_h, s_dy_w = grad_output.stride()
+        s_dx_n, s_dx_c, s_dx_h, s_dx_w = grad_input.stride()
+
+        num_hw_blks = triton.cdiv(HW, BLOCK)
+        K = N * num_hw_blks
+
+        if training or has_weight or has_bias:
+            partial_dy = torch.empty((C, K), device=input.device, dtype=input.dtype)
+            partial_dy_xhat = torch.empty((C, K), device=input.device, dtype=input.dtype)
+
+            mean_dy = torch.empty((C,), device=input.device, dtype=input.dtype)
+            mean_dy_xhat = torch.empty((C,), device=input.device, dtype=input.dtype)
+
+            grid_partials = (C, N, num_hw_blks)
+            batch_norm2d_backward_partials_kernel[grid_partials](
+                input, grad_output,
+                partial_dy, partial_dy_xhat,
+                save_mean, save_invstd,
+                N, HW, W,
+                s_x_n, s_x_c, s_x_h, s_x_w,
+                s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+                BLOCK=BLOCK,
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+
+            grid_reduce = (C,)
+            batch_norm2d_backward_reduce_kernel[grid_reduce](
+                partial_dy, partial_dy_xhat,
+                grad_bias, grad_weight,
+                mean_dy, mean_dy_xhat,
+                count_dt, K,
+                has_weight, has_bias,
+                BLOCK_R=BLOCK_R,
+                num_warps=1,
+                num_stages=1,
+            )
+
+        else:
+            mean_dy = None
+            mean_dy_xhat = None
+
+        grid_dx = (C, N, num_hw_blks)
+        if training:
+            batch_norm2d_backward_dx_kernel[grid_dx](
+                input, grad_output, grad_input,
+                weight, save_mean, save_invstd,
+                mean_dy, mean_dy_xhat,
+                HW, W,
+                s_x_n, s_x_c, s_x_h, s_x_w,
+                s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+                s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+                has_weight,
+                BLOCK=BLOCK,
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+        else:
+            batch_norm2d_backward_dx_eval_kernel[grid_dx](
+                grad_output, grad_input,
+                weight, save_invstd,
+                HW, W,
+                s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+                s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+                has_weight,
+                BLOCK=BLOCK,
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+
+        if not has_weight:
+            grad_weight = None
+        if not has_bias:
+            grad_bias = None
+
+        return grad_input, grad_weight, grad_bias
+
+    class DTBatchNormFunction(DTFunction):
+
+        @staticmethod
+        def forward(ctx, ops, x, running_mean, running_var, weight=None, bias=None, training=False, momentum=0.1, eps=1e-5):
+            output, save_mean, save_invstd = ops.batch_norm(
+                x, running_mean, running_var,
+                momentum, eps,
+                weight, bias,
+                training
+            )
+
+            ctx.save_for_backward(x, weight, bias, eps, save_mean, save_invstd)
+            ctx.training = training
+
+            return output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            training = ctx.training
+            x, weight, bias, eps, save_mean, save_invstd = ctx.saved_tensors
+
+            grad_input, grad_weight, grad_bias = batch_norm2d_backward(
+                x, grad_output,
+                save_mean, save_invstd,
+                weight, bias,
+                training, eps
+            )
+
+            return grad_input, None, None, None, None, None, None, grad_weight, grad_bias
+
+    @dtype_cls.register_func(torch.nn.functional.batch_norm,
+                             cast=("input", "running_mean", "running_var", "weight", "bias", "momentum", "eps"))
+    def dt_batch_norm(input, running_mean, running_var, weight=None, bias=None, training=False, momentum=0.1, eps=1e-5):
+        assert input.dim() == 4, "torchdt only supports 2D batch norm for now"
+        return DTBatchNormFunction.apply(input, running_mean, running_var, weight, bias, training, momentum, eps)
