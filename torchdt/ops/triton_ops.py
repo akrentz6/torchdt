@@ -9,57 +9,46 @@ except ImportError:
 class TritonOps:
 
     @staticmethod
-    @triton.jit
-    def to_dtype(x):
+    def from_float(x):
         pass
 
     @staticmethod
-    @triton.jit
-    def from_dtype(x):
+    def to_float(x):
         pass
 
     @staticmethod
-    @triton.jit
     def add(x, y):
         pass
 
     @staticmethod
-    @triton.jit
     def sub(x, y):
         pass
 
     @staticmethod
-    @triton.jit
     def mul(x, y):
         pass
 
     @staticmethod
-    @triton.jit
     def div(x, y):
         pass
 
     @staticmethod
-    @triton.jit
     def sqrt(x):
         pass
 
     @staticmethod
-    @triton.jit
     def gt(x, y):
         pass
 
     @staticmethod
-    @triton.jit
     def ge(x, y):
         pass
 
     @staticmethod
-    @triton.jit
     def lt(x, y):
         pass
 
     @staticmethod
-    @triton.jit
     def le(x, y):
         pass
 
@@ -67,8 +56,8 @@ def register_triton_ops(dtype_cls: type, ops: type) -> None:
     if not HAS_TRITON:
         raise ImportError("Triton is not installed. Please install Triton to use Triton backend.")
 
-    to_dtype = ops.to_dtype
-    from_dtype = ops.from_dtype
+    from_float = ops.from_float
+    to_float = ops.to_float
 
     add = ops.add
     sub = ops.sub
@@ -89,7 +78,7 @@ def register_triton_ops(dtype_cls: type, ops: type) -> None:
 
         x = tl.load(x_ptr + offs, mask=mask)
 
-        out = from_dtype(x)
+        out = from_float(x)
         tl.store(out_ptr + offs, out, mask=mask)
 
     @dtype_cls.register_op("from_float")
@@ -107,7 +96,7 @@ def register_triton_ops(dtype_cls: type, ops: type) -> None:
 
         x = tl.load(x_ptr + offs, mask=mask)
 
-        out = to_dtype(x)
+        out = to_float(x)
         tl.store(out_ptr + offs, out, mask=mask)
 
     @dtype_cls.register_op("to_float")
