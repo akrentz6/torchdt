@@ -848,9 +848,7 @@ class DTSmoothL1LossFunction(DTFunction):
 def dt_cross_entropy(ops, x, y, weight = None, ignore_index = -100, reduction = 'mean', label_smoothing = 0.0):
     if ignore_index != -100:
         raise NotImplementedError("ignore_index is not currently implemented.")
-    if label_smoothing is not None \
-        and label_smoothing.item() != 0 \
-            and label_smoothing.item() != -32768:
+    if label_smoothing is not None and label_smoothing != ops.scalar_from_float(0.0):
         raise NotImplementedError("label_smoothing is not currently implemented.")
 
     dim = -1 if x.dim() > 1 else 0
