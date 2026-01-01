@@ -46,11 +46,11 @@ def binary_cross_entropy_with_logits(input, target, weight=None, size_average=No
     return DTBCEWithLogitsLossFunction(input, target, weight, reduction, pos_weight)
 
 @DType.register_func(torch.nn.functional.nll_loss,
-                     cast=("input", "target", "weight"))
+                     cast=("input", "weight"))
 def nll_loss(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean'):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTNLLLossFunction.apply(input, target, weight, ignore_index, reduction)
+    return DTNLLLossFunction.apply(input, target, weight, reduction, ignore_index)
 
 @DType.register_func(torch.nn.functional.poisson_nll_loss,
                      cast=("input", "target"))

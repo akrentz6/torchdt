@@ -347,7 +347,7 @@ class DTNLLLossFunction(DTFunction):
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
-        x, y, weight, reduction = inputs
+        x, y, weight, reduction, _ = inputs
         ctx.save_for_backward(x, y, weight)
         ctx.reduction = reduction
 
@@ -395,7 +395,7 @@ class DTNLLLossFunction(DTFunction):
         else:
             grad_x = ops.mul(grad_x, grad_output)
 
-        return grad_x, None, None, None
+        return grad_x, None, None, None, None
 
 @register_base_op("poisson_nll_loss")
 def dt_poisson_nll_loss(ops, x, y, eps, log_input=True, full=False, reduction='mean'):

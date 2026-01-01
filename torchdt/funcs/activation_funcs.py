@@ -79,7 +79,7 @@ def dt_softmax(input, dim=None, *, out=None):
 
 @DType.register_func(torch.nn.functional.log_softmax, torch.Tensor.log_softmax,
                      cast=("input",))
-def dt_log_softmax(input, dim=None, *, out=None):
+def dt_log_softmax(input, dim=None, _stacklevel=3, dtype=None, *, out=None):
     result = DTLogSoftmaxFunction.apply(input, dim)
 
     if out is not None:
