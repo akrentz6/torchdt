@@ -845,10 +845,12 @@ class DTSmoothL1LossFunction(DTFunction):
         return grad_x, grad_y, None, None
 
 @register_base_op("cross_entropy")
-def dt_cross_entropy(ops, x, y, weight = None, ignore_index = -100, reduction = 'mean', label_smoothing = None):
+def dt_cross_entropy(ops, x, y, weight = None, ignore_index = -100, reduction = 'mean', label_smoothing = 0.0):
     if ignore_index != -100:
         raise NotImplementedError("ignore_index is not currently implemented.")
-    if label_smoothing is not None:
+    if label_smoothing is not None \
+        and label_smoothing.item() != 0 \
+            and label_smoothing.item() != -32768:
         raise NotImplementedError("label_smoothing is not currently implemented.")
 
     dim = -1 if x.dim() > 1 else 0
@@ -897,7 +899,7 @@ class DTCrossEntropyLossFunction(DTFunction):
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
-        x, y, weight, reduction = inputs
+        x, y, weight, _, reduction, _ = inputs
         ctx.save_for_backward(x, y, weight)
         ctx.reduction = reduction
 
@@ -908,7 +910,6 @@ class DTCrossEntropyLossFunction(DTFunction):
         if weight is not None:
             sample_weights = weight[y]
         else:
-            x, y = ctx.saved_tensors
             sample_weights = None
 
         dim = -1 if x.dim() > 1 else 0
@@ -952,4 +953,4 @@ class DTCrossEntropyLossFunction(DTFunction):
         else:
             grad_x = ops.mul(grad_x, grad_output)
 
-        return grad_x, None, None, None
+        return grad_x, None, None, None, None, None

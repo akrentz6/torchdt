@@ -11,7 +11,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
     pass
 
 @LNS16.register_op("from_float")
-def lns16_from_float(t: Tensor) -> Tensor:
+def lns16_from_float(ops, t: Tensor) -> Tensor:
     t = t.to(dtype=torch.float64)
     abs_t = torch.abs(t)
 
@@ -29,7 +29,7 @@ def lns16_from_float(t: Tensor) -> Tensor:
     return lns_t
 
 @LNS16.register_op("to_float")
-def lns16_to_float(t: Tensor) -> Tensor:
+def lns16_to_float(ops, t: Tensor) -> Tensor:
     packed = t.view(torch.int16)
     log_t = (packed >> 1)
     sign_t = torch.where((packed & 1) == 1, -1.0, 1.0).to(torch.float64)
@@ -94,11 +94,11 @@ def lns16_pow(ops, x, y):
 
 @LNS16.register_op("neg")
 def lns16_neg(ops, x):
-    return torch.where(x == ops.from_float(0.0), x, x ^ 1)
+    return torch.where(x == ops.scalar_from_float(0.0), x, x ^ 1)
 
 @LNS16.register_op("abs")
 def lns16_abs(ops, x):
-    return torch.where(x == ops.from_float(0.0), x & (-2)) # -2 is ~1
+    return torch.where(x == ops.scalar_from_float(0.0), x & (-2)) # -2 is ~1
 
 @LNS16.register_op("sign")
 def lns16_sign(ops, x):
@@ -106,8 +106,8 @@ def lns16_sign(ops, x):
         x == ZERO, ZERO,
         torch.where(
             (x & 1) == 1,
-            ops.from_float(-1.0),
-            ops.from_float(1.0)))
+            ops.scalar_from_float(-1.0),
+            ops.scalar_from_float(1.0)))
 
 @LNS16.register_op("ge")
 def lns16_ge(ops, x, y):

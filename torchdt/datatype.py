@@ -91,9 +91,6 @@ class DType(Tensor):
             requires_grad: Optional[bool] = None,
             memory_format: torch.memory_format = torch.preserve_format,
     ):
-        cls.float_dtype = _float_dtype[cls.bitwidth]
-        cls.int_dtype = _int_dtype[cls.bitwidth]
-
         if isinstance(data, DType):
             if data.__class__ == cls:
                 payload = data
@@ -127,6 +124,8 @@ class DType(Tensor):
 
     def __init_subclass__(cls, bitwidth: int = 32, cpp_backend=None, **kwargs):
         super().__init_subclass__(**kwargs)
+        cls.float_dtype = _float_dtype[bitwidth]
+        cls.int_dtype = _int_dtype[bitwidth]
 
         if bitwidth not in _float_dtype:
             raise ValueError(
@@ -252,7 +251,12 @@ class DType(Tensor):
                     if pname in bound.arguments:
                         if bound.arguments[pname] is not None and type(bound.arguments[pname]) != _dtype_cls:
                             # convert argument to the correct DType subclass - can also handle lists, tuples, etc?
-                            bound.arguments[pname] = _dtype_cls(bound.arguments[pname])
+                            if isinstance(bound.arguments[pname], (list, tuple)):
+                                bound.arguments[pname] = type(bound.arguments[pname])(
+                                    _dtype_cls(x) for x in bound.arguments[pname]
+                                )
+                            else:
+                                bound.arguments[pname] = _dtype_cls(bound.arguments[pname])
 
                 return func(*bound.args, **bound.kwargs)
 

@@ -97,7 +97,7 @@ def smooth_l1_loss(input, target, size_average=None, reduce=None, reduction='mea
     return DTSmoothL1LossFunction.apply(input, target, beta, reduction)
 
 @DType.register_func(torch.nn.functional.cross_entropy,
-                     cast=("input", "target", "weight", "label_smoothing"))
+                     cast=("input", "weight", "label_smoothing"))
 def cross_entropy(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean', label_smoothing=0.0):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)

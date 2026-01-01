@@ -113,3 +113,8 @@ def dt_contiguous(input, memory_format=torch.preserve_format):
                      cast=("input",))
 def dt_repeat(input, *repeats):
     return DTRepeatFunction.apply(input, repeats)
+
+@DType.register_func(torch.Tensor.item,
+                     cast=("input",))
+def dt_item(input):
+    return input.to_float().item()

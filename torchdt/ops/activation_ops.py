@@ -5,7 +5,7 @@ from torchdt.ops import register_base_op
 @register_base_op("relu")
 def dt_relu(ops, x):
     return torch.where(
-        ops.lt(x, 0),
+        ops.lt(x, ops.scalar_from_float(0.0)),
         ops.scalar_from_float(0.0), x
     )
 
@@ -28,7 +28,7 @@ class DTReLUFunction(DTFunction):
 @register_base_op("leaky_relu")
 def dt_leaky_relu(ops, x, negative_slope):
     return torch.where(
-        ops.lt(x, 0),
+        ops.lt(x, ops.scalar_from_float(0.0)),
         ops.mul(x, negative_slope), x
     )
 
@@ -46,7 +46,7 @@ class DTLeakyReLUFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, negative_slope = ctx.saved_tensors
-        grad_x = torch.where(ops.lt(x, 0), ops.mul(grad_output, negative_slope), grad_output)
+        grad_x = torch.where(ops.lt(x, ops.scalar_from_float(0.0)), ops.mul(grad_output, negative_slope), grad_output)
         return grad_x, None
 
 @register_base_op("threshold")

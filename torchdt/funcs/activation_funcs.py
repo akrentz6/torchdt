@@ -16,29 +16,20 @@ from torchdt.ops.activation_ops import (
 
 @DType.register_func(torch.nn.functional.relu, torch.Tensor.relu,
                      cast=("input",))
-def dt_exp(input, *, out=None):
+def dt_relu(input, inplace=False):
     result = DTReLUFunction.apply(input)
-
-    if out is not None:
-        return out.copy_(result)
     return result
 
 @DType.register_func(torch.nn.functional.leaky_relu,
                      cast=("input", "negative_slope"))
-def dt_leaky_relu(input, negative_slope=0.01, *, out=None):
+def dt_leaky_relu(input, negative_slope=0.01, inplace=False):
     result = DTLeakyReLUFunction.apply(input, negative_slope)
-
-    if out is not None:
-        return out.copy_(result)
     return result
 
 @DType.register_func(torch.nn.functional.threshold,
                      cast=("input", "threshold", "value"))
-def dt_threshold(input, threshold, value, *, out=None):
+def dt_threshold(input, threshold, value, inplace=False):
     result = DTThresholdFunction.apply(input, threshold, value)
-
-    if out is not None:
-        return out.copy_(result)
     return result
 
 @DType.register_func(torch.nn.functional.tanh, torch.Tensor.tanh,

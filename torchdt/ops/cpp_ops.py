@@ -74,6 +74,10 @@ def lt_op(backend, bitwidth, _, x, y):
     return C.lt(backend, bitwidth, x, y)
 
 def sum_op(backend, bitwidth, _, x, dim=None, keepdim=False):
+    if dim is None:
+        dim = []
+    elif isinstance(dim, int):
+        dim = [dim]
     return C.sum(backend, bitwidth, x, dim, keepdim)
 
 def matmul_op(backend, bitwidth, _, A, B):
