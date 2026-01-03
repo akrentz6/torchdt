@@ -101,175 +101,175 @@ def register_triton_ops(
         to_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
         return out
 
-    @triton.jit
-    def add_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def add_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-        y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
 
-        out = add(x, y)
-        tl.store(out_ptr + offs, out, mask=mask)
+    #     out = add(x, y)
+    #     tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("add")
-    def dt_add(ops, x, y):
-        out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        add_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-        return out
+    # @dtype_cls.register_op("add")
+    # def dt_add(ops, x, y):
+    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
+    #     grid = (triton.cdiv(x.numel(), 1024),)
+    #     add_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
+    #     return out
 
-    @triton.jit
-    def sub_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def sub_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-        y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
 
-        out = sub(x, y)
-        tl.store(out_ptr + offs, out, mask=mask)
+    #     out = sub(x, y)
+    #     tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("sub")
-    def dt_sub(ops, x, y):
-        out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        sub_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-        return out
+    # @dtype_cls.register_op("sub")
+    # def dt_sub(ops, x, y):
+    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
+    #     grid = (triton.cdiv(x.numel(), 1024),)
+    #     sub_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
+    #     return out
 
-    @triton.jit
-    def mul_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def mul_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-        y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
 
-        out = mul(x, y)
-        tl.store(out_ptr + offs, out, mask=mask)
+    #     out = mul(x, y)
+    #     tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("mul")
-    def dt_mul(ops, x, y):
-        out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        mul_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-        return out
+    # @dtype_cls.register_op("mul")
+    # def dt_mul(ops, x, y):
+    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
+    #     grid = (triton.cdiv(x.numel(), 1024),)
+    #     mul_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
+    #     return out
 
-    @triton.jit
-    def div_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def div_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-        y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
 
-        out = div(x, y)
-        tl.store(out_ptr + offs, out, mask=mask)
+    #     out = div(x, y)
+    #     tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("div")
-    def dt_div(ops, x, y):
-        out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        div_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-        return out
+    # @dtype_cls.register_op("div")
+    # def dt_div(ops, x, y):
+    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
+    #     grid = (triton.cdiv(x.numel(), 1024),)
+    #     div_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
+    #     return out
 
-    @triton.jit
-    def sqrt_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def sqrt_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
 
-        out = sqrt(x)
-        tl.store(out_ptr + offs, out, mask=mask)
+    #     out = sqrt(x)
+    #     tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("sqrt")
-    def dt_sqrt(ops, x):
-        out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        sqrt_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
-        return out
+    # @dtype_cls.register_op("sqrt")
+    # def dt_sqrt(ops, x):
+    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
+    #     grid = (triton.cdiv(x.numel(), 1024),)
+    #     sqrt_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
+    #     return out
 
-    @triton.jit
-    def gt_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def gt_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-        y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
 
-        out = gt(x, y)
-        tl.store(out_ptr + offs, out, mask=mask)
+    #     out = gt(x, y)
+    #     tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("gt")
-    def dt_gt(ops, x, y):
-        out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        gt_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-        return out
+    # @dtype_cls.register_op("gt")
+    # def dt_gt(ops, x, y):
+    #     out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
+    #     grid = (triton.cdiv(x.numel(), 1024),)
+    #     gt_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
+    #     return out
 
-    @triton.jit
-    def ge_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def ge_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-        y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
 
-        out = ge(x, y)
-        tl.store(out_ptr + offs, out, mask=mask)
+    #     out = ge(x, y)
+    #     tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("ge")
-    def dt_ge(ops, x, y):
-        out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        ge_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-        return out
+    # @dtype_cls.register_op("ge")
+    # def dt_ge(ops, x, y):
+    #     out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
+    #     grid = (triton.cdiv(x.numel(), 1024),)
+    #     ge_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
+    #     return out
 
-    @triton.jit
-    def lt_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def lt_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-        y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
 
-        out = lt(x, y)
-        tl.store(out_ptr + offs, out, mask=mask)
+    #     out = lt(x, y)
+    #     tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("lt")
-    def dt_lt(ops, x, y):
-        out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        lt_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-        return out
+    # @dtype_cls.register_op("lt")
+    # def dt_lt(ops, x, y):
+    #     out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
+    #     grid = (triton.cdiv(x.numel(), 1024),)
+    #     lt_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
+    #     return out
 
-    @triton.jit
-    def le_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def le_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-        y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
 
-        out = le(x, y)
-        tl.store(out_ptr + offs, out, mask=mask)
+    #     out = le(x, y)
+    #     tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("le")
-    def dt_le(ops, x, y):
-        out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        le_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-        return out
+    # @dtype_cls.register_op("le")
+    # def dt_le(ops, x, y):
+    #     out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
+    #     grid = (triton.cdiv(x.numel(), 1024),)
+    #     le_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
+    #     return out
 
 
     @triton.jit
@@ -330,114 +330,114 @@ def register_triton_ops(
         return result
 
 
-    @triton.jit
-    def log_softmax_kernel(x_ptr, y_ptr, B, N, s_x_b, s_x_n, s_y_b, s_y_n, BLOCK_N: tl.constexpr):
-        pid0 = tl.program_id(0)
-        pid1 = tl.program_id(1)
+    # @triton.jit
+    # def log_softmax_kernel(x_ptr, y_ptr, B, N, s_x_b, s_x_n, s_y_b, s_y_n, BLOCK_N: tl.constexpr):
+    #     pid0 = tl.program_id(0)
+    #     pid1 = tl.program_id(1)
 
-        offs_n = tl.arange(0, BLOCK_N)
-        n_idx = offs_n + pid1 * BLOCK_N
+    #     offs_n = tl.arange(0, BLOCK_N)
+    #     n_idx = offs_n + pid1 * BLOCK_N
 
-        x_ptrs = x_ptr + pid0 * s_x_b + n_idx * s_x_n
-        y_ptrs = y_ptr + pid0 * s_y_b + n_idx * s_y_n
+    #     x_ptrs = x_ptr + pid0 * s_x_b + n_idx * s_x_n
+    #     y_ptrs = y_ptr + pid0 * s_y_b + n_idx * s_y_n
 
-        mask = n_idx < N
-        x = tl.load(x_ptrs, mask=mask, other=_NEG_INF)
+    #     mask = n_idx < N
+    #     x = tl.load(x_ptrs, mask=mask, other=_NEG_INF)
 
-        row_max = tl.reduce(x, 0, max_combine_fn)
-        x_centered = sub(x, row_max)
-        exps = exp(x_centered)
-        sum_exp = tl.reduce(tl.where(mask, exps, _ZERO), 0, add)
-        log_sum_exp = log(sum_exp)
+    #     row_max = tl.reduce(x, 0, max_combine_fn)
+    #     x_centered = sub(x, row_max)
+    #     exps = exp(x_centered)
+    #     sum_exp = tl.reduce(tl.where(mask, exps, _ZERO), 0, add)
+    #     log_sum_exp = log(sum_exp)
 
-        out = sub(x_centered, log_sum_exp)
-        tl.store(y_ptrs, out, mask=mask)
+    #     out = sub(x_centered, log_sum_exp)
+    #     tl.store(y_ptrs, out, mask=mask)
 
-    @dtype_cls.register_op("log_softmax")
-    def log_softmax(ops, x, dim=None):
-        assert x.dim() == 2
-        BLOCK_N = 128
+    # @dtype_cls.register_op("log_softmax")
+    # def log_softmax(ops, x, dim=None):
+    #     assert x.dim() == 2
+    #     BLOCK_N = 128
 
-        B, N = x.shape
-        y = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
+    #     B, N = x.shape
+    #     y = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
 
-        num_tiles = (N + 128 - 1) // 128
-        grid = (B, num_tiles)
+    #     num_tiles = (N + 128 - 1) // 128
+    #     grid = (B, num_tiles)
 
-        s_x_b, s_x_n = x.stride()
-        s_y_b, s_y_n = y.stride()
+    #     s_x_b, s_x_n = x.stride()
+    #     s_y_b, s_y_n = y.stride()
 
-        log_softmax_kernel[grid](x, y, B, N, s_x_b, s_x_n, s_y_b, s_y_n, BLOCK_N)
-        return y
+    #     log_softmax_kernel[grid](x, y, B, N, s_x_b, s_x_n, s_y_b, s_y_n, BLOCK_N)
+    #     return y
 
-    @triton.jit
-    def log_softmax_backward_kernel(dy_ptr, y_ptr, dx_ptr, B, N, s_dy_b, s_dy_n, s_y_b, s_y_n, s_dx_b, s_dx_n, BLOCK_N: tl.constexpr):
-        pid0 = tl.program_id(0)
-        pid1 = tl.program_id(1)
+    # @triton.jit
+    # def log_softmax_backward_kernel(dy_ptr, y_ptr, dx_ptr, B, N, s_dy_b, s_dy_n, s_y_b, s_y_n, s_dx_b, s_dx_n, BLOCK_N: tl.constexpr):
+    #     pid0 = tl.program_id(0)
+    #     pid1 = tl.program_id(1)
 
-        offs_n = tl.arange(0, BLOCK_N)
-        n_idx = pid1 * BLOCK_N + offs_n
-        mask = n_idx < N
+    #     offs_n = tl.arange(0, BLOCK_N)
+    #     n_idx = pid1 * BLOCK_N + offs_n
+    #     mask = n_idx < N
 
-        dy_ptrs = dy_ptr + pid0 * s_dy_b + n_idx * s_dy_n
-        y_ptrs  = y_ptr + pid0 * s_y_b + n_idx * s_y_n
-        dx_ptrs = dx_ptr + pid0 * s_dx_b + n_idx * s_dx_n
+    #     dy_ptrs = dy_ptr + pid0 * s_dy_b + n_idx * s_dy_n
+    #     y_ptrs  = y_ptr + pid0 * s_y_b + n_idx * s_y_n
+    #     dx_ptrs = dx_ptr + pid0 * s_dx_b + n_idx * s_dx_n
 
-        dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
-        y = tl.load(y_ptrs, mask=mask, other=_NEG_INF)
+    #     dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
+    #     y = tl.load(y_ptrs, mask=mask, other=_NEG_INF)
 
-        sum_dy = tl.reduce(dy, 0, combine_fn=add)
-        softmax = exp(y)
+    #     sum_dy = tl.reduce(dy, 0, combine_fn=add)
+    #     softmax = exp(y)
 
-        dx = sub(dy, mul(softmax, sum_dy))
-        tl.store(dx_ptrs, dx, mask=mask)
+    #     dx = sub(dy, mul(softmax, sum_dy))
+    #     tl.store(dx_ptrs, dx, mask=mask)
 
-    def log_softmax_backward(grad_output, output):
-        B, N = grad_output.shape
-        BLOCK_N = 128
+    # def log_softmax_backward(grad_output, output):
+    #     B, N = grad_output.shape
+    #     BLOCK_N = 128
 
-        grad_input = torch.empty(grad_output.shape, dtype=dtype_cls.int_dtype, device=grad_output.device)
+    #     grad_input = torch.empty(grad_output.shape, dtype=dtype_cls.int_dtype, device=grad_output.device)
 
-        s_dy_b, s_dy_n = grad_output.stride()
-        s_y_b, s_y_n = output.stride()
-        s_dx_b, s_dx_n = grad_input.stride()
+    #     s_dy_b, s_dy_n = grad_output.stride()
+    #     s_y_b, s_y_n = output.stride()
+    #     s_dx_b, s_dx_n = grad_input.stride()
 
-        grid = (B, (N + BLOCK_N - 1) // BLOCK_N)
-        log_softmax_backward_kernel[grid](
-            grad_output, output, grad_input,
-            B, N,
-            s_dy_b, s_dy_n,
-            s_y_b, s_y_n,
-            s_dx_b, s_dx_n,
-            BLOCK_N
-        )
-        return grad_input
+    #     grid = (B, (N + BLOCK_N - 1) // BLOCK_N)
+    #     log_softmax_backward_kernel[grid](
+    #         grad_output, output, grad_input,
+    #         B, N,
+    #         s_dy_b, s_dy_n,
+    #         s_y_b, s_y_n,
+    #         s_dx_b, s_dx_n,
+    #         BLOCK_N
+    #     )
+    #     return grad_input
 
-    class DTLogSoftmaxFunction(DTFunction):
+    # class DTLogSoftmaxFunction(DTFunction):
 
-        @staticmethod
-        def forward(ops, x, dim=None):
-            return ops.log_softmax(x, dim=dim)
+    #     @staticmethod
+    #     def forward(ops, x, dim=None):
+    #         return ops.log_softmax(x, dim=dim)
 
-        @staticmethod
-        def setup_context(ctx, ops, inputs, output):
-            _, dim = inputs
-            ctx.save_for_backward(output)
-            ctx.dim = dim
+    #     @staticmethod
+    #     def setup_context(ctx, ops, inputs, output):
+    #         _, dim = inputs
+    #         ctx.save_for_backward(output)
+    #         ctx.dim = dim
 
-        @staticmethod
-        def backward(ctx, ops, grad_output):
-            output, = ctx.saved_tensors
-            return log_softmax_backward(grad_output, output), None
+    #     @staticmethod
+    #     def backward(ctx, ops, grad_output):
+    #         output, = ctx.saved_tensors
+    #         return log_softmax_backward(grad_output, output), None
 
-    @dtype_cls.register_func(torch.nn.functional.log_softmax, torch.Tensor.log_softmax,
-                     cast=("input",))
-    def dt_log_softmax(input, dim=None, _stacklevel=3, dtype=None, *, out=None):
-        result = DTLogSoftmaxFunction.apply(input, dim)
+    # @dtype_cls.register_func(torch.nn.functional.log_softmax, torch.Tensor.log_softmax,
+    #                  cast=("input",))
+    # def dt_log_softmax(input, dim=None, _stacklevel=3, dtype=None, *, out=None):
+    #     result = DTLogSoftmaxFunction.apply(input, dim)
 
-        if out is not None:
-            return out.copy_(result)
-        return result
+    #     if out is not None:
+    #         return out.copy_(result)
+    #     return result
 
 
     @triton.autotune(
@@ -2105,144 +2105,144 @@ def register_triton_ops(
         return DTBatchNormFunction.apply(input, running_mean, running_var, weight, bias, training, momentum, eps)
 
 
-    @triton.jit
-    def nll_loss_kernel(x_ptr, t_ptr, w_ptr, out_ptr, N, has_weight: tl.constexpr, s_x_b, s_x_c, s_t_b, s_w, s_o_b):
-        pid = tl.program_id(0)
-        mask = pid < N
+    # @triton.jit
+    # def nll_loss_kernel(x_ptr, t_ptr, w_ptr, out_ptr, N, has_weight: tl.constexpr, s_x_b, s_x_c, s_t_b, s_w, s_o_b):
+    #     pid = tl.program_id(0)
+    #     mask = pid < N
 
-        target_idx = tl.load(t_ptr + pid * s_t_b, mask=mask, other=0)
+    #     target_idx = tl.load(t_ptr + pid * s_t_b, mask=mask, other=0)
 
-        input_ptr = x_ptr + pid * s_x_b + target_idx * s_x_c
-        x_val = tl.load(input_ptr, mask=mask, other=_ZERO)
+    #     input_ptr = x_ptr + pid * s_x_b + target_idx * s_x_c
+    #     x_val = tl.load(input_ptr, mask=mask, other=_ZERO)
 
-        if has_weight:
-            weight_ptr = w_ptr + target_idx * s_w
-            w_val = tl.load(weight_ptr, mask=mask, other=_ONE)
+    #     if has_weight:
+    #         weight_ptr = w_ptr + target_idx * s_w
+    #         w_val = tl.load(weight_ptr, mask=mask, other=_ONE)
 
-            loss = neg(mul(x_val, w_val))
+    #         loss = neg(mul(x_val, w_val))
 
-        else:
-            loss = neg(x_val)
+    #     else:
+    #         loss = neg(x_val)
 
-        output_ptr = out_ptr + pid * s_o_b
-        tl.store(output_ptr, loss, mask=mask)
+    #     output_ptr = out_ptr + pid * s_o_b
+    #     tl.store(output_ptr, loss, mask=mask)
 
-    @dtype_cls.register_op("nll_loss")
-    def dt_nll_loss(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
-        assert x.dim() == 2 and y.dim() == 1
-        N, C = x.shape
+    # @dtype_cls.register_op("nll_loss")
+    # def dt_nll_loss(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
+    #     assert x.dim() == 2 and y.dim() == 1
+    #     N, C = x.shape
 
-        loss = torch.empty((N,), dtype=dtype_cls.int_dtype, device=x.device)
+    #     loss = torch.empty((N,), dtype=dtype_cls.int_dtype, device=x.device)
 
-        has_weight = weight is not None
-        if not has_weight:
-            weight = torch.empty(0, device=x.device)
+    #     has_weight = weight is not None
+    #     if not has_weight:
+    #         weight = torch.empty(0, device=x.device)
 
-        grid = (N,)
-        nll_loss_kernel[grid](
-            x, y, weight, loss,
-            N, has_weight,
-            x.stride(0), x.stride(1),
-            y.stride(0),
-            weight.stride(0),
-            loss.stride(0),
-        )
+    #     grid = (N,)
+    #     nll_loss_kernel[grid](
+    #         x, y, weight, loss,
+    #         N, has_weight,
+    #         x.stride(0), x.stride(1),
+    #         y.stride(0),
+    #         weight.stride(0),
+    #         loss.stride(0),
+    #     )
 
-        if reduction == 'none':
-            return loss
+    #     if reduction == 'none':
+    #         return loss
 
-        elif reduction == 'sum':
-            return ops.sum(loss)
+    #     elif reduction == 'sum':
+    #         return ops.sum(loss)
 
-        elif reduction == 'mean':
-            loss_sum = ops.sum(loss)
+    #     elif reduction == 'mean':
+    #         loss_sum = ops.sum(loss)
 
-            if has_weight:
-                weight_sum = ops.sum(weight.gather(0, y))
-                return ops.div(loss_sum, weight_sum)
+    #         if has_weight:
+    #             weight_sum = ops.sum(weight.gather(0, y))
+    #             return ops.div(loss_sum, weight_sum)
 
-            else:
-                batch_size = ops.from_float(torch.tensor(y.size(0), dtype=torch.float32, device=x.device))
-                return ops.div(loss_sum, batch_size)
+    #         else:
+    #             batch_size = ops.from_float(torch.tensor(y.size(0), dtype=torch.float32, device=x.device))
+    #             return ops.div(loss_sum, batch_size)
 
-        else:
-            raise ValueError(f"Invalid reduction: {reduction}")
+    #     else:
+    #         raise ValueError(f"Invalid reduction: {reduction}")
 
-    @triton.jit
-    def nll_loss_backward_kernel(dy_ptr, t_ptr, w_ptr, dx_ptr, N, has_weight: tl.constexpr, s_dy_b, s_t_b, s_w, s_dx_b, s_dx_c, denom):
-        pid = tl.program_id(0)
-        mask = pid < N
+    # @triton.jit
+    # def nll_loss_backward_kernel(dy_ptr, t_ptr, w_ptr, dx_ptr, N, has_weight: tl.constexpr, s_dy_b, s_t_b, s_w, s_dx_b, s_dx_c, denom):
+    #     pid = tl.program_id(0)
+    #     mask = pid < N
 
-        dy = tl.load(dy_ptr + pid * s_dy_b, mask=mask, other=_ZERO)
-        target_idx = tl.load(t_ptr + pid * s_t_b, mask=mask, other=0)
+    #     dy = tl.load(dy_ptr + pid * s_dy_b, mask=mask, other=_ZERO)
+    #     target_idx = tl.load(t_ptr + pid * s_t_b, mask=mask, other=0)
 
-        if has_weight:
-            w = tl.load(w_ptr + target_idx * s_w, mask=mask, other=_ONE)
-            coeff = neg(div(mul(dy, w), denom))
+    #     if has_weight:
+    #         w = tl.load(w_ptr + target_idx * s_w, mask=mask, other=_ONE)
+    #         coeff = neg(div(mul(dy, w), denom))
 
-        else:
-            coeff = neg(div(dy, denom))
+    #     else:
+    #         coeff = neg(div(dy, denom))
 
-        out_ptr = dx_ptr + pid * s_dx_b + target_idx * s_dx_c
-        tl.store(out_ptr, coeff, mask=mask)
+    #     out_ptr = dx_ptr + pid * s_dx_b + target_idx * s_dx_c
+    #     tl.store(out_ptr, coeff, mask=mask)
 
-    def nll_loss_backward(ops, grad_output, target, weight, input_shape, reduction):
-        N, C = input_shape
+    # def nll_loss_backward(ops, grad_output, target, weight, input_shape, reduction):
+    #     N, C = input_shape
 
-        has_weight = weight is not None
-        if not has_weight:
-            weight = torch.empty(0, device=grad_output.device)
+    #     has_weight = weight is not None
+    #     if not has_weight:
+    #         weight = torch.empty(0, device=grad_output.device)
 
-        if reduction == 'mean':
+    #     if reduction == 'mean':
 
-            if has_weight:
-                denom = ops.sum(weight.gather(0, target))
-            else:
-                denom = ops.from_float(torch.tensor(target.size(0), dtype=torch.float32, device=grad_output.device))
+    #         if has_weight:
+    #             denom = ops.sum(weight.gather(0, target))
+    #         else:
+    #             denom = ops.from_float(torch.tensor(target.size(0), dtype=torch.float32, device=grad_output.device))
 
-            denom = denom.item()
+    #         denom = denom.item()
 
-        else:
-            denom = _ONE.value
+    #     else:
+    #         denom = _ONE.value
 
-        if reduction == 'sum' or reduction == 'mean':
-            grad_output = torch.full((N,), grad_output.item(), dtype=dtype_cls.int_dtype, device=grad_output.device)
+    #     if reduction == 'sum' or reduction == 'mean':
+    #         grad_output = torch.full((N,), grad_output.item(), dtype=dtype_cls.int_dtype, device=grad_output.device)
 
-        grad_input = torch.full((N, C), _ZERO.value, dtype=dtype_cls.int_dtype, device=grad_output.device)
+    #     grad_input = torch.full((N, C), _ZERO.value, dtype=dtype_cls.int_dtype, device=grad_output.device)
 
-        grid = (N,)
-        nll_loss_backward_kernel[grid](
-            grad_output, target, weight, grad_input,
-            N, has_weight,
-            grad_output.stride(0),
-            target.stride(0),
-            weight.stride(0),
-            grad_input.stride(0), grad_input.stride(1),
-            denom
-        )
+    #     grid = (N,)
+    #     nll_loss_backward_kernel[grid](
+    #         grad_output, target, weight, grad_input,
+    #         N, has_weight,
+    #         grad_output.stride(0),
+    #         target.stride(0),
+    #         weight.stride(0),
+    #         grad_input.stride(0), grad_input.stride(1),
+    #         denom
+    #     )
 
-        return grad_input
+    #     return grad_input
 
-    class DTNLLLossFunction(DTFunction):
+    # class DTNLLLossFunction(DTFunction):
 
-        @staticmethod
-        def forward(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
-            return ops.nll_loss(x, y, weight, reduction, ignore_index)
+    #     @staticmethod
+    #     def forward(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
+    #         return ops.nll_loss(x, y, weight, reduction, ignore_index)
 
-        @staticmethod
-        def setup_context(ctx, ops, inputs, output):
-            x, y, weight, reduction, _ = inputs
-            ctx.save_for_backward(x, y, weight)
-            ctx.reduction = reduction
+    #     @staticmethod
+    #     def setup_context(ctx, ops, inputs, output):
+    #         x, y, weight, reduction, _ = inputs
+    #         ctx.save_for_backward(x, y, weight)
+    #         ctx.reduction = reduction
 
-        @staticmethod
-        def backward(ctx, ops, grad_output):
-            x, y, weight = ctx.saved_tensors
-            return nll_loss_backward(ops, grad_output, y, weight, x.shape, ctx.reduction), None, None, None, None
+    #     @staticmethod
+    #     def backward(ctx, ops, grad_output):
+    #         x, y, weight = ctx.saved_tensors
+    #         return nll_loss_backward(ops, grad_output, y, weight, x.shape, ctx.reduction), None, None, None, None
 
-    @dtype_cls.register_func(torch.nn.functional.nll_loss,
-                             cast=("input", "weight"))
-    def nll_loss(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean'):
-        if size_average is not None or reduce is not None:
-            reduction = _Reduction.legacy_get_string(size_average, reduce)
-        return DTNLLLossFunction.apply(input, target, weight, reduction, ignore_index)
+    # @dtype_cls.register_func(torch.nn.functional.nll_loss,
+    #                          cast=("input", "weight"))
+    # def nll_loss(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean'):
+    #     if size_average is not None or reduce is not None:
+    #         reduction = _Reduction.legacy_get_string(size_average, reduce)
+    #     return DTNLLLossFunction.apply(input, target, weight, reduction, ignore_index)
