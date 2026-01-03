@@ -32,6 +32,7 @@ no_override_funcs = {
     Tensor.register_hook,
     Tensor.register_post_accumulate_grad_hook,
     Tensor.size,
+    Tensor.data_ptr,
 }
 # for functions that should not be overridden by __torch_function__
 # where it is hard to reference them, so we do it by name
@@ -197,10 +198,10 @@ class DType(Tensor):
                 raise RuntimeError("grad can be implicitly created only for scalar outputs")
 
             # create a tensor of ones in the same dtype as self
-            gradient = self.__class__(torch.ones(self.size()))
+            gradient = self.__class__(torch.ones(self.size()), device=self.device)
 
         elif gradient.__class__ != self.__class__:
-            gradient = self.__class__(gradient, requires_grad=False)
+            gradient = self.__class__(gradient, device=self.device, requires_grad=False)
 
         # manually set the incoming gradients for the output
         # tensor since no hooks will be registered for it.

@@ -403,7 +403,7 @@ def register_triton_ops(
         s_dx_b, s_dx_n = grad_input.stride()
 
         grid = (B, (N + BLOCK_N - 1) // BLOCK_N)
-        log_softmax_backward_kernel(
+        log_softmax_backward_kernel[grid](
             grad_output, output, grad_input,
             B, N,
             s_dy_b, s_dy_n,
@@ -2198,17 +2198,17 @@ def register_triton_ops(
             if has_weight:
                 denom = ops.sum(weight.gather(0, target))
             else:
-                denom = ops.from_float(torch.tensor(grad_output.size(0), dtype=torch.float32, device=grad_output.device))
+                denom = ops.from_float(torch.tensor(target.size(0), dtype=torch.float32, device=grad_output.device))
 
             denom = denom.item()
 
         else:
             denom = _ONE.value
 
-        if reduction == 'sum' or reduction == 'weight':
+        if reduction == 'sum' or reduction == 'mean':
             grad_output = torch.full((N,), grad_output.item(), dtype=dtype_cls.int_dtype, device=grad_output.device)
 
-        grad_input = torch.full((N, C), _ZERO, dtype=dtype_cls.int_dtype, device=grad_output.device)
+        grad_input = torch.full((N, C), _ZERO.value, dtype=dtype_cls.int_dtype, device=grad_output.device)
 
         grid = (N,)
         nll_loss_backward_kernel[grid](
@@ -2238,7 +2238,7 @@ def register_triton_ops(
         @staticmethod
         def backward(ctx, ops, grad_output):
             x, y, weight = ctx.saved_tensors
-            return nll_loss_backward(ops, grad_output, y, weight, x.shape, ctx.reduction), None, None, None
+            return nll_loss_backward(ops, grad_output, y, weight, x.shape, ctx.reduction), None, None, None, None
 
     @dtype_cls.register_func(torch.nn.functional.nll_loss,
                              cast=("input", "weight"))
