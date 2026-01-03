@@ -6,6 +6,7 @@ class Adam(DTOptimizer):
     def __init__(
             self,
             dtype,
+            device,
             params,
             lr=0.001,
             betas=(0.9, 0.999),
@@ -24,7 +25,7 @@ class Adam(DTOptimizer):
             amsgrad=amsgrad,
             maximize=maximize,
         )
-        super().__init__(dtype, params, defaults)
+        super().__init__(dtype, device, params, defaults)
         self.convert_params("lr", "beta1", "beta2", "eps", "weight_decay")
 
         self.validate_param("lr", lambda lr: lr >= 0.0)

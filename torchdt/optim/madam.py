@@ -6,6 +6,7 @@ class Madam(DTOptimizer):
     def __init__(
             self,
             dtype,
+            device,
             params,
             lr=0.01,
             beta=0.999,
@@ -25,7 +26,7 @@ class Madam(DTOptimizer):
             use_pow=use_pow,
             maximize=maximize,
         )
-        super().__init__(dtype, params, defaults)
+        super().__init__(dtype, device, params, defaults)
         self.convert_params("lr", "beta", "eps", "p_scale", "g_bound")
 
         self.validate_param("lr", lambda lr: lr >= 0.0)

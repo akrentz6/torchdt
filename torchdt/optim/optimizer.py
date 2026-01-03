@@ -3,10 +3,11 @@ from torchdt import DType
 
 class DTOptimizer(torch.optim.Optimizer):
 
-    def __init__(self, dtype, params, defaults):
+    def __init__(self, dtype, device, params, defaults):
         if not issubclass(dtype, DType):
             raise ValueError("dtype must be a subclass of DType.")
         self.dtype = dtype
+        self.device = device
         super().__init__(params, defaults)
 
     def step(self, closure=None):
@@ -21,7 +22,7 @@ class DTOptimizer(torch.optim.Optimizer):
         for group in self.param_groups:
             for name in param_names:
                 if name in group and not isinstance(group[name], self.dtype):
-                    group[name] = self.dtype(group[name])
+                    group[name] = self.dtype(group[name], device=self.device)
 
     def validate_param(self, param_name, condition):
         for group in self.param_groups:

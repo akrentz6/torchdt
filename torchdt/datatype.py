@@ -42,7 +42,7 @@ no_override_func_names = {
 class GradAccumHook:
 
     def __init__(self, tensor, dtype):
-        self.value = dtype(torch.zeros(tensor.size()), requires_grad=False)
+        self.value = dtype(torch.zeros(tensor.size(), device=tensor.device), requires_grad=False)
         self.dtype = dtype
 
         self.grad_hook_handle = tensor.register_hook(self.grad_hook)

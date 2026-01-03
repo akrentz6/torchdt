@@ -6,6 +6,7 @@ class SGD(DTOptimizer):
     def __init__(
             self,
             dtype,
+            device,
             params,
             lr=0.001,
             momentum=0.0,
@@ -23,13 +24,13 @@ class SGD(DTOptimizer):
             nesterov=nesterov,
             maximize=maximize,
         )
-        super().__init__(dtype, params, defaults)
+        super().__init__(dtype, device, params, defaults)
         self.convert_params("lr", "momentum", "dampening", "weight_decay")
 
-        self.validate_param("lr", lambda lr: lr >= 0.0)
-        self.validate_param("momentum", lambda momentum: momentum >= 0.0)
-        self.validate_param("dampening", lambda dampening: dampening >= 0.0)
-        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= 0.0)
+        self.validate_param("lr", lambda lr: lr >= torch.tensor(0.0, device=device))
+        self.validate_param("momentum", lambda momentum: momentum >= torch.tensor(0.0, device=device))
+        self.validate_param("dampening", lambda dampening: dampening >= torch.tensor(0.0, device=device))
+        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= torch.tensor(0.0, device=device))
 
     @torch.no_grad()
     def step(self, closure=None):
