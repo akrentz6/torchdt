@@ -63,7 +63,9 @@ def lns32_add(ops, x, y):
         x == ZERO,
         y, torch.where(
             y == ZERO,
-            x, max_operand + sbdb))
+            x, torch.where(
+                x == ops.neg(y),
+                ZERO, max_operand + sbdb)))
 
 @LNS32.register_op("sub")
 def lns32_sub(ops, x, y):
