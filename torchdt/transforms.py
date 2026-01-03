@@ -78,14 +78,20 @@ class DTypeNormalize:
     torchvision.transforms.Normalize but performs normalization on the DType.
     """
 
-    def __init__(self, dtype: type, mean: Union[float, Tuple[float, ...]], std: Union[float, Tuple[float, ...]]):
+    def __init__(
+        self,
+        dtype: type,
+        mean: Union[float, Tuple[float, ...]],
+        std: Union[float, Tuple[float, ...]],
+        device: Optional[Union[str, torch.device]] = None
+    ):
         if not isinstance(mean, (float, tuple)):
             raise ValueError(f"mean must be a float or tuple of floats, got {type(mean)}.")
         if not isinstance(std, (float, tuple)):
             raise ValueError(f"std must be a float or tuple of floats, got {type(std)}.")
 
-        self.mean = dtype(mean)
-        self.std = dtype(std)
+        self.mean = dtype(mean, device=device)
+        self.std = dtype(std, device=device)
 
         if not (self.mean.ndim == 0 or self.mean.ndim == 1):
             raise ValueError(f"mean must be a scalar or 1D tensor, got shape {self.mean.shape}.")
