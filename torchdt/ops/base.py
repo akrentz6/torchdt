@@ -392,8 +392,8 @@ class OpsBase:
 
     @classmethod
     def nll_loss(cls, x: InternalTensor, y: InternalTensor,
-                 weight: InternalTensor = None, ignore_index: int = -100,
-                 reduction: str = 'mean') -> InternalTensor:
+                 weight: InternalTensor = None, reduction: str = 'mean',
+                 ignore_index: int = -100) -> InternalTensor:
         raise NotImplementedError
 
     @classmethod
