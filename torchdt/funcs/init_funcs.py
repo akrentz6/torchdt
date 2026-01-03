@@ -20,13 +20,13 @@ def dt_constant_(tensor, val):
 @DType.register_func(torch.nn.init.ones_)
 def dt_ones_(tensor):
     # precompute the one value in the target dtype
-    one_dt = tensor.__class__(1.0)._float.item()
+    one_dt = tensor.__class__(1.0, device=tensor.device)
     return tensor.data.copy_(one_dt)
 
-@DType.register_func(torch.nn.init.zeros_)
+@DType.register_func(torch.nn.init.zeros_, torch.Tensor.zero_)
 def dt_zeros_(tensor):
     # precompute the zero value in the target dtype
-    zero_dt = tensor.__class__(0.0)._float.item()
+    zero_dt = tensor.__class__(0.0, device=tensor.device)
     return tensor.data.copy_(zero_dt)
 
 @DType.register_func(torch.nn.init.xavier_uniform_)
