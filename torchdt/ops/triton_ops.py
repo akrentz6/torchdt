@@ -38,6 +38,19 @@ def register_triton_ops(
     elif dtype_cls.bitwidth == 64:
         tl_int_dtype = tl.constexpr(tl.int64)
 
+
+    @triton.jit
+    def exp(x):
+        return from_float(tl.exp(to_float(x)))
+
+    @triton.jit
+    def log(x):
+        return from_float(tl.log(to_float(x)))
+
+    @triton.jit
+    def max_combine_fn(a, b):
+        return tl.where(gt(a, b), a, b)
+
     @triton.jit
     def atomic_add(x_ptrs, val, mask):
         active = mask
@@ -255,6 +268,175 @@ def register_triton_ops(
         grid = (triton.cdiv(x.numel(), 1024),)
         le_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
         return out
+
+
+    @triton.jit
+    def relu_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < N
+
+        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+
+        out = tl.where(lt(x, _ZERO), _ZERO, x)
+        tl.store(out_ptr + offs, out, mask=mask)
+
+    @dtype_cls.register_op("relu")
+    def dt_relu(ops, x):
+        out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
+        grid = (triton.cdiv(x.numel(), 1024),)
+        relu_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
+        return out
+
+    @triton.jit
+    def relu_backward_kernel(dy_ptr, y_ptr, dx_ptr, N, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < N
+
+        dy = tl.load(dy_ptr + offs, mask=mask, other=_ZERO)
+        y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+
+        dx = tl.where(y == _ZERO, _ZERO, dy)
+        tl.store(dx_ptr + offs, dx, mask=mask)
+
+    def relu_backward(grad_output, output):
+        grad_input = torch.empty(grad_output.shape, dtype=dtype_cls.int_dtype, device=grad_output.device)
+        grid = (triton.cdiv(grad_output.numel(), 1024),)
+        relu_backward_kernel[grid](grad_output, grad_input, grad_input, grad_output.numel(), BLOCK_SIZE=1024)
+        return grad_input
+
+    class DTReLUFunction(DTFunction):
+
+        @staticmethod
+        def forward(ops, x):
+            return ops.relu(x)
+
+        @staticmethod
+        def setup_context(ctx, ops, inputs, output):
+            ctx.save_for_backward(output)
+
+        @staticmethod
+        def backward(ctx, ops, grad_output):
+            output, = ctx.saved_tensors
+            return relu_backward(grad_output, output)
+
+    @dtype_cls.register_func(torch.nn.functional.relu, torch.Tensor.relu,
+                     cast=("input",))
+    def dt_relu(input, inplace=False):
+        result = DTReLUFunction.apply(input)
+        return result
+
+
+    @triton.jit
+    def log_softmax_kernel(x_ptr, y_ptr, B, N, s_x_b, s_x_n, s_y_b, s_y_n, BLOCK_N: tl.constexpr):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+
+        offs_n = tl.arange(0, BLOCK_N)
+        n_idx = offs_n + pid1 * BLOCK_N
+
+        x_ptrs = x_ptr + pid0 * s_x_b + n_idx * s_x_n
+        y_ptrs = y_ptr + pid0 * s_y_b + n_idx * s_y_n
+
+        mask = n_idx < N
+        x = tl.load(x_ptrs, mask=mask, other=_NEG_INF)
+
+        row_max = tl.reduce(x, 0, max_combine_fn)
+        x_centered = sub(x, row_max)
+        exps = exp(x_centered)
+        sum_exp = tl.reduce(tl.where(mask, exps, _ZERO), 0, add)
+        log_sum_exp = log(sum_exp)
+
+        out = sub(x_centered, log_sum_exp)
+        tl.store(y_ptrs, out, mask=mask)
+
+    @dtype_cls.register_op("log_softmax")
+    def log_softmax(ops, x, dim=None):
+        assert x.dim() == 2
+        BLOCK_N = 128
+
+        B, N = x.shape
+        y = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
+
+        num_tiles = (N + 128 - 1) // 128
+        grid = (B, num_tiles)
+
+        s_x_b, s_x_n = x.stride()
+        s_y_b, s_y_n = y.stride()
+
+        log_softmax_kernel[grid](x, y, B, N, s_x_b, s_x_n, s_y_b, s_y_n, BLOCK_N)
+        return y
+
+    @triton.jit
+    def log_softmax_backward_kernel(dy_ptr, y_ptr, dx_ptr, B, N, s_dy_b, s_dy_n, s_y_b, s_y_n, s_dx_b, s_dx_n, BLOCK_N: tl.constexpr):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+
+        offs_n = tl.arange(0, BLOCK_N)
+        n_idx = pid1 * BLOCK_N + offs_n
+        mask = n_idx < N
+
+        dy_ptrs = dy_ptr + pid0 * s_dy_b + n_idx * s_dy_n
+        y_ptrs  = y_ptr + pid0 * s_y_b + n_idx * s_y_n
+        dx_ptrs = dx_ptr + pid0 * s_dx_b + n_idx * s_dx_n
+
+        dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
+        y = tl.load(y_ptrs, mask=mask, other=_NEG_INF)
+
+        sum_dy = tl.reduce(dy, 0, combine_fn=add)
+        softmax = exp(y)
+
+        dx = sub(dy, mul(softmax, sum_dy))
+        tl.store(dx_ptrs, dx, mask=mask)
+
+    def log_softmax_backward(grad_output, output):
+        B, N = grad_output.shape
+        BLOCK_N = 128
+
+        grad_input = torch.empty(grad_output.shape, dtype=dtype_cls.int_dtype, device=grad_output.device)
+
+        s_dy_b, s_dy_n = grad_output.stride()
+        s_y_b, s_y_n = output.stride()
+        s_dx_b, s_dx_n = grad_input.stride()
+
+        grid = (B, (N + BLOCK_N - 1) // BLOCK_N)
+        log_softmax_backward_kernel(
+            grad_output, output, grad_input,
+            B, N,
+            s_dy_b, s_dy_n,
+            s_y_b, s_y_n,
+            s_dx_b, s_dx_n,
+            BLOCK_N
+        )
+        return grad_input
+
+    class DTLogSoftmaxFunction(DTFunction):
+
+        @staticmethod
+        def forward(ops, x, dim=None):
+            return ops.log_softmax(x, dim=dim)
+
+        @staticmethod
+        def setup_context(ctx, ops, inputs, output):
+            _, dim = inputs
+            ctx.save_for_backward(output)
+            ctx.dim = dim
+
+        @staticmethod
+        def backward(ctx, ops, grad_output):
+            output, = ctx.saved_tensors
+            return log_softmax_backward(grad_output, output), None
+
+    @dtype_cls.register_func(torch.nn.functional.log_softmax, torch.Tensor.log_softmax,
+                     cast=("input",))
+    def dt_log_softmax(input, dim=None, _stacklevel=3, dtype=None, *, out=None):
+        result = DTLogSoftmaxFunction.apply(input, dim)
+
+        if out is not None:
+            return out.copy_(result)
+        return result
+
 
     @triton.autotune(
         configs=[
