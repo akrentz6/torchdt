@@ -865,7 +865,7 @@ def register_triton_ops(
                     dy_vals = tl.load(dY_ptr + dy_idx, mask=valid_pos, other=_ZERO)
 
                     w_idx = cout * s_w_co + base_w_cin * s_w_cinperg + kh * s_w_kh + kw * s_w_kw
-                    w_val = tl.load(W_ptr + w_idx, mask=valid_pos, other=_ZERO)
+                    w_val = tl.load(W_ptr + w_idx)
 
                     acc = add(acc, mul(dy_vals, w_val))
 
@@ -1068,7 +1068,7 @@ def register_triton_ops(
             ctx.groups = groups
 
         @staticmethod
-        def backward(ctx, grad_output):
+        def backward(ctx, ops, grad_output):
             input, weight, bias = ctx.saved_tensors
             stride = ctx.stride
             padding = ctx.padding
@@ -1082,7 +1082,8 @@ def register_triton_ops(
             if isinstance(dilation, int):
                 dilation = (dilation, dilation)
 
-            if ctx.needs_input_grad[0]:
+            # needs_input_grad pushes every index back by one since we pass ops...
+            if ctx.needs_input_grad[1]:
                 grad_input = conv2d_dinput(
                     grad_output, weight, input.shape,
                     stride, padding, dilation, groups
@@ -1090,7 +1091,7 @@ def register_triton_ops(
             else:
                 grad_input = None
 
-            if ctx.needs_input_grad[1]:
+            if weight is not None and ctx.needs_input_grad[2]:
                 grad_weight = conv2d_dweight(
                     grad_output, input, weight.shape,
                     stride, padding, dilation, groups
@@ -1098,7 +1099,7 @@ def register_triton_ops(
             else:
                 grad_weight = None
 
-            if bias is not None and ctx.needs_input_grad[2]:
+            if bias is not None and ctx.needs_input_grad[3]:
                 grad_bias = conv2d_dbias(
                     grad_output, bias.shape
                 )
@@ -1189,6 +1190,8 @@ def register_triton_ops(
 
         if stride is None:
             stride = kernel_size
+        elif isinstance(stride, int):
+            stride = (stride, stride)
 
         N, C, H, W = x.shape
         Kh, Kw = kernel_size[0], kernel_size[1]
@@ -1303,16 +1306,11 @@ def register_triton_ops(
             return (output, indices) if return_indices else output
 
         @staticmethod
-        def backward(ctx, grad_output):
+        def backward(ctx, ops, grad_output):
             indices, = ctx.saved_tensors
             input_shape = ctx.input_shape
 
-            if ctx.needs_input_grad[0]:
-                grad_input = max_pool2d_dinput(grad_output, indices, input_shape)
-            else:
-                grad_input = None
-
-            return grad_input, None, None, None, None, None, None
+            return max_pool2d_dinput(grad_output, indices, input_shape), None, None, None, None, None, None
 
     @dtype_cls.register_func(torch.nn.functional.max_pool2d,
                              cast=("input",))
@@ -1565,15 +1563,10 @@ def register_triton_ops(
             return ops.adaptive_avg_pool2d(input, output_size)
 
         @staticmethod
-        def backward(ctx, grad_output):
+        def backward(ctx, ops, grad_output):
             input_shape = ctx.input_shape
 
-            if ctx.needs_input_grad[0]:
-                grad_input = adaptive_avg_pool2d_dinput(grad_output, input_shape)
-            else:
-                grad_input = None
-
-            return grad_input, None
+            return adaptive_avg_pool2d_dinput(grad_output, input_shape), None
 
     @dtype_cls.register_func(torch.nn.functional.adaptive_avg_pool2d,
                              cast=("input",))
@@ -1647,7 +1640,7 @@ def register_triton_ops(
 
         if TRAINING:
             if count > 1:
-                sample_var = mul(var, div(count_dt, sub(count_dt, _ONE)))
+                sample_var = mul(var, div(count_dt, sub(count_dt, tl.cast(_ONE, tl_int_dtype))))
             else:
                 sample_var = _ZERO
 
@@ -1691,7 +1684,7 @@ def register_triton_ops(
         if has_weight:
             weight = tl.load(w_ptr + pid0)
         else:
-            weight = _ONE
+            weight = tl.cast(_ONE, tl_int_dtype)
 
         if has_bias:
             bias = tl.load(b_ptr + pid0)
@@ -1732,8 +1725,6 @@ def register_triton_ops(
         has_bias = bias is not None
 
         count_dt = dtype_cls(count, device=x.device)._int.item()
-        momentum = momentum._int.item()
-        eps = eps._int.item()
 
         if not has_weight:
             weight = torch.empty(0, device=x.device)
@@ -1864,7 +1855,7 @@ def register_triton_ops(
         if has_weight:
             tl.store(dW_ptr + pid, sum_dy_xhat)
 
-        inv_count = div(_ONE, count_dt)
+        inv_count = div(tl.cast(_ONE, tl_int_dtype), count_dt)
         tl.store(m_dy_ptr + pid, mul(sum_dy, inv_count))
         tl.store(m_dy_xhat_ptr + pid, mul(sum_dy_xhat, inv_count))
 
@@ -1894,7 +1885,7 @@ def register_triton_ops(
         if has_weight:
             weight = tl.load(w_ptr + pid0)
         else:
-            weight = _ONE
+            weight = tl.cast(_ONE, tl_int_dtype)
         w_over_invstd = div(weight, invstd)
 
         mean_dy = tl.load(m_dy_ptr + pid0)
@@ -1940,7 +1931,7 @@ def register_triton_ops(
         if has_weight:
             weight = tl.load(w_ptr + pid0)
         else:
-            weight = _ONE
+            weight = tl.cast(_ONE, tl_int_dtype)
         w_over_invstd = div(weight, invstd)
 
         h = hw // W
@@ -1971,7 +1962,6 @@ def register_triton_ops(
         has_bias = bias is not None
 
         count_dt = dtype_cls(count, device=input.device)._int.item()
-        eps = eps._int.item()
 
         if not has_weight:
             weight = torch.empty(0, device=input.device, dtype=dtype_cls.int_dtype)
@@ -2079,15 +2069,17 @@ def register_triton_ops(
                 training
             )
 
-            ctx.save_for_backward(x, weight, bias, eps, save_mean, save_invstd)
+            ctx.save_for_backward(x, weight, bias, save_mean, save_invstd)
             ctx.training = training
+            ctx.eps = eps
 
             return output
 
         @staticmethod
-        def backward(ctx, grad_output):
+        def backward(ctx, ops, grad_output):
             training = ctx.training
-            x, weight, bias, eps, save_mean, save_invstd = ctx.saved_tensors
+            eps = ctx.eps
+            x, weight, bias, save_mean, save_invstd = ctx.saved_tensors
 
             grad_input, grad_weight, grad_bias = batch_norm2d_backward(
                 x, grad_output,
@@ -2096,12 +2088,15 @@ def register_triton_ops(
                 training, eps
             )
 
-            return grad_input, None, None, None, None, None, None, grad_weight, grad_bias
+            return grad_input, None, None, grad_weight, grad_bias, None, None, None
 
     @dtype_cls.register_func(torch.nn.functional.batch_norm,
-                             cast=("input", "running_mean", "running_var", "weight", "bias", "momentum", "eps"))
+                             cast=("input", "running_mean", "running_var", "weight", "bias"))
     def dt_batch_norm(input, running_mean, running_var, weight=None, bias=None, training=False, momentum=0.1, eps=1e-5):
         assert input.dim() == 4, "torchdt only supports 2D batch norm for now"
+        # explicitly cast momentum and eps so that we can choose device
+        momentum = dtype_cls(momentum, device=input.device)._int.item()
+        eps = dtype_cls(eps, device=input.device)._int.item()
         return DTBatchNormFunction.apply(input, running_mean, running_var, weight, bias, training, momentum, eps)
 
 
