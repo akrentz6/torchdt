@@ -10,6 +10,7 @@ base = 2.0 ** (2.0 ** torch.tensor(-23, dtype=torch.float64))
 
 class LNS64(DType, bitwidth=64):
 
+    @staticmethod
     def enable_triton():
         lns64_register_triton_ops()
 
