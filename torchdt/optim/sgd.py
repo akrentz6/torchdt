@@ -134,7 +134,7 @@ class TritonSGD(DTOptimizer):
                 new_buf = self.dtype.ops.triton_sgd_step(
                     p._int, p.grad._int, buf,
                     lr._int, momentum._int,
-                    dampening, weight_decay,
+                    dampening._int, weight_decay._int,
                     nesterov, maximize
                 )
                 state["momentum_buffer"] = new_buf
