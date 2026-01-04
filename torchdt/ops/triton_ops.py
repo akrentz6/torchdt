@@ -2361,7 +2361,7 @@ def register_triton_ops(
 
         first_mom = False
         if buf is None:
-            buf = torch.empty(p.shape, dtype=p.int_dtype, device=p.device)
+            buf = torch.empty(p.shape, dtype=p.dtype, device=p.device)
             first_mom = True
 
         sgd_step_kernel[grid](
