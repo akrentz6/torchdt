@@ -1665,7 +1665,7 @@ def register_triton_ops(
             mean = tl.load(rm_ptr + pid)
             var = tl.load(rv_ptr + pid)
 
-        invstd = sqrt(add(var, eps))
+        invstd = div(tl.cast(_ONE, tl.int64), sqrt(add(var, eps)))
         tl.store(sm_ptr + pid, mean)
         tl.store(sis_ptr + pid, invstd)
 
@@ -1708,7 +1708,7 @@ def register_triton_ops(
         x_ptrs = X_ptr + n * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
         x = tl.load(x_ptrs, mask=mask, other=_ZERO)
 
-        y = div(sub(x, mean), invstd)
+        y = mul(sub(x, mean), invstd)
         y = add(mul(y, weight), bias)
 
         y_ptrs = Y_ptr + n * s_y_n + pid0 * s_y_c + h * s_y_h + w * s_y_w
@@ -1820,7 +1820,7 @@ def register_triton_ops(
         x = tl.load(x_ptrs, mask=mask, other=_ZERO)
         dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
 
-        xhat = div(sub(x, mean), invstd)
+        xhat = mul(sub(x, mean), invstd)
 
         partial_dy = tl.reduce(dy, axis=0, combine_fn=add)
         partial_dy_xhat = tl.reduce(mul(dy, xhat), axis=0, combine_fn=add)
@@ -1892,7 +1892,7 @@ def register_triton_ops(
             weight = tl.load(w_ptr + pid0)
         else:
             weight = tl.cast(_ONE, tl_int_dtype)
-        w_over_invstd = div(weight, invstd)
+        w_over_std = mul(weight, invstd)
 
         mean_dy = tl.load(m_dy_ptr + pid0)
         mean_dy_xhat = tl.load(m_dy_xhat_ptr + pid0)
@@ -1906,11 +1906,11 @@ def register_triton_ops(
         x = tl.load(x_ptrs, mask=mask, other=_ZERO)
         dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
 
-        xhat = div(sub(x, mean), invstd)
+        xhat = mul(sub(x, mean), invstd)
 
         inner = sub(dy, mean_dy)
         inner = sub(inner, mul(xhat, mean_dy_xhat))
-        dx = mul(w_over_invstd, inner)
+        dx = mul(w_over_std, inner)
 
         tl.store(dx_ptrs, dx, mask=mask)
 
@@ -1938,7 +1938,7 @@ def register_triton_ops(
             weight = tl.load(w_ptr + pid0)
         else:
             weight = tl.cast(_ONE, tl_int_dtype)
-        w_over_invstd = div(weight, invstd)
+        w_over_std = mul(weight, invstd)
 
         h = hw // W
         w = hw - h * W
@@ -1946,7 +1946,7 @@ def register_triton_ops(
         dx_ptrs = dX_ptr + pid1 * s_dx_n + pid0 * s_dx_c + h * s_dx_h + w * s_dx_w
 
         dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
-        dx = mul(w_over_invstd, dy)
+        dx = mul(w_over_std, dy)
         tl.store(dx_ptrs, dx, mask=mask)
 
     def batch_norm2d_backward(
