@@ -905,6 +905,65 @@ def register_triton_ops(
         )
         return grad_input
 
+    # @triton.jit
+    # def conv2d_dweight_kernel(
+    #     dW_ptr,
+    #     X_ptr,
+    #     dY_ptr,
+    #     N, Cin, H, W,
+    #     Cout, Kh, Kw,
+    #     Hout, Wout,
+    #     sh, sw,
+    #     ph, pw,
+    #     dh, dw,
+    #     groups,
+    #     s_dw_co, s_dw_cin, s_dw_kh, s_dw_kw,
+    #     s_x_n, s_x_c, s_x_h, s_x_w,
+    #     s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+    #     BLOCK_NHW: tl.constexpr,
+    # ):
+    #     pid0 = tl.program_id(0)
+    #     pid1 = tl.program_id(1)
+
+    #     Cin_per_group = Cin // groups
+    #     Cout_per_group = Cout // groups
+
+    #     cout = pid0 // (Cin_per_group * Kh * Kw)
+    #     rem = pid0 - cout * (Cin_per_group * Kh * Kw)
+    #     cin = rem // (Kh * Kw)
+    #     rem2 = rem -  cin * (Kh * Kw)
+    #     kh = rem2 // Kw
+    #     kw = rem2 % Kw
+
+    #     group_id = cout // Cout_per_group
+    #     cin_abs = group_id * Cin_per_group + cin
+
+    #     offs = pid1 * BLOCK_NHW + tl.arange(0, BLOCK_NHW)
+    #     NHW = N * Hout * Wout
+    #     mask = offs < NHW
+
+    #     hw = Hout * Wout
+    #     n = offs // hw
+    #     r = offs - n * hw
+    #     hout = r // Wout
+    #     wout = r - hout * Wout
+
+    #     h = hout * sh - ph + kh * dh
+    #     w = wout * sw - pw + kw * dw
+    #     inb = mask & (h >= 0) & (h < H) & (w >= 0) & (w < W)
+
+    #     x_ptrs = X_ptr + n * s_x_n + cin_abs * s_x_c + h * s_x_h + w * s_x_w
+    #     dy_ptrs = dY_ptr + n * s_dy_n + cout * s_dy_c + hout * s_dy_h + wout * s_dy_w
+
+    #     x = tl.load(x_ptrs, mask=inb, other=_ZERO)
+    #     dy = tl.load(dy_ptrs, mask=inb, other=_ZERO)
+
+    #     partial = tl.reduce(mul(x, dy), axis=0, combine_fn=add)
+
+    #     dw_idx = cout * s_dw_co + cin * s_dw_cin + kh * s_dw_kh + kw * s_dw_kw
+    #     # atomic add with a scalar ptr
+    #     atomic_add(dW_ptr + dw_idx + tl.zeros((1,), dtype=tl.int32), partial, tl.full((1,), True, tl.int1))
+
     @triton.jit
     def conv2d_dweight_kernel(
         dW_ptr,
@@ -929,9 +988,9 @@ def register_triton_ops(
         Cout_per_group = Cout // groups
 
         cout = pid // (Cin_per_group * Kh * Kw)
-        rem = pid % (Cin_per_group * Kh * Kw)
+        rem = pid - cout * (Cin_per_group * Kh * Kw)
         cin = rem // (Kh * Kw)
-        rem2 = rem % (Kh * Kw)
+        rem2 = rem -  cin * (Kh * Kw)
         kh = rem2 // Kw
         kw = rem2 % Kw
 
@@ -997,6 +1056,7 @@ def register_triton_ops(
             s_x_n, s_x_c, s_x_h, s_x_w,
             s_dy_n, s_dy_c, s_dy_h, s_dy_w,
             BLOCK_NHW,
+            num_warps=4,
         )
 
         return grad_weight
@@ -1665,7 +1725,7 @@ def register_triton_ops(
             mean = tl.load(rm_ptr + pid)
             var = tl.load(rv_ptr + pid)
 
-        invstd = div(tl.cast(_ONE, tl.int64), sqrt(add(var, eps)))
+        invstd = div(tl.cast(_ONE, tl_int_dtype), sqrt(add(var, eps)))
         tl.store(sm_ptr + pid, mean)
         tl.store(sis_ptr + pid, invstd)
 
