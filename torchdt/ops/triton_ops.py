@@ -2075,7 +2075,7 @@ def register_triton_ops(
                 training
             )
 
-            ctx.save_for_backward(x, weight, bias, save_mean, save_invstd)
+            ctx.save_for_backward(x, weight, bias, running_mean, running_var, save_mean, save_invstd)
             ctx.training = training
             ctx.eps = eps
 
@@ -2085,16 +2085,23 @@ def register_triton_ops(
         def backward(ctx, ops, grad_output):
             training = ctx.training
             eps = ctx.eps
-            x, weight, bias, save_mean, save_invstd = ctx.saved_tensors
+            x, weight, bias, running_mean, running_var, save_mean, save_invstd = ctx.saved_tensors
 
-            grad_input, grad_weight, grad_bias = batch_norm2d_backward(
-                x, grad_output,
-                save_mean, save_invstd,
-                weight, bias,
-                training, eps
-            )
+            # grad_input, grad_weight, grad_bias = batch_norm2d_backward(
+            #     x, grad_output,
+            #     save_mean, save_invstd,
+            #     weight, bias,
+            #     training, eps
+            # )
 
-            return grad_input, None, None, grad_weight, grad_bias, None, None, None
+            grad_input, grad_weight, grad_bias = torch.ops.aten.native_batch_norm_backward(
+                ops.to_float(grad_output), ops.to_float(x), ops.to_float(weight),
+                ops.to_float(running_mean), ops.to_float(running_var),
+                ops.to_float(save_mean), ops.to_float(save_invstd),
+                training, ops.to_float(torch.tensor(eps, device=x.device, dtype=x.dtype)),
+                (True, True, True))
+
+            return ops.from_float(grad_input), None, None, ops.from_float(grad_weight), ops.from_float(grad_bias), None, None, None
 
     @dtype_cls.register_func(torch.nn.functional.batch_norm,
                              cast=("input", "running_mean", "running_var", "weight", "bias"))
