@@ -76,3 +76,67 @@ class SGD(DTOptimizer):
                 p.data.copy_(p - grad * lr)
 
         return loss
+
+class TritonSGD(DTOptimizer):
+
+    def __init__(
+            self,
+            dtype,
+            device,
+            params,
+            lr=0.001,
+            momentum=0.0,
+            dampening=0.0,
+            weight_decay=0.0,
+            nesterov=False,
+            *,
+            maximize=False,
+    ):
+        defaults = dict(
+            lr=lr,
+            momentum=momentum,
+            dampening=dampening,
+            weight_decay=weight_decay,
+            nesterov=nesterov,
+            maximize=maximize,
+        )
+        super().__init__(dtype, device, params, defaults)
+        self.convert_params("lr", "momentum", "dampening", "weight_decay")
+
+        self.validate_param("lr", lambda lr: lr >= torch.tensor(0.0, device=device))
+        self.validate_param("momentum", lambda momentum: momentum >= torch.tensor(0.0, device=device))
+        self.validate_param("dampening", lambda dampening: dampening >= torch.tensor(0.0, device=device))
+        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= torch.tensor(0.0, device=device))
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        """Performs a single optimization step."""
+
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            momentum = group["momentum"]
+            dampening = group["dampening"]
+            weight_decay = group["weight_decay"]
+            nesterov = group["nesterov"]
+            maximize = group["maximize"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+
+                state = self.state[p]
+                buf = state.get("momentum_buffer", None)
+
+                new_buf = self.dtype.ops.triton_sgd_step(
+                    p._int, p.grad._int, buf,
+                    lr._int, momentum._int,
+                    dampening, weight_decay,
+                    nesterov, maximize
+                )
+                state["momentum_buffer"] = new_buf
+
+        return loss

@@ -2314,3 +2314,64 @@ def register_triton_ops(
     #     if size_average is not None or reduce is not None:
     #         reduction = _Reduction.legacy_get_string(size_average, reduce)
     #     return DTNLLLossFunction.apply(input, target, weight, reduction, ignore_index)
+
+
+    @triton.jit
+    def sgd_step_kernel(
+        p_ptr, g_ptr, buf_ptr,
+        N, lr, momentum, dampening, weight_decay,
+        MAXIMIZE: tl.constexpr, NESTEROV: tl.constexpr,
+        FIRST_MOMENTUM: tl.constexpr, BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < N
+
+        p = tl.load(p_ptr + offs, mask=mask)
+        g = tl.load(g_ptr + offs, mask=mask)
+
+        if MAXIMIZE:
+            g = neg(g)
+
+        if weight_decay != _ZERO:
+            g = add(g, mul(p, weight_decay))
+
+        if momentum != _ZERO:
+            if FIRST_MOMENTUM:
+                buf_new = g
+            else:
+                buf = tl.load(buf_ptr + offs, mask=mask)
+                buf_new = add(mul(buf, momentum), mul(g, sub(_ONE, dampening)))
+
+            tl.store(buf_ptr + offs, buf_new, mask=mask)
+
+            if NESTEROV:
+                g = add(g, mul(buf_new, momentum))
+            else:
+                g = buf_new
+
+        p_new = sub(p, mul(g, lr))
+        tl.store(p_ptr + offs, p_new, mask=mask)
+
+    @dtype_cls.register_op("triton_sgd_step")
+    def triton_sgd_step(ops, p, grad, buf, lr, momentum, dampening, weight_decay, nesterov, maximize):
+        N = p.numel()
+        BLOCK = 1024
+        grid = (triton.cdiv(N, BLOCK),)
+
+        first_mom = False
+        if buf is None:
+            buf = torch.empty(p.shape, dtype=p.int_dtype, device=p.device)
+            first_mom = True
+
+        sgd_step_kernel[grid](
+            p, grad, buf,
+            N, lr.item(),
+            momentum.item(),
+            dampening.item(),
+            weight_decay.item(),
+            maximize, nesterov,
+            first_mom, BLOCK
+        )
+
+        return buf

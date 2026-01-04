@@ -487,3 +487,12 @@ class OpsBase:
                    normalized_shape: tuple[int], weight: InternalTensor = None,
                    bias: InternalTensor = None) -> InternalTensor:
         raise NotImplementedError
+
+
+    @classmethod
+    def triton_sgd_step(cls, param: InternalTensor, grad: InternalTensor,
+                     momentum_buffer: InternalTensor, lr: InternalTensor,
+                     momentum: InternalTensor, dampening: InternalTensor,
+                     weight_decay: InternalTensor, nesterov: bool,
+                     maximize: bool) -> tuple[InternalTensor, InternalTensor]:
+        raise NotImplementedError
