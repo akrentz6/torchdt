@@ -100,7 +100,7 @@ def lns16_neg(ops, x):
 
 @LNS16.register_op("abs")
 def lns16_abs(ops, x):
-    return torch.where(x == ops.scalar_from_float(0.0), x & (-2)) # -2 is ~1
+    return torch.where(x == ops.scalar_from_float(0.0), x, x & (-2)) # -2 is ~1
 
 @LNS16.register_op("sign")
 def lns16_sign(ops, x):

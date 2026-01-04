@@ -100,7 +100,7 @@ def lns64_neg(ops, x):
 
 @LNS64.register_op("abs")
 def lns64_abs(ops, x):
-    return torch.where(x == ops.scalar_from_float(0.0), x & (-2)) # -2 is ~1
+    return torch.where(x == ops.scalar_from_float(0.0), x, x & (-2)) # -2 is ~1
 
 @LNS64.register_op("sign")
 def lns64_sign(ops, x):

@@ -100,7 +100,7 @@ def lns32_neg(ops, x):
 
 @LNS32.register_op("abs")
 def lns32_abs(ops, x):
-    return torch.where(x == ops.scalar_from_float(0.0), x & (-2)) # -2 is ~1
+    return torch.where(x == ops.scalar_from_float(0.0), x, x & (-2)) # -2 is ~1
 
 @LNS32.register_op("sign")
 def lns32_sign(ops, x):
