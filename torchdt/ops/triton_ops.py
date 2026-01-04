@@ -1234,6 +1234,7 @@ def register_triton_ops(
         Hout, Wout,
         s_dy_n, s_dy_c, s_dy_h, s_dy_w,
         s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+        s_idx_n, s_idx_c, s_idx_h, s_idx_w,
         BLOCK_W: tl.constexpr,
     ):
         pid0 = tl.program_id(0)
@@ -1250,16 +1251,19 @@ def register_triton_ops(
 
         dy_base = dY_ptr + n * s_dy_n + c * s_dy_c
         dx_base = dX_ptr + n * s_dx_n + c * s_dx_c
-        idx_base = idx_ptr + n * s_dy_n + c * s_dy_c
+        idx_base = idx_ptr + n * s_idx_n + c * s_idx_c
 
-        y_off = oh * s_dy_h + ow * s_dy_w
-        got_idx = tl.load(idx_base + y_off, mask=m_ow, other=-1)
-        dy = tl.load(dy_base + y_off, mask=m_ow, other=_ZERO)
+        y_off_dy = oh * s_dy_h + ow * s_dy_w
+        y_off_idx = oh * s_idx_h + ow * s_idx_w
 
-        valid = m_ow & (got_idx >= 0)
+        got_idx = tl.load(idx_base + y_off_idx, mask=m_ow, other=-1)
+        dy = tl.load(dy_base + y_off_dy, mask=m_ow, other=_ZERO)
 
-        ih = got_idx // W
-        iw = got_idx - ih * W
+        valid = m_ow & (got_idx >= 0) & (got_idx < H * W)
+
+        safe_idx = tl.where(valid, got_idx, 0)
+        ih = safe_idx // W
+        iw = safe_idx - ih * W
 
         ptr_x = dx_base + ih * s_dx_h + iw * s_dx_w
         atomic_add(ptr_x, dy, valid)
@@ -1273,6 +1277,7 @@ def register_triton_ops(
 
         s_dy_n, s_dy_c, s_dy_h, s_dy_w = grad_output.stride()
         s_dx_n, s_dx_c, s_dx_h, s_dx_w = grad_input.stride()
+        s_idx_n, s_idx_c, s_idx_h, s_idx_w = indices.stride()
 
         BLOCK_W = 128
         grid = (N * C, Hout, triton.cdiv(Wout, BLOCK_W))
@@ -1283,6 +1288,7 @@ def register_triton_ops(
             Hout, Wout,
             s_dy_n, s_dy_c, s_dy_h, s_dy_w,
             s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+            s_idx_n, s_idx_c, s_idx_h, s_idx_w,
             BLOCK_W=BLOCK_W,
             num_warps=4,
         )
