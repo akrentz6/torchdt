@@ -1152,10 +1152,17 @@ def register_triton_ops(
                 grad_input = None
 
             if weight is not None and ctx.needs_input_grad[2]:
-                grad_weight = conv2d_dweight(
-                    grad_output, input, weight.shape,
-                    stride, padding, dilation, groups
+                # grad_weight = conv2d_dweight(
+                #     grad_output, input, weight.shape,
+                #     stride, padding, dilation, groups
+                # )
+                grad_weight = torch.nn.grad.conv2d_weight(
+                    ops.to_float(input), weight.shape,
+                    ops.to_float(grad_output),
+                    stride=stride, padding=padding,
+                    dilation=dilation, groups=groups
                 )
+                grad_weight = ops.from_float(grad_weight)
             else:
                 grad_weight = None
 
