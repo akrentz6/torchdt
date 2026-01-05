@@ -103,9 +103,9 @@ def register_triton_ops(
     def dt_to_float(ops, x):
         if torch._debug_has_internal_overlap(x) != 0:
             x = x.contiguous()
-            out = torch.empty(x.size(), dtype=dtype_cls.int_dtype, device=x.device)
+            out = torch.empty(x.size(), dtype=torch.float32, device=x.device)
         else:
-            out = torch.empty_strided(x.size(), x.stride(), dtype=dtype_cls.int_dtype, device=x.device)
+            out = torch.empty_strided(x.size(), x.stride(), dtype=torch.float32, device=x.device)
 
         grid = (triton.cdiv(x.numel(), 1024),)
         to_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
