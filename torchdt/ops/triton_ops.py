@@ -96,7 +96,7 @@ def register_triton_ops(
 
     @dtype_cls.register_op("to_float")
     def dt_to_float(ops, x):
-        out = torch.empty_strided(x.size(), x.stride(), dtype=dtype_cls.int_dtype, device=x.device)
+        out = torch.empty_strided(x.size(), x.stride(), dtype=torch.float32, device=x.device)
         grid = (triton.cdiv(x.numel(), 1024),)
         to_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
         return out
