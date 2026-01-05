@@ -2137,31 +2137,31 @@ def register_triton_ops(
 
         @staticmethod
         def forward(ctx, ops, x, running_mean, running_var, weight=None, bias=None, training=False, momentum=0.1, eps=1e-5):
-            # output, save_mean, save_invstd = ops.batch_norm(
-            #     x, running_mean, running_var,
-            #     momentum, eps,
-            #     weight, bias,
-            #     training
-            # )
-            rm_fp = ops.to_float(running_mean)
-            rv_fp = ops.to_float(running_var)
-
-            x = ops.to_float(x)
-            if weight is not None:
-                weight = ops.to_float(weight)
-            if bias is not None:
-                bias = ops.to_float(bias)
-
-            output, save_mean, save_invstd = torch.ops.aten.native_batch_norm(
-                x, weight, bias,
-                rm_fp, rv_fp,
-                training,
-                momentum, eps
+            output, save_mean, save_invstd = ops.batch_norm(
+                x, running_mean, running_var,
+                momentum, eps,
+                weight, bias,
+                training
             )
-            running_mean.data.copy_(ops.from_float(rm_fp))
-            running_var.data.copy_(ops.from_float(rv_fp))
+            # rm_fp = ops.to_float(running_mean)
+            # rv_fp = ops.to_float(running_var)
 
-            ctx.save_for_backward(x, weight, running_mean, running_var, save_mean, save_invstd)
+            # x = ops.to_float(x)
+            # if weight is not None:
+            #     weight = ops.to_float(weight)
+            # if bias is not None:
+            #     bias = ops.to_float(bias)
+
+            # output, save_mean, save_invstd = torch.ops.aten.native_batch_norm(
+            #     x, weight, bias,
+            #     rm_fp, rv_fp,
+            #     training,
+            #     momentum, eps
+            # )
+            # running_mean.data.copy_(ops.from_float(rm_fp))
+            # running_var.data.copy_(ops.from_float(rv_fp))
+
+            ctx.save_for_backward(x, weight, bias, save_mean, save_invstd)
             ctx.training = training
             ctx.eps = eps
 
@@ -2171,31 +2171,31 @@ def register_triton_ops(
         def backward(ctx, ops, grad_output):
             training = ctx.training
             eps = ctx.eps
-            x, weight, running_mean, running_var, save_mean, save_invstd = ctx.saved_tensors
+            x, weight, bias, save_mean, save_invstd = ctx.saved_tensors
 
-            # grad_input, grad_weight, grad_bias = batch_norm2d_backward(
-            #     x, grad_output,
-            #     save_mean, save_invstd,
-            #     weight, bias,
-            #     training, eps
-            # )
-
-            grad_input, grad_weight, grad_bias = torch.ops.aten.native_batch_norm_backward(
-                ops.to_float(grad_output), x, weight,
-                ops.to_float(running_mean), ops.to_float(running_var),
+            grad_input, grad_weight, grad_bias = batch_norm2d_backward(
+                x, grad_output,
                 save_mean, save_invstd,
-                training, eps,
-                (True, True, True))
+                weight, bias,
+                training, eps
+            )
 
-            return ops.from_float(grad_input), None, None, ops.from_float(grad_weight), ops.from_float(grad_bias), None, None, None
+            # grad_input, grad_weight, grad_bias = torch.ops.aten.native_batch_norm_backward(
+            #     ops.to_float(grad_output), x, weight,
+            #     ops.to_float(running_mean), ops.to_float(running_var),
+            #     save_mean, save_invstd,
+            #     training, eps,
+            #     (True, True, True))
+
+            return grad_input, None, None, grad_weight, grad_bias, None, None, None
 
     @dtype_cls.register_func(torch.nn.functional.batch_norm,
                              cast=("input", "running_mean", "running_var", "weight", "bias"))
     def dt_batch_norm(input, running_mean, running_var, weight=None, bias=None, training=False, momentum=0.1, eps=1e-5):
         assert input.dim() == 4, "torchdt only supports 2D batch norm for now"
         # explicitly cast momentum and eps so that we can choose device
-        # momentum = dtype_cls(momentum, device=input.device)._int.item()
-        # eps = dtype_cls(eps, device=input.device)._int.item()
+        momentum = dtype_cls(momentum, device=input.device)._int.item()
+        eps = dtype_cls(eps, device=input.device)._int.item()
         return DTBatchNormFunction.apply(input, running_mean, running_var, weight, bias, training, momentum, eps)
 
 
