@@ -2,17 +2,80 @@ import torch
 from torch import Tensor
 from torchdt import DType
 from torchdt.ops import register_triton_ops
+import numpy as np
+import os
 
 ZERO = torch.tensor(-9_223_372_036_854_775_807, dtype=torch.int64) # smallest positive value in LNS
 POS_INF = torch.tensor(9_223_372_036_854_775_806, dtype=torch.int64) # largest positive value in LNS
 NEG_INF = torch.tensor(9_223_372_036_854_775_807, dtype=torch.int64) # largest negative value in LNS
 base = 2.0 ** (2.0 ** torch.tensor(-23, dtype=torch.float64))
+tab_sbdb = None
+tab_ez = None
+
+def sbdb_ideal(z, s):
+    power_term = torch.pow(base, z)
+    magnitude = torch.abs(1.0 - 2.0 * s + power_term)
+
+    log_term = torch.log(magnitude) / torch.log(base)
+    result = torch.round(log_term).to(torch.int64) << 1
+
+    return result
 
 class LNS64(DType, bitwidth=64):
 
     @staticmethod
     def enable_triton():
         lns64_register_triton_ops()
+
+    @staticmethod
+    def set_prec(prec: int, table: bool = False, table_device: str = None, filestem: str = "tab"):
+        global base
+
+        if prec < 1 or prec > 50:
+            raise ValueError("Precision must be between 1 and 52")
+        if table and prec > 20:
+            raise ValueError("Table-based LNS only supports precision up to 20")
+
+        base = 2.0 ** (2.0 ** torch.tensor(-prec, dtype=torch.float64))
+
+        if table:
+            global tab_sbdb, tab_ez
+            filename = f"./{filestem}_{prec}.npz"
+
+            if os.path.isfile(filename):
+                data = np.load(filename)
+                tab_sbdb = torch.tensor(data["tab_sbdb"], dtype=torch.int64, device=table_device).contiguous()
+                tab_ez = torch.tensor(data["tab_ez"], dtype=torch.int64, device=table_device)
+                data.close()
+
+            else:
+                zero = torch.tensor(0, dtype=torch.int64, device=table_device)
+                one = torch.tensor(1, dtype=torch.int64, device=table_device)
+
+                tab_ez = sbdb_ideal(one, one)
+
+                zrange = torch.arange(tab_ez, 0, dtype=torch.int64, device=table_device)
+                sbt = sbdb_ideal(zrange, zero)
+                dbt = sbdb_ideal(zrange, one)
+                tab_sbdb = torch.vstack((sbt, dbt)).contiguous()
+
+                np.savez(filename, tab_ez=tab_ez.cpu().numpy(), tab_sbdb=tab_sbdb.cpu().numpy())
+
+            @LNS64.register_op("add")
+            def lns64_add_table(ops, x, y):
+                max_operand = torch.max(x, y)
+
+                z = -torch.abs((x >> 1) - (y >> 1))
+                s = (x ^ y) & 1
+
+                sbdb = tab_sbdb[s, torch.maximum(tab_ez, torch.where(z == 0, -1, z))]
+                return torch.where(
+                    x == ZERO,
+                    y, torch.where(
+                        y == ZERO,
+                        x, torch.where(
+                            x == ops.neg(y),
+                            ZERO, max_operand + sbdb)))
 
 @LNS64.register_op("from_float")
 def lns64_from_float(ops, t: Tensor) -> Tensor:
@@ -218,22 +281,41 @@ def lns64_register_triton_ops():
 
         return tl.where(x == _ZERO, 0.0, float_x.to(tl.float32))
 
-    @triton.jit
-    def add(x, y):
-        max_operand = tl.maximum(x, y)
+    table_initialized = tab_sbdb is not None and tab_ez is not None
+    tab_sbdb_ptr = tl.constexpr(tab_sbdb.data_ptr())
+    tab_ez_val = tl.constexpr(tab_ez.item())
 
-        abs_diff = tl.abs((x >> 1) - (y >> 1)).to(tl.float64)
-        sign_diff = ((x ^ y) & 1).to(tl.float64)
+    if table_initialized:
+        @triton.jit
+        def add(x, y):
+            max_operand = tl.maximum(x, y)
 
-        power_term = tl.exp(_LOG_BASE * -abs_diff)
-        magnitude = tl.abs(1.0 - 2.0 * sign_diff + power_term)
+            z = -tl.abs((x >> 1) - (y >> 1))
+            s = ((x ^ y) & 1)
 
-        log_term = tl.log(magnitude) / _LOG_BASE
-        rounded = tl.where(log_term >= 0, tl.floor(log_term + 0.5), tl.ceil(log_term - 0.5))
-        sbdb = rounded.to(tl.int64) << 1
+            idx = -tab_ez_val * (s + 1) + tl.maximum(tab_ez_val, tl.where(z == 0, -1, z))
+            sbdb = tl.load(tab_sbdb_ptr + idx)
 
-        result = max_operand + sbdb
-        return tl.where(x == _ZERO, y, tl.where(y == _ZERO, x, tl.where(x == (y ^ 1), _ZERO, result)))
+            result = max_operand + sbdb
+            return tl.where(x == _ZERO, y, tl.where(y == _ZERO, x, tl.where(x == (y ^ 1), _ZERO, result)))
+
+    else:
+        @triton.jit
+        def add(x, y):
+            max_operand = tl.maximum(x, y)
+
+            abs_diff = tl.abs((x >> 1) - (y >> 1)).to(tl.float64)
+            sign_diff = ((x ^ y) & 1).to(tl.float64)
+
+            power_term = tl.exp(_LOG_BASE * -abs_diff)
+            magnitude = tl.abs(1.0 - 2.0 * sign_diff + power_term)
+
+            log_term = tl.log(magnitude) / _LOG_BASE
+            rounded = tl.where(log_term >= 0, tl.floor(log_term + 0.5), tl.ceil(log_term - 0.5))
+            sbdb = rounded.to(tl.int64) << 1
+
+            result = max_operand + sbdb
+            return tl.where(x == _ZERO, y, tl.where(y == _ZERO, x, tl.where(x == (y ^ 1), _ZERO, result)))
 
     @triton.jit
     def sub(x, y):
