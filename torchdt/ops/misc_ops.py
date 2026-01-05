@@ -436,7 +436,7 @@ class DTRepeatFunction(DTFunction):
 
 @register_base_op("flatten")
 def dt_flatten(ops, x, start_dim=0, end_dim=-1):
-    return torch.flatten(x, start_dim=start_dim, end_dim=end_dim).copy()
+    return torch.flatten(x, start_dim=start_dim, end_dim=end_dim).clone()
 
 class DTFlattenFunction(DTFunction):
 
