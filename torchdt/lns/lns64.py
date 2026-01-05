@@ -294,7 +294,19 @@ def lns64_register_triton_ops():
             s = ((x ^ y) & 1)
 
             idx = -tab_ez_val * (s + 1) + tl.maximum(tab_ez_val, tl.where(z == 0, -1, z))
-            sbdb = tl.load(tab_sbdb_ptr + idx)
+            byte_offset = idx.to(tl.int64) * 8 # int64 has 8 bytes
+            abs_ptr = tab_sbdb_ptr + byte_offset
+
+            # Using tl.load directly is impossible because tab_sbdb_ptr
+            # is treated as a constant by triton.jit, not a pointer object.
+            sbdb = tl.inline_asm_elementwise(
+                "ld.global.b64 $0, [$1];", # PTX load instruction
+                "=l, l", # output=int64, input=int64(address)
+                [abs_ptr],
+                dtype=tl.int64,
+                is_pure=True,
+                pack=1,
+            )
 
             result = max_operand + sbdb
             return tl.where(x == _ZERO, y, tl.where(y == _ZERO, x, tl.where(x == (y ^ 1), _ZERO, result)))
