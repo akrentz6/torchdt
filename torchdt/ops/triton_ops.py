@@ -2163,7 +2163,7 @@ def register_triton_ops(
             ctx.training = training
             ctx.eps = eps
 
-            return output
+            return ops.from_float(output)
 
         @staticmethod
         def backward(ctx, ops, grad_output):
