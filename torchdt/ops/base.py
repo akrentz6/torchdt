@@ -368,6 +368,10 @@ class OpsBase:
     def repeat(cls, x: InternalTensor, repeats: tuple[int]) -> InternalTensor:
         raise NotImplementedError
 
+    @classmethod
+    def flatten(cls, x: InternalTensor, start_dim: int = 0, end_dim: int = -1) -> InternalTensor:
+        raise NotImplementedError
+
 
     @classmethod
     def mse_loss(cls, x: InternalTensor, y: InternalTensor,

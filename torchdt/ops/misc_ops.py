@@ -396,11 +396,13 @@ class DTContiguousFunction(DTFunction):
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
-        pass
+        x, _ = inputs
+        ctx.original_shape = x.shape
+        ctx.original_strides = x.stride()
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        return grad_output, None
+        return grad_output.strided_as(ctx.original_shape, ctx.original_strides), None
 
 @register_base_op("repeat")
 def dt_repeat(ops, x, repeats):
@@ -431,3 +433,23 @@ class DTRepeatFunction(DTFunction):
             grad_x = ops.sum(grad_x.view(*new_shape), dim=dim+1)
 
         return grad_x, None
+
+@register_base_op("flatten")
+def dt_flatten(ops, x, start_dim=0, end_dim=-1):
+    return torch.flatten(x, start_dim=start_dim, end_dim=end_dim)
+
+class DTFlattenFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, start_dim=0, end_dim=-1):
+        return ops.flatten(x, start_dim, end_dim)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, _, _ = inputs
+        ctx.original_shape = x.shape
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        grad_x = grad_output.reshape(ctx.original_shape)
+        return grad_x, None, None
