@@ -48,7 +48,7 @@ def lns64_to_float(ops, t: Tensor) -> Tensor:
             torch.where(
                 packed == NEG_INF, float('-inf'),
                 float_t)))
-    return float_t.to(torch.float64)
+    return float_t.to(torch.float32)
 
 @LNS64.register_op("add")
 def lns64_add(ops, x, y):
