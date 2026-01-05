@@ -83,6 +83,7 @@ def register_triton_ops(
             out = torch.empty(x.size(), dtype=dtype_cls.int_dtype, device=x.device)
         else:
             out = torch.empty_strided(x.size(), x.stride(), dtype=dtype_cls.int_dtype, device=x.device)
+
         grid = (triton.cdiv(x.numel(), 1024),)
         from_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
         return out
@@ -106,7 +107,6 @@ def register_triton_ops(
         else:
             out = torch.empty_strided(x.size(), x.stride(), dtype=dtype_cls.int_dtype, device=x.device)
 
-        out = torch.empty_strided(x.size(), x.stride(), dtype=torch.float32, device=x.device)
         grid = (triton.cdiv(x.numel(), 1024),)
         to_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
         return out
