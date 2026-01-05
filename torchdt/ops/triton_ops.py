@@ -76,12 +76,16 @@ def register_triton_ops(
         out = from_float(x)
         tl.store(out_ptr + offs, out, mask=mask)
 
-    # @dtype_cls.register_op("from_float")
-    # def dt_from_float(ops, x):
-    #     out = torch.empty_strided(x.size(), x.stride(), dtype=dtype_cls.int_dtype, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     from_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+    @dtype_cls.register_op("from_float")
+    def dt_from_float(ops, x):
+        if torch._debug_has_internal_overlap(x) != 0:
+            x = x.contiguous()
+            out = torch.empty(x.size(), dtype=dtype_cls.int_dtype, device=x.device)
+        else:
+            out = torch.empty_strided(x.size(), x.stride(), dtype=dtype_cls.int_dtype, device=x.device)
+        grid = (triton.cdiv(x.numel(), 1024),)
+        from_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
+        return out
 
     @triton.jit
     def to_float_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
@@ -94,12 +98,18 @@ def register_triton_ops(
         out = to_float(x)
         tl.store(out_ptr + offs, out, mask=mask)
 
-    # @dtype_cls.register_op("to_float")
-    # def dt_to_float(ops, x):
-    #     out = torch.empty_strided(x.size(), x.stride(), dtype=torch.float32, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     to_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+    @dtype_cls.register_op("to_float")
+    def dt_to_float(ops, x):
+        if torch._debug_has_internal_overlap(x) != 0:
+            x = x.contiguous()
+            out = torch.empty(x.size(), dtype=dtype_cls.int_dtype, device=x.device)
+        else:
+            out = torch.empty_strided(x.size(), x.stride(), dtype=dtype_cls.int_dtype, device=x.device)
+
+        out = torch.empty_strided(x.size(), x.stride(), dtype=torch.float32, device=x.device)
+        grid = (triton.cdiv(x.numel(), 1024),)
+        to_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
+        return out
 
     # @triton.jit
     # def add_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
