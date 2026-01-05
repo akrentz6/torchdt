@@ -272,62 +272,62 @@ def register_triton_ops(
     #     return out
 
 
-    @triton.jit
-    def relu_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def relu_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
 
-        out = tl.where(lt(x, _ZERO), _ZERO, x)
-        tl.store(out_ptr + offs, out, mask=mask)
+    #     out = tl.where(lt(x, _ZERO), _ZERO, x)
+    #     tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("relu")
-    def dt_relu(ops, x):
-        out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        relu_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
-        return out
+    # @dtype_cls.register_op("relu")
+    # def dt_relu(ops, x):
+    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
+    #     grid = (triton.cdiv(x.numel(), 1024),)
+    #     relu_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
+    #     return out
 
-    @triton.jit
-    def relu_backward_kernel(dy_ptr, y_ptr, dx_ptr, N, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < N
+    # @triton.jit
+    # def relu_backward_kernel(dy_ptr, y_ptr, dx_ptr, N, BLOCK_SIZE: tl.constexpr):
+    #     pid = tl.program_id(0)
+    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    #     mask = offs < N
 
-        dy = tl.load(dy_ptr + offs, mask=mask, other=_ZERO)
-        y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+    #     dy = tl.load(dy_ptr + offs, mask=mask, other=_ZERO)
+    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
 
-        dx = tl.where(y == _ZERO, _ZERO, dy)
-        tl.store(dx_ptr + offs, dx, mask=mask)
+    #     dx = tl.where(y == _ZERO, _ZERO, dy)
+    #     tl.store(dx_ptr + offs, dx, mask=mask)
 
-    def relu_backward(grad_output, output):
-        grad_input = torch.empty(grad_output.shape, dtype=dtype_cls.int_dtype, device=grad_output.device)
-        grid = (triton.cdiv(grad_output.numel(), 1024),)
-        relu_backward_kernel[grid](grad_output, grad_input, grad_input, grad_output.numel(), BLOCK_SIZE=1024)
-        return grad_input
+    # def relu_backward(grad_output, output):
+    #     grad_input = torch.empty(grad_output.shape, dtype=dtype_cls.int_dtype, device=grad_output.device)
+    #     grid = (triton.cdiv(grad_output.numel(), 1024),)
+    #     relu_backward_kernel[grid](grad_output, grad_input, grad_input, grad_output.numel(), BLOCK_SIZE=1024)
+    #     return grad_input
 
-    class DTReLUFunction(DTFunction):
+    # class DTReLUFunction(DTFunction):
 
-        @staticmethod
-        def forward(ops, x):
-            return ops.relu(x)
+    #     @staticmethod
+    #     def forward(ops, x):
+    #         return ops.relu(x)
 
-        @staticmethod
-        def setup_context(ctx, ops, inputs, output):
-            ctx.save_for_backward(output)
+    #     @staticmethod
+    #     def setup_context(ctx, ops, inputs, output):
+    #         ctx.save_for_backward(output)
 
-        @staticmethod
-        def backward(ctx, ops, grad_output):
-            output, = ctx.saved_tensors
-            return relu_backward(grad_output, output)
+    #     @staticmethod
+    #     def backward(ctx, ops, grad_output):
+    #         output, = ctx.saved_tensors
+    #         return relu_backward(grad_output, output)
 
-    @dtype_cls.register_func(torch.nn.functional.relu, torch.Tensor.relu,
-                     cast=("input",))
-    def dt_relu(input, inplace=False):
-        result = DTReLUFunction.apply(input)
-        return result
+    # @dtype_cls.register_func(torch.nn.functional.relu, torch.Tensor.relu,
+    #                  cast=("input",))
+    # def dt_relu(input, inplace=False):
+    #     result = DTReLUFunction.apply(input)
+    #     return result
 
 
     # @triton.jit
