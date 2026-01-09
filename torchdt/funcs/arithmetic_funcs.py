@@ -177,7 +177,7 @@ def dt_var(input, dim=None, *, correction=1, keepdim=False, out=None):
 @DType.register_func(torch.matmul, torch.Tensor.matmul,
                      cast=("input", "other"))
 def dt_matmul(input, other, *, out=None):
-    result = DTMatmulFunction(input, other)
+    result = DTMatmulFunction.apply(input, other)
 
     if out is not None:
         return out.copy_(result)
