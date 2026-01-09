@@ -4,6 +4,8 @@ from torchdt import DType
 from torchdt.ops import register_triton_ops
 import numpy as np
 import os
+import textwrap
+import linecache
 
 ZERO = torch.tensor(-9_223_372_036_854_775_807, dtype=torch.int64) # smallest positive value in LNS
 POS_INF = torch.tensor(9_223_372_036_854_775_806, dtype=torch.int64) # largest positive value in LNS
@@ -63,7 +65,7 @@ class LNS64(DType, bitwidth=64):
 
             @LNS64.register_op("add")
             def lns64_add_table(ops, x, y):
-                max_operand = torch.max(x, y)
+                max_operand = torch.maximum(x, y)
 
                 z = -torch.abs((x >> 1) - (y >> 1))
                 s = (x ^ y) & 1
@@ -254,99 +256,127 @@ def lns64_register_triton_ops():
     import triton
     import triton.language as tl
 
-    _LOG_BASE = tl.constexpr(torch.log(base).item())
-    _ZERO = tl.constexpr(ZERO.item())
-    _ONE = tl.constexpr(0)
-    _NEG_INF = tl.constexpr(9_223_372_036_854_775_807)
-    _POS_INF = tl.constexpr(9_223_372_036_854_775_806)
+    _LOG_BASE = torch.log(base).item()
+    _ZERO = ZERO.item()
+    _ONE = 0
+    _NEG_INF = 9_223_372_036_854_775_807
+    _POS_INF = 9_223_372_036_854_775_806
 
-    @triton.jit
-    def from_float(x):
-        abs_x = tl.abs(x.to(tl.float64))
-        log_x = tl.log(abs_x) / _LOG_BASE
+    src=f"""
+import triton
+import triton.language as tl
 
-        rounded = tl.where(log_x >= 0, tl.floor(log_x + 0.5), tl.ceil(log_x - 0.5))
-        sign_bit = tl.cast(x < 0, tl.int64)
-        packed = (tl.cast(rounded, tl.int64) << 1) | sign_bit
+@triton.jit
+def from_float(x):
+    abs_x = tl.abs(tl.cast(x, tl.float64))
+    log_x = tl.log(abs_x) / tl.cast({_LOG_BASE}, tl.float64)
 
-        return tl.where(x == 0.0, _ZERO, packed)
+    rounded = tl.where(log_x >= 0, tl.floor(log_x + 0.5), tl.ceil(log_x - 0.5))
+    sign_bit = tl.cast(x < 0, tl.int64)
+    packed = (tl.cast(rounded, tl.int64) << 1) | sign_bit
 
-    @triton.jit
-    def to_float(x):
-        log_x = x >> 1
-        sign = tl.where((x & 1) == 1, -1.0, 1.0)
+    return tl.where(x == 0.0, {_ZERO}, packed)
 
-        abs_x = tl.exp(_LOG_BASE * log_x.to(tl.float64))
-        float_x = sign * abs_x
+@triton.jit
+def to_float(x):
+    log_x = x >> 1
+    sign = tl.where((x & 1) == 1, -1.0, 1.0)
 
-        return tl.where(x == _ZERO, 0.0, float_x.to(tl.float32))
+    abs_x = tl.exp(tl.cast({_LOG_BASE}, tl.float64) * tl.cast(log_x, tl.float64))
+    float_x = sign * abs_x
 
-    table_initialized = tab_sbdb is not None and tab_ez is not None
-    tab_sbdb_ptr = tl.constexpr(tab_sbdb.data_ptr())
-    tab_ez_val = tl.constexpr(tab_ez.item())
+    return tl.where(x == {_ZERO}, 0.0, float_x.to(tl.float32))
 
-    if table_initialized:
-        @triton.jit
-        def add(x, y):
-            max_operand = tl.maximum(x, y)
+@triton.jit
+def mul(x, y):
+    prod = (x + y - (y & 1)) ^ (y & 1)
+    return tl.where(x == {_ZERO}, {_ZERO}, tl.where(y == {_ZERO}, {_ZERO}, prod))
 
-            z = -tl.abs((x >> 1) - (y >> 1))
-            s = ((x ^ y) & 1)
+@triton.jit
+def div(x, y):
+    div = (x - y + (y & 1)) ^ (y & 1)
+    return tl.where(x == {_ZERO}, {_ZERO}, tl.where(y == {_ZERO}, {_POS_INF}, div))
 
-            idx = -tab_ez_val * (s + 1) + tl.maximum(tab_ez_val, tl.where(z == 0, -1, z))
-            byte_offset = idx.to(tl.int64) * 8 # int64 has 8 bytes
-            abs_ptr = tab_sbdb_ptr + byte_offset
+@triton.jit
+def sqrt(x):
+    result = ((x & (-2)) // 2) & (-2)
+    return tl.where(x == {_ZERO}, {_ZERO}, result)
 
-            # Using tl.load directly is impossible because tab_sbdb_ptr
-            # is treated as a constant by triton.jit, not a pointer object.
-            sbdb = tl.inline_asm_elementwise(
-                "ld.global.b64 $0, [$1];", # PTX load instruction
-                "=l, l", # output=int64, input=int64(address)
-                [abs_ptr],
-                dtype=tl.int64,
-                is_pure=True,
-                pack=1,
-            )
+@triton.jit
+def neg(x):
+    return tl.where(x == {_ZERO}, {_ZERO}, x ^ 1)
+"""
 
-            result = max_operand + sbdb
-            return tl.where(x == _ZERO, y, tl.where(y == _ZERO, x, tl.where(x == (y ^ 1), _ZERO, result)))
+    if tab_sbdb is not None and tab_ez is not None:
+        src += f"""
+@triton.jit
+def add(x, y):
+    max_operand = tl.maximum(x, y)
+
+    z = -tl.abs((x >> 1) - (y >> 1)).to(tl.int64)
+    s = ((x ^ y) & 1).to(tl.int64)
+
+    idx = (s + 1) * {tab_sbdb.size(1)} + tl.where(z < {tab_ez.item()}, {tab_ez.item()}, tl.where(z == 0, -1, z))
+    abs_ptr = {tab_sbdb.data_ptr()} + idx * 8 # int64 has 8 bytes
+
+    # Using tl.load directly is impossible because tab_sbdb_ptr
+    # is treated as a constant by triton.jit, not a pointer object.
+    sbdb = tl.inline_asm_elementwise(
+        '''
+        {{
+            ld.global.b64 $0, [$1];
+        }}
+        ''',
+        "=l, l",
+        [abs_ptr],
+        dtype=tl.int64,
+        is_pure=True,
+        pack=1,
+    )
+
+    result = max_operand + sbdb
+    return tl.where(x == {_ZERO}, y, tl.where(y == {_ZERO}, x, tl.where(x == (y ^ 1), {_ZERO}, result)))
+"""
 
     else:
-        @triton.jit
-        def add(x, y):
-            max_operand = tl.maximum(x, y)
+        src += f"""
+@triton.jit
+def add(x, y):
+    max_operand = tl.maximum(x, y)
 
-            abs_diff = tl.abs((x >> 1) - (y >> 1)).to(tl.float64)
-            sign_diff = ((x ^ y) & 1).to(tl.float64)
+    abs_diff = tl.abs((x >> 1) - (y >> 1)).to(tl.float64)
+    sign_diff = ((x ^ y) & 1).to(tl.float64)
 
-            power_term = tl.exp(_LOG_BASE * -abs_diff)
-            magnitude = tl.abs(1.0 - 2.0 * sign_diff + power_term)
+    power_term = tl.exp({_LOG_BASE} * -abs_diff)
+    magnitude = tl.abs(1.0 - 2.0 * sign_diff + power_term)
 
-            log_term = tl.log(magnitude) / _LOG_BASE
-            rounded = tl.where(log_term >= 0, tl.floor(log_term + 0.5), tl.ceil(log_term - 0.5))
-            sbdb = rounded.to(tl.int64) << 1
+    log_term = tl.log(magnitude) / {_LOG_BASE}
+    rounded = tl.where(log_term >= 0, tl.floor(log_term + 0.5), tl.ceil(log_term - 0.5))
+    sbdb = rounded.to(tl.int64) * 2
 
-            result = max_operand + sbdb
-            return tl.where(x == _ZERO, y, tl.where(y == _ZERO, x, tl.where(x == (y ^ 1), _ZERO, result)))
+    result = max_operand + sbdb
+    return tl.where(x == {_ZERO}, y, tl.where(y == {_ZERO}, x, tl.where(x == (y ^ 1), {_ZERO}, result)))
+"""
+
+    src = textwrap.dedent(src)
+    filename = f"<triton_kernels>"
+    codeobj = compile(src, filename, "exec")
+    linecache.cache[filename] = (len(src), None, src.splitlines(True), filename)
+
+    ns = {"__name__": filename}
+    exec(codeobj, ns, ns)
+
+    from_float = ns["from_float"]
+    to_float = ns["to_float"]
+    add = ns["add"]
+    mul = ns["mul"]
+    div = ns["div"]
+    sqrt = ns["sqrt"]
+    neg = ns["neg"]
 
     @triton.jit
     def sub(x, y):
         return add(x, y ^ 1)
-
-    @triton.jit
-    def mul(x, y):
-        prod = (x + y - (y & 1)) ^ (y & 1)
-        return tl.where(x == _ZERO, _ZERO, tl.where(y == _ZERO, _ZERO, prod))
-
-    @triton.jit
-    def div(x, y):
-        div = (x - y + (y & 1)) ^ (y & 1)
-        return tl.where(x == _ZERO, _ZERO, tl.where(y == _ZERO, _POS_INF, div))
-
-    @triton.jit
-    def sqrt(x):
-        result = ((x & (-2)) // 2) & (-2)
-        return tl.where(x == _ZERO, _ZERO, result)
 
     @triton.jit
     def gt(x, y):
@@ -400,8 +430,9 @@ def lns64_register_triton_ops():
 
         return x_neg_y_pos | (both_pos & (x_log <= y_log)) | (both_neg & (y_log <= x_log))
 
-    @triton.jit
-    def neg(x):
-        return tl.where(x == _ZERO, _ZERO, x ^ 1)
-
-    register_triton_ops(LNS64, from_float, to_float, add, sub, mul, div, sqrt, gt, ge, lt, le, neg, _ZERO, _NEG_INF, _ONE)
+    register_triton_ops(
+        LNS64, from_float, to_float,
+        add, sub, mul, div, sqrt,
+        gt, ge, lt, le, neg,
+        tl.constexpr(_ZERO), tl.constexpr(_NEG_INF), tl.constexpr(_ONE)
+    )
