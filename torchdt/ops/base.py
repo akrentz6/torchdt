@@ -33,24 +33,24 @@ class OpsBase:
         return cls.from_float(x_tensor)
 
     @classmethod
-    def zeros(cls, size):
-        return torch.full(size, cls.scalar_from_float(0.0), dtype=cls.dtype.int_dtype)
+    def zeros(cls, size, device=None):
+        return torch.full(size, cls.scalar_from_float(0.0), dtype=cls.dtype.int_dtype, device=device)
 
     @classmethod
     def zeros_like(cls, x):
-        return torch.full_like(x, cls.scalar_from_float(0.0), dtype=cls.dtype.int_dtype)
+        return torch.full_like(x, cls.scalar_from_float(0.0), dtype=cls.dtype.int_dtype, device=x.device)
 
     @classmethod
-    def ones(cls, size):
-        return torch.full(size, cls.scalar_from_float(1.0), dtype=cls.dtype.int_dtype)
+    def ones(cls, size, device=None):
+        return torch.full(size, cls.scalar_from_float(1.0), dtype=cls.dtype.int_dtype, device=device)
 
     @classmethod
     def ones_like(cls, x):
-        return torch.full_like(x, cls.scalar_from_float(1.0), dtype=cls.dtype.int_dtype)
+        return torch.full_like(x, cls.scalar_from_float(1.0), dtype=cls.dtype.int_dtype, device=x.device)
 
     @classmethod
-    def full(cls, size, fill_value):
-        return torch.full(size, cls.scalar_from_float(fill_value), dtype=cls.dtype.int_dtype)
+    def full(cls, size, fill_value, device=None):
+        return torch.full(size, cls.scalar_from_float(fill_value), dtype=cls.dtype.int_dtype, device=device)
 
     @classmethod
     def full_like(cls, x, fill_value):

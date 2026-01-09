@@ -533,7 +533,7 @@ def dt_matmul(ops, A, B):
     A = A.expand(*output_batch_shape, M, K_A)
     B = B.expand(*output_batch_shape, K_B, N)
 
-    result = ops.full((*output_batch_shape, M, N), 0.0)
+    result = ops.full((*output_batch_shape, M, N), 0.0, device=A.device)
 
     # Perform matrix multiplication in log space
     for k in range(K_A):
