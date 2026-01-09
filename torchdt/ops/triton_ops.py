@@ -456,23 +456,19 @@ def register_triton_ops(
         key=["N"],
     )
     @triton.jit
-    def sum_kernel(x_ptr, y_ptr, M, N, s_x_r, s_x_c, s_y_r, BLOCK: tl.constexpr):
+    def sum_kernel(x_ptr, y_ptr, M, N: tl.constexpr, s_x_r, s_x_c, s_y_r, BLOCK: tl.constexpr):
         pid = tl.program_id(0)
-        in_bounds = pid < M
-
         row_ptr = x_ptr + pid * s_x_r
         acc = _ZERO
 
-        num_tiles = (N + BLOCK - 1) // BLOCK
-        for tile_idx in range(0, num_tiles):
+        for tile_idx in range(0, tl.cdiv(N, BLOCK)):
             offs = tile_idx * BLOCK + tl.arange(0, BLOCK)
-            mask = in_bounds & (offs < N)
+            mask = offs < N
 
             vals = tl.load(row_ptr + offs * s_x_c, mask=mask, other=_ZERO)
             acc = add(acc, tl.reduce(vals, axis=0, combine_fn=add))
 
-        if in_bounds:
-            tl.store(y_ptr + pid * s_y_r, acc)
+        tl.store(y_ptr + pid * s_y_r, acc)
 
     @dtype_cls.register_op("sum")
     def dt_sum(ops, x, dim=None, keepdim=False):
@@ -494,7 +490,7 @@ def register_triton_ops(
 
         kept_dims = tuple(d for d in range(ndim) if d not in reduce_dims)
         perm = kept_dims + reduce_dims
-        x_perm = x.permute(*perm).contiguous()
+        x_perm = x.permute(*perm)
 
         kept_shape = [orig_shape[d] for d in kept_dims]
         reduced_shape = [orig_shape[d] for d in reduce_dims]
@@ -520,11 +516,11 @@ def register_triton_ops(
             out_shape = list(orig_shape)
             for d in reduce_dims:
                 out_shape[d] = 1
-            out = out.view(*out_shape)
+            out = out.reshape(*out_shape)
 
         else:
             out_shape = [orig_shape[d] for d in kept_dims]
-            out = out.view(*out_shape) if out_shape else out.view(())
+            out = out.reshape(*out_shape) if out_shape else out.view(())
 
         return out
 
@@ -635,12 +631,12 @@ def register_triton_ops(
 
         if len(batch_shape) == 0:
             batch = 1
-            A2 = A.view(1, M, K_A)
-            B2 = B.view(1, K_B, N)
+            A2 = A.reshape(1, M, K_A)
+            B2 = B.reshape(1, K_B, N)
         else:
             batch = math.prod(batch_shape)
-            A2 = A.view(batch, M, K_A)
-            B2 = B.view(batch, K_B, N)
+            A2 = A.reshape(batch, M, K_A)
+            B2 = B.reshape(batch, K_B, N)
 
         C = torch.empty((batch, M, N), device=A.device, dtype=dtype_cls.int_dtype)
 
@@ -663,9 +659,9 @@ def register_triton_ops(
         )
 
         if len(batch_shape) == 0:
-            C = C.view(M, N)
+            C = C.reshape(M, N)
         else:
-            C = C.view(*batch_shape, M, N)
+            C = C.reshape(*batch_shape, M, N)
 
         if a_was_1d and b_was_1d:
             C = C.squeeze(-1).squeeze(-2)
