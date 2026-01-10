@@ -18,7 +18,7 @@ def dt_linear(input, weight, bias=None):
 
 @DType.register_func(torch.nn.functional.dropout,
                      cast=("input",))
-def dt_dropout(input, p=0.5, training=True):
+def dt_dropout(input, p=0.5, training=True, inplace=False):
     if not training or p == 0.0:
         return input
     if p < 0.0 or p > 1.0:
