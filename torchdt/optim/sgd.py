@@ -58,15 +58,15 @@ class SGD(DTOptimizer):
                 if maximize:
                     grad = -grad
 
-                if weight_decay != 0.0:
+                if weight_decay != torch.tensor(0.0, device=self.device):
                     grad = grad + p * weight_decay
 
-                if momentum != 0.0:
+                if momentum != torch.tensor(0.0, device=self.device):
                     buf = state.get("momentum_buffer")
                     if buf is None:
                         buf = state["momentum_buffer"] = grad.clone()
                     else:
-                        buf = (buf * momentum) + (grad * (1.0 - dampening))
+                        buf = (buf * momentum) + (grad * (torch.tensor(1.0, device=self.device) - dampening))
 
                     if nesterov:
                         grad = grad + buf * momentum
