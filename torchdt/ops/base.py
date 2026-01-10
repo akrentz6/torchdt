@@ -372,6 +372,10 @@ class OpsBase:
     def flatten(cls, x: InternalTensor, start_dim: int = 0, end_dim: int = -1) -> InternalTensor:
         raise NotImplementedError
 
+    @classmethod
+    def reshape(cls, x: InternalTensor, shape: tuple[int]) -> InternalTensor:
+        raise NotImplementedError
+
 
     @classmethod
     def mse_loss(cls, x: InternalTensor, y: InternalTensor,

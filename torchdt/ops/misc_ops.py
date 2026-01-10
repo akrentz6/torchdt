@@ -453,3 +453,23 @@ class DTFlattenFunction(DTFunction):
     def backward(ctx, ops, grad_output):
         grad_x = grad_output.reshape(ctx.original_shape)
         return grad_x, None, None
+
+@register_base_op("reshape")
+def dt_reshape(ops, x, shape):
+    return torch.reshape(x, shape).clone()
+
+class DTReshapeFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, shape):
+        return ops.reshape(x, shape)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, _ = inputs
+        ctx.original_shape = x.shape
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        grad_x = grad_output.reshape(ctx.original_shape)
+        return grad_x, None

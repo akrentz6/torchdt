@@ -18,6 +18,7 @@ from torchdt.ops.misc_ops import (
     DTContiguousFunction,
     DTRepeatFunction,
     DTFlattenFunction,
+    DTReshapeFunction,
 )
 
 @DType.register_func(torch.broadcast_to, torch.Tensor.expand,
@@ -119,6 +120,11 @@ def dt_repeat(input, *repeats):
                      cast=("input",))
 def dt_flatten(input, start_dim=0, end_dim=-1):
     return DTFlattenFunction.apply(input, start_dim, end_dim)
+
+@DType.register_func(torch.reshape, torch.Tensor.reshape,
+                     cast=("input",))
+def dt_reshape(input, shape):
+    return DTReshapeFunction.apply(input, shape)
 
 @DType.register_func(torch.Tensor.item,
                      cast=("input",))
