@@ -754,7 +754,7 @@ class DTBatchNormFunction(DTFunction):
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
-        x, running_mean, running_var, _, eps, weight, bias, training = inputs
+        x, running_mean, running_var, weight, bias, training, _, eps = inputs
         ctx.red_dims = tuple(i for i in range(x.dim()) if i != 1)
         ctx.training = training
 
@@ -762,8 +762,8 @@ class DTBatchNormFunction(DTFunction):
             mean = ops.mean(x, dim=ctx.red_dims, keepdim=True)
             var = ops.var(x, ops.scalar_from_float(1.0), dim=ctx.red_dims, keepdim=True)
         else:
-            mean = running_mean.view(1, -1, *([1] * (x.dim() - 2)))
-            var = running_var.view(1, -1, *([1] * (x.dim() - 2)))
+            mean = running_mean.reshape(1, -1, *([1] * (x.dim() - 2)))
+            var = running_var.reshape(1, -1, *([1] * (x.dim() - 2)))
         ctx.save_for_backward(x, weight, bias, mean, var, eps)
 
     @staticmethod
@@ -780,7 +780,7 @@ class DTBatchNormFunction(DTFunction):
             grad_bias = ops.sum(grad_output, dim=ctx.red_dims, keepdim=False)
 
         if weight is not None:
-            grad_y_wrt_x_hat = ops.mul(grad_output, weight.view(1, -1, *([1] * (x.dim() - 2))))
+            grad_y_wrt_x_hat = ops.mul(grad_output, weight.reshape(1, -1, *([1] * (x.dim() - 2))))
             grad_weight = ops.sum(ops.mul(grad_output, x_hat), dim=ctx.red_dims, keepdim=False)
         else:
             grad_y_wrt_x_hat = grad_output
@@ -823,7 +823,7 @@ class DTBatchNormFunction(DTFunction):
         else:
             grad_x = ops.mul(grad_y_wrt_x_hat, inv_std)
 
-        return grad_x, None, None, None, None, grad_weight, grad_bias, None
+        return grad_x, None, None, grad_weight, grad_bias, None, None, None
 
 @register_base_op("layer_norm")
 def dt_layer_norm(ops, x, eps, normalized_shape, weight=None, bias=None):
