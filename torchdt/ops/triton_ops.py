@@ -1445,7 +1445,7 @@ def register_triton_ops(
                 in_w = w_start + kx
 
                 valid_hw = ky_in & kx_in
-                load_mask = in_mask & valid_hw[None, :]
+                load_mask = in_mask & mask_hw & valid_hw[None, :]
 
                 x_ptrs = Xb + c_offsets[:, None] * s_x_c + in_h[None, :] * s_x_h + in_w[None, :] * s_x_w
                 x_vals = tl.load(x_ptrs, mask=load_mask, other=_ZERO)
