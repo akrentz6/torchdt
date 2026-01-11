@@ -1718,7 +1718,7 @@ def register_triton_ops(
             rm = tl.load(rm_ptr + pid)
             rv = tl.load(rv_ptr + pid)
 
-            one_minus_m = sub(_ONE, momentum)
+            one_minus_m = sub(tl.cast(_ONE, tl_int_dtype), momentum)
             new_rm = add(mul(one_minus_m, rm), mul(momentum, mean))
             new_rv = add(mul(one_minus_m, rv), mul(momentum, sample_var))
             new_rv = tl.where(gt(_ZERO, new_rv), _ZERO, new_rv)
@@ -1926,7 +1926,7 @@ def register_triton_ops(
         if has_weight:
             tl.store(dW_ptr + pid, sum_dy_xhat)
 
-        inv_count = div(tl.cast(_ONE, tl_int_dtype), count_dt)
+        inv_count = div(tl.cast(_ONE, tl_int_dtype), tl.cast(count_dt, tl_int_dtype))
         tl.store(m_dy_ptr + pid, mul(sum_dy, inv_count))
         tl.store(m_dy_xhat_ptr + pid, mul(sum_dy_xhat, inv_count))
 
@@ -2091,8 +2091,8 @@ def register_triton_ops(
             )
 
         else:
-            mean_dy = None
-            mean_dy_xhat = None
+            mean_dy = torch.empty(0, device=device)
+            mean_dy_xhat = torch.empty(0, device=device)
 
         grid_dx = (C, N, num_hw_blks)
         if training:
@@ -2349,21 +2349,21 @@ def register_triton_ops(
         offs = pid * BLOCK + tl.arange(0, BLOCK)
         mask = offs < N
 
-        p = tl.load(p_ptr + offs, mask=mask)
-        g = tl.load(g_ptr + offs, mask=mask)
+        p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
+        g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
 
         if MAXIMIZE:
             g = neg(g)
 
         if weight_decay != _ZERO:
-            g = add(g, mul(p, weight_decay))
+            g = add(g, mul(p, tl.cast(weight_decay, tl_int_dtype)))
 
         if momentum != _ZERO:
             if FIRST_MOMENTUM:
                 buf_new = g
             else:
-                buf = tl.load(buf_ptr + offs, mask=mask)
-                buf_new = add(mul(buf, momentum), mul(g, sub(_ONE, dampening)))
+                buf = tl.load(buf_ptr + offs, mask=mask, other=_ZERO)
+                buf_new = add(mul(buf, momentum), mul(g, sub(tl.cast(_ONE, tl_int_dtype), tl.cast(dampening, tl_int_dtype))))
 
             tl.store(buf_ptr + offs, buf_new, mask=mask)
 
