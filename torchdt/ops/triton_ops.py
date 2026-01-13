@@ -1707,7 +1707,7 @@ def register_triton_ops(
 
         mean = div(acc_sum, count_dt)
         var = sub(div(acc_sum_sq, count_dt), mul(mean, mean))
-        var = tl.where(gt(_ZERO, var), _ZERO, var)
+        var = tl.where(lt(var, _ZERO), _ZERO, var)
 
         if TRAINING:
             if count > 1:
@@ -1718,10 +1718,9 @@ def register_triton_ops(
             rm = tl.load(rm_ptr + pid)
             rv = tl.load(rv_ptr + pid)
 
-            one_minus_m = sub(tl.cast(_ONE, tl_int_dtype), momentum)
+            one_minus_m = sub(tl.cast(_ONE, tl_int_dtype), tl.cast(momentum, tl_int_dtype))
             new_rm = add(mul(one_minus_m, rm), mul(momentum, mean))
             new_rv = add(mul(one_minus_m, rv), mul(momentum, sample_var))
-            new_rv = tl.where(gt(_ZERO, new_rv), _ZERO, new_rv)
 
             tl.store(rm_ptr + pid, new_rm)
             tl.store(rv_ptr + pid, new_rv)
@@ -1730,7 +1729,7 @@ def register_triton_ops(
             mean = tl.load(rm_ptr + pid)
             var = tl.load(rv_ptr + pid)
 
-        invstd = div(tl.cast(_ONE, tl_int_dtype), sqrt(add(var, eps)))
+        invstd = div(tl.cast(_ONE, tl_int_dtype), sqrt(add(var, tl.cast(eps, tl_int_dtype))))
         tl.store(sm_ptr + pid, mean)
         tl.store(sis_ptr + pid, invstd)
 
@@ -1926,9 +1925,8 @@ def register_triton_ops(
         if has_weight:
             tl.store(dW_ptr + pid, sum_dy_xhat)
 
-        inv_count = div(tl.cast(_ONE, tl_int_dtype), tl.cast(count_dt, tl_int_dtype))
-        tl.store(m_dy_ptr + pid, mul(sum_dy, inv_count))
-        tl.store(m_dy_xhat_ptr + pid, mul(sum_dy_xhat, inv_count))
+        tl.store(m_dy_ptr + pid, div(sum_dy, tl.cast(count_dt, tl_int_dtype)))
+        tl.store(m_dy_xhat_ptr + pid, div(sum_dy_xhat, tl.cast(count_dt, tl_int_dtype)))
 
     @triton.jit
     def batch_norm2d_backward_dx_kernel(
@@ -2091,8 +2089,8 @@ def register_triton_ops(
             )
 
         else:
-            mean_dy = torch.empty(0, device=device)
-            mean_dy_xhat = torch.empty(0, device=device)
+            mean_dy = None
+            mean_dy_xhat = None
 
         grid_dx = (C, N, num_hw_blks)
         if training:
@@ -2161,7 +2159,7 @@ def register_triton_ops(
             ctx.training = training
             ctx.eps = eps
 
-            return ops.from_float(output)
+            return output
 
         @staticmethod
         def backward(ctx, ops, grad_output):

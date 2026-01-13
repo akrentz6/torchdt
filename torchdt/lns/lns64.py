@@ -335,7 +335,7 @@ def add(x, y):
     )
 
     result = max_operand + sbdb
-    return tl.where(x == {_ZERO}, y, tl.where(y == {_ZERO}, x, tl.where(x == (y ^ 1), {_ZERO}, result)))
+    return tl.where(x == {_ZERO}, y, tl.where(y == {_ZERO}, x, tl.where(x == neg(y), {_ZERO}, result)))
 """
 
     else:
@@ -376,7 +376,7 @@ def add(x, y):
 
     @triton.jit
     def sub(x, y):
-        return add(x, y ^ 1)
+        return add(x, neg(y))
 
     @triton.jit
     def gt(x, y):
