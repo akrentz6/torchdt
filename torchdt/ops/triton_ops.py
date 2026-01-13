@@ -1728,6 +1728,7 @@ def register_triton_ops(
         else:
             mean = tl.load(rm_ptr + pid)
             var = tl.load(rv_ptr + pid)
+            var = tl.where(lt(var, _ZERO), _ZERO, var)
 
         invstd = div(tl.cast(_ONE, tl_int_dtype), sqrt(add(var, tl.cast(eps, tl_int_dtype))))
         tl.store(sm_ptr + pid, mean)
