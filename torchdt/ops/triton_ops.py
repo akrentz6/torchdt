@@ -40,7 +40,6 @@ def register_triton_ops(
     elif dtype_cls.bitwidth == 64:
         tl_int_dtype = tl.constexpr(tl.int64)
 
-
     @triton.jit
     def exp(x):
         return from_float(tl.exp(to_float(x)))
@@ -64,6 +63,19 @@ def register_triton_ops(
 
             success = prev == old
             active = active & (~success)
+
+    @triton.jit
+    def clamp(x, min, max):
+        return tl.where(lt(x, min), min, tl.where(gt(x, max), max, x))
+
+    @triton.jit
+    def sign(x):
+        return tl.where(
+            x == _ZERO, _ZERO,
+            tl.where(
+                lt(x, _ZERO), neg(tl.cast(_ONE, tl_int_dtype)), tl.cast(_ONE, tl_int_dtype)
+            )
+        )
 
     @triton.jit
     def from_float_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
@@ -2396,3 +2408,62 @@ def register_triton_ops(
         )
 
         return buf
+
+
+    @triton.jit
+    def madam_step_kernel(
+        p_ptr, g_ptr, exp_avg_sq_ptr,
+        N, lr, beta, eps,
+        g_bound, max, bias_corr,
+        MAXIMIZE: tl.constexpr, USE_POW: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < N
+
+        p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
+        g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
+        v = tl.load(exp_avg_sq_ptr + offs, mask=mask, other=_ZERO)
+
+        g2 = mul(g, g)
+        v_new = add(
+            mul(tl.cast(beta, tl_int_dtype), v),
+            mul(sub(tl.cast(_ONE, tl_int_dtype), tl.cast(beta, tl_int_dtype)), g2)
+        )
+        tl.store(exp_avg_sq_ptr + offs, v_new, mask=mask)
+
+        corr = add(div(v_new, tl.cast(bias_corr, tl_int_dtype)), tl.cast(eps, tl_int_dtype))
+        denom = sqrt(corr)
+        g_normed = div(g, denom)
+
+        g_clipped = clamp(g_normed, neg(tl.cast(g_bound, tl_int_dtype)), tl.cast(g_bound, tl_int_dtype))
+        delta = mul(mul(tl.cast(lr, tl_int_dtype), g_clipped), sign(p))
+
+        if not MAXIMIZE:
+            delta = neg(delta)
+
+        if USE_POW:
+            mul_update = mul(p, exp(delta))
+        else:
+            mul_update = mul(p, add(tl.cast(_ONE, tl_int_dtype), delta))
+
+        p_new = clamp(mul_update, neg(tl.cast(max, tl_int_dtype)), tl.cast(max, tl_int_dtype))
+        tl.store(p_ptr + offs, p_new, mask=mask)
+
+    @dtype_cls.register_op("triton_madam_step")
+    def triton_madam_step(ops, p, grad, exp_avg_sq, lr, beta, eps, g_bound, max, bias_corr, use_pow, maximize):
+        N = p.numel()
+        BLOCK = 1024
+        grid = (triton.cdiv(N, BLOCK),)
+
+        madam_step_kernel[grid](
+            p, grad, exp_avg_sq,
+            N, lr.item(),
+            beta.item(), eps.item(),
+            g_bound.item(), max.item(),
+            bias_corr.item(),
+            maximize, use_pow,
+            BLOCK=BLOCK,
+        )
+        return exp_avg_sq

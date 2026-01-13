@@ -502,5 +502,14 @@ class OpsBase:
                      momentum_buffer: InternalTensor, lr: InternalTensor,
                      momentum: InternalTensor, dampening: InternalTensor,
                      weight_decay: InternalTensor, nesterov: bool,
-                     maximize: bool) -> tuple[InternalTensor, InternalTensor]:
+                     maximize: bool) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def triton_madam_step(cls, params: InternalTensor, grad: InternalTensor,
+                        exp_avg_sq: InternalTensor, lr: InternalTensor,
+                        beta: InternalTensor, eps: InternalTensor, 
+                        g_bound: InternalTensor, max: InternalTensor,
+                        bias_corr: InternalTensor, use_pow: bool,
+                        maximize: bool) -> InternalTensor:
         raise NotImplementedError
