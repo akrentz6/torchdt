@@ -29,11 +29,11 @@ class Madam(DTOptimizer):
         super().__init__(dtype, device, params, defaults)
         self.convert_params("lr", "beta", "eps", "p_scale", "g_bound")
 
-        self.validate_param("lr", lambda lr: lr >= 0.0)
-        self.validate_param("eps", lambda eps: eps > 0.0)
-        self.validate_param("beta",lambda beta: 0.0 < beta < 1.0)
-        self.validate_param("p_scale", lambda p_scale: p_scale > 0.0)
-        self.validate_param("g_bound", lambda g_bound: g_bound > 0.0)
+        self.validate_param("lr", lambda lr: lr >= torch.tensor(0.0, device=device))
+        self.validate_param("eps", lambda eps: eps > torch.tensor(0.0, device=device))
+        self.validate_param("beta",lambda beta: torch.tensor(0.0, device=device) < beta < torch.tensor(1.0, device=device))
+        self.validate_param("p_scale", lambda p_scale: p_scale > torch.tensor(0.0, device=device))
+        self.validate_param("g_bound", lambda g_bound: g_bound > torch.tensor(0.0, device=device))
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -63,15 +63,15 @@ class Madam(DTOptimizer):
                     # First time we see this parameter
                     rms = torch.sqrt(torch.mean(p * p))
                     state["max"] = p_scale * rms
-                    state["step"] = self.dtype(0.0)
-                    state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype)
+                    state["step"] = self.dtype(0.0, device=self.device)
+                    state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)
 
                 max = state["max"]
-                step = state["step"] + 1
+                step = state["step"] + torch.tensor(1.0, device=self.device)
                 exp_avg_sq = state["exp_avg_sq"]
 
-                exp_avg_sq = (beta * exp_avg_sq) + (grad * grad * (1.0 - beta))
-                corr_exp_avg_sq = exp_avg_sq / (1.0 - beta ** step) + eps
+                exp_avg_sq = (beta * exp_avg_sq) + (grad * grad * (torch.tensor(1.0, device=self.device) - beta))
+                corr_exp_avg_sq = exp_avg_sq / (torch.tensor(1.0, device=self.device) - beta ** step) + eps
 
                 g_normed = grad / torch.sqrt(corr_exp_avg_sq)
                 g_clipped = torch.clamp(g_normed, -g_bound, g_bound)
@@ -83,7 +83,7 @@ class Madam(DTOptimizer):
                 if use_pow:
                     mul_update = p * torch.exp(delta)
                 else:
-                    mul_update = p * (1.0 + delta)
+                    mul_update = p * (torch.tensor(1.0, device=self.device) + delta)
 
                 p.data.copy_(torch.clamp(mul_update, -max, max))
 
