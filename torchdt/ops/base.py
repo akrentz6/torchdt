@@ -513,3 +513,13 @@ class OpsBase:
                         bias_corr: InternalTensor, use_pow: bool,
                         maximize: bool) -> InternalTensor:
         raise NotImplementedError
+
+    @classmethod
+    def triton_adam_step(cls, params: InternalTensor, grad: InternalTensor,
+                        exp_avg: InternalTensor, exp_avg_sq: InternalTensor,
+                        max_exp_avg_sq: InternalTensor, lr: InternalTensor,
+                        beta1: InternalTensor, beta2: InternalTensor,
+                        eps: InternalTensor, weight_decay: InternalTensor,
+                        bias_corr1: InternalTensor, bias_corr2: InternalTensor,
+                        amsgrad: bool, maximize: bool) -> tuple[InternalTensor, InternalTensor, InternalTensor]:
+        raise NotImplementedError

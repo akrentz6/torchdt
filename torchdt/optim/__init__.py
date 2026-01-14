@@ -1,6 +1,6 @@
 from .optimizer import DTOptimizer
 from .sgd import SGD, TritonSGD
-from .adam import Adam
+from .adam import Adam, TritonAdam
 from .madam import Madam, TritonMadam
 
 __all__ = [
@@ -8,6 +8,7 @@ __all__ = [
     "SGD",
     "TritonSGD",
     "Adam",
+    "TritonAdam",
     "Madam",
     "TritonMadam",
 ]

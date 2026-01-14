@@ -2467,3 +2467,84 @@ def register_triton_ops(
             BLOCK=BLOCK,
         )
         return exp_avg_sq
+
+
+    @triton.jit
+    def adam_step_kernel(
+        p_ptr, g_ptr,
+        m_ptr, v_ptr, vhat_ptr,
+        N,
+        lr, beta1, beta2, eps, weight_decay,
+        bias_corr1, bias_corr2,
+        MAXIMIZE: tl.constexpr, AMSGRAD: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < N
+
+        p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
+        g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
+
+        if MAXIMIZE:
+            g = neg(g)
+
+        if weight_decay != _ZERO:
+            g = add(g, mul(p, tl.cast(weight_decay, tl_int_dtype)))
+
+        m = tl.load(m_ptr + offs, mask=mask, other=_ZERO)
+        v = tl.load(v_ptr + offs, mask=mask, other=_ZERO)
+
+        m_new = add(
+            mul(m, tl.cast(beta1, tl_int_dtype)),
+            mul(g, sub(tl.cast(_ONE, tl_int_dtype), tl.cast(beta1, tl_int_dtype)))
+        )
+
+        g2 = mul(g, g)
+        v_new = add(
+            mul(v, tl.cast(beta2, tl_int_dtype)),
+            mul(g2, sub(tl.cast(_ONE, tl_int_dtype), tl.cast(beta2, tl_int_dtype)))
+        )
+
+        if AMSGRAD:
+            vhat = tl.load(vhat_ptr + offs, mask=mask, other=_ZERO)
+            vhat_new = tl.where(gt(vhat, v_new), vhat, v_new)
+            tl.store(vhat_ptr + offs, vhat_new, mask=mask)
+            v_denom = vhat_new
+
+        else:
+            v_denom = v_new
+
+        step_size = div(
+            mul(tl.cast(lr, tl_int_dtype), sqrt(tl.cast(bias_corr2, tl_int_dtype))),
+            tl.cast(bias_corr1, tl_int_dtype)
+        )
+
+        denom = add(sqrt(v_denom), tl.cast(eps, tl_int_dtype))
+        step_update = mul(step_size, div(m_new, denom))
+        p_new = sub(p, step_update)
+
+        tl.store(p_ptr + offs, p_new, mask=mask)
+        tl.store(m_ptr + offs, m_new, mask=mask)
+        tl.store(v_ptr + offs, v_new, mask=mask)
+
+    @dtype_cls.register_op("triton_adam_step")
+    def triton_adam_step(ops,
+                        p, grad, exp_avg, exp_avg_sq, max_exp_avg_sq,
+                        lr, beta1, beta2, eps, weight_decay,
+                        bias_corr1, bias_corr2, amsgrad, maximize):
+        N = p.numel()
+        BLOCK = 1024
+        grid = (triton.cdiv(N, BLOCK),)
+
+        adam_step_kernel[grid](
+            p, grad,
+            exp_avg, exp_avg_sq, max_exp_avg_sq,
+            N,
+            lr.item(), beta1.item(), beta2.item(), eps.item(), weight_decay.item(),
+            bias_corr1.item(), bias_corr2.item(),
+            maximize, amsgrad,
+            BLOCK=BLOCK,
+        )
+
+        return exp_avg, exp_avg_sq, max_exp_avg_sq
