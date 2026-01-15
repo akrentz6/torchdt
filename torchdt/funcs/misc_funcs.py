@@ -53,7 +53,7 @@ def dt_stack(tensors, dim=0, *, out=None):
 @DType.register_func(torch.cat,
                      cast=("tensors",))
 def dt_cat(tensors, dim=0, *, out=None):
-    result = DTCatFunction.apply(dim=dim, *tensors)
+    result = DTCatFunction.apply(dim, *tensors)
 
     if out is not None:
         return out.copy_(result)

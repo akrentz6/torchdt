@@ -120,7 +120,7 @@ class DTStackFunction(DTFunction):
 
 @register_base_op("cat")
 def dt_cat(ops, tensors, dim=0):
-    return torch.cat(tensors, dim=dim)
+    return torch.cat(tensors, dim=dim).clone()
 
 class DTCatFunction(DTFunction):
 
@@ -141,7 +141,7 @@ class DTCatFunction(DTFunction):
 
 @register_base_op("chunk")
 def dt_chunk(ops, x, chunks, dim=0):
-    return torch.chunk(x, chunks, dim=dim)
+    return tuple(y.clone() for y in torch.chunk(x, chunks, dim=dim))
 
 class DTChunkFunction(DTFunction):
 
@@ -346,7 +346,7 @@ class DTSetItemFunction(DTFunction):
 
 @register_base_op("to")
 def dt_to(ops, x, device):
-    return torch.to(x, device=device)
+    return x.to(device=device)
 
 class DTToFunction(DTFunction):
 
