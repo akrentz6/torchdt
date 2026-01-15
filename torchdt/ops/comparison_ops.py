@@ -145,7 +145,7 @@ class DTMaximumFunction(DTFunction):
         return ops.maximum(x, y)
 
     @staticmethod
-    def setup_context(ctx, inputs, output):
+    def setup_context(ctx, ops, inputs, output):
         x, y = inputs
         ctx.save_for_backward(x, y)
 
