@@ -301,6 +301,9 @@ class DType(Tensor):
     def to_float(self):
         return self.ops.to_float(self._int)
 
+    def __float__(self):
+        return self.ops.to_float(self._int).item()
+
     def __repr__(self):
         return (
             f"{self.__class__.__name__}({self.to_float()}, bitwidth={self.bitwidth}, "
