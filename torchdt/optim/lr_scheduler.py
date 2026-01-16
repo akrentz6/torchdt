@@ -1,10 +1,13 @@
 import torch
 import torch.optim.lr_scheduler as lr_sched
 from torchdt.optim import DTOptimizer
+from collections import Counter
+from bisect import bisect_right
 import warnings
 
 __all__ = [
     "StepLR",
+    "MultiStepLR",
     "ReduceLROnPlateau",
 ]
 
@@ -55,9 +58,46 @@ class StepLR(lr_sched.LRScheduler):
 
     def _get_closed_form_lr(self):
         return [
-            base_lr * torch.tensor(self.gamma, device=base_lr.device) \
-                ** (torch.tensor(self.last_epoch, device=base_lr.device) \
-                     // torch.tensor(self.step_size, device=base_lr.device))
+            base_lr * torch.tensor(
+                self.gamma ** (self.last_epoch // self.step_size),
+                device=base_lr.device
+            )
+            for base_lr in self.base_lrs
+        ]
+
+class MultiStepLR(lr_sched.LRScheduler):
+
+    def __init__(
+        self,
+        optimizer,
+        milestones,
+        gamma = 0.1,
+        last_epoch = -1,
+    ):
+        self.milestones = Counter(milestones)
+        self.gamma = gamma
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        _warn_get_lr_called_within_step(self)
+
+        if self.last_epoch not in self.milestones:
+            return _param_groups_val_list(self.optimizer, "lr")
+        return [
+            group["lr"] * torch.tensor(
+                self.gamma ** self.milestones[self.last_epoch],
+                device=group["lr"].device,
+            )
+            for group in self.optimizer.param_groups
+        ]
+
+    def _get_closed_form_lr(self):
+        milestones = sorted(self.milestones.elements())
+        return [
+            base_lr * torch.tensor(
+                self.gamma ** bisect_right(milestones, self.last_epoch),
+                device=base_lr.device,
+            )
             for base_lr in self.base_lrs
         ]
 
