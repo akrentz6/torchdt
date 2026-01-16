@@ -33,6 +33,7 @@ no_override_funcs = {
     Tensor.register_post_accumulate_grad_hook,
     Tensor.size,
     Tensor.data_ptr,
+    Tensor.__reduce_ex__
 }
 # for functions that should not be overridden by __torch_function__
 # where it is hard to reference them, so we do it by name
@@ -142,6 +143,9 @@ class DType(Tensor):
         # tell the collate function to handle this DType
         # this is used for DataLoader batching
         register_collate_dtype_fn(cls)
+
+        # tell torch that this DType is safe to save/load
+        torch.serialization.add_safe_globals([cls])
 
         # create a subclass of Ops for this DType
         ops_name = f"{cls.__name__}Ops"
