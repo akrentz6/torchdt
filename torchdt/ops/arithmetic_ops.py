@@ -635,7 +635,7 @@ class DTMatmulFunction(DTFunction):
 
 @register_base_op("transpose")
 def dt_transpose(ops, x, dim0, dim1):
-    return x.transpose(dim0, dim1)
+    return x.transpose(dim0, dim1).clone()
 
 class DTTransposeFunction(DTFunction):
 
