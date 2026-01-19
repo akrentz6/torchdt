@@ -402,7 +402,7 @@ class DTContiguousFunction(DTFunction):
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        return grad_output.strided_as(ctx.original_shape, ctx.original_strides), None
+        return torch.as_strided(grad_output, ctx.original_shape, ctx.original_strides), None
 
 @register_base_op("repeat")
 def dt_repeat(ops, x, repeats):
