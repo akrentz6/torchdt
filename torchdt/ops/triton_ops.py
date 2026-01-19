@@ -712,15 +712,15 @@ def register_triton_ops(
 
         hw_block = pid0 % hw_tiles
         oc_block_in_group = pid0 // hw_tiles
-        oc_block = pid2 * oc_tiles_per_group + oc_block_in_group
+        oc_base = pid2 * Cout_g + oc_block_in_group * BLOCK_OC
 
-        oc_offsets = oc_block * BLOCK_OC + tl.arange(0, BLOCK_OC)
+        oc_offsets = oc_base + tl.arange(0, BLOCK_OC)
         hw_offsets = hw_block * BLOCK_HW + tl.arange(0, BLOCK_HW)
 
         h = hw_offsets // Wout
         w = hw_offsets % Wout
 
-        mask_oc = oc_offsets < Cout
+        mask_oc = (oc_offsets < (pid2 + 1) * Cout_g) & (oc_offsets < Cout)
         mask_hw = hw_offsets < Hout * Wout
         mask_n = pid1 < N
         mask_group = pid2 < groups
