@@ -71,9 +71,9 @@ def register_triton_ops(
     @triton.jit
     def sign(x):
         return tl.where(
-            x == _ZERO, _ZERO,
+            x == _ZERO, tl.cast(_ZERO, tl_int_dtype),
             tl.where(
-                lt(x, _ZERO), neg(tl.cast(_ONE, tl_int_dtype)), tl.cast(_ONE, tl_int_dtype)
+                lt(x, tl.cast(_ZERO, tl_int_dtype)), neg(tl.cast(_ONE, tl_int_dtype)), tl.cast(_ONE, tl_int_dtype)
             )
         )
 
@@ -471,7 +471,7 @@ def register_triton_ops(
     def sum_kernel(x_ptr, y_ptr, M, N: tl.constexpr, s_x_r, s_x_c, s_y_r, BLOCK: tl.constexpr):
         pid = tl.program_id(0)
         row_ptr = x_ptr + pid * s_x_r
-        acc = _ZERO
+        acc = tl.cast(_ZERO, tl_int_dtype)
 
         for tile_idx in range(0, tl.cdiv(N, BLOCK)):
             offs = tile_idx * BLOCK + tl.arange(0, BLOCK)
@@ -1704,8 +1704,8 @@ def register_triton_ops(
         pid = tl.program_id(0)
         lane = tl.arange(0, BLOCK_T)
 
-        acc_sum = _ZERO
-        acc_sum_sq = _ZERO
+        acc_sum = tl.cast(_ZERO, tl_int_dtype)
+        acc_sum_sq = tl.cast(_ZERO, tl_int_dtype)
 
         for t0 in range(0, ntiles, BLOCK_T):
             t = t0 + lane
@@ -1719,13 +1719,13 @@ def register_triton_ops(
 
         mean = div(acc_sum, count_dt)
         var = sub(div(acc_sum_sq, count_dt), mul(mean, mean))
-        var = tl.where(lt(var, _ZERO), _ZERO, var)
+        var = tl.where(lt(var, tl.cast(_ZERO, tl_int_dtype)), tl.cast(_ZERO, tl_int_dtype), var)
 
         if TRAINING:
             if count > 1:
                 sample_var = mul(var, div(count_dt, sub(count_dt, tl.cast(_ONE, tl_int_dtype))))
             else:
-                sample_var = _ZERO
+                sample_var = tl.cast(_ZERO, tl_int_dtype)
 
             rm = tl.load(rm_ptr + pid)
             rv = tl.load(rv_ptr + pid)
@@ -1740,7 +1740,7 @@ def register_triton_ops(
         else:
             mean = tl.load(rm_ptr + pid)
             var = tl.load(rv_ptr + pid)
-            var = tl.where(lt(var, _ZERO), _ZERO, var)
+            var = tl.where(lt(var, tl.cast(_ZERO, tl_int_dtype)), tl.cast(_ZERO, tl_int_dtype), var)
 
         invstd = div(tl.cast(_ONE, tl_int_dtype), sqrt(add(var, tl.cast(eps, tl_int_dtype))))
         tl.store(sm_ptr + pid, mean)
@@ -1772,7 +1772,7 @@ def register_triton_ops(
         if has_bias:
             bias = tl.load(b_ptr + pid0)
         else:
-            bias = _ZERO
+            bias = tl.cast(_ZERO, tl_int_dtype)
 
         idx = pid1 * BLOCK + lane
         mask = idx < count
@@ -1920,8 +1920,8 @@ def register_triton_ops(
         pid = tl.program_id(0)
         base = tl.arange(0, BLOCK_R)
 
-        sum_dy = _ZERO
-        sum_dy_xhat = _ZERO
+        sum_dy = tl.cast(_ZERO, tl_int_dtype)
+        sum_dy_xhat = tl.cast(_ZERO, tl_int_dtype)
 
         for start in range(0, K, BLOCK_R):
             idx = start + base

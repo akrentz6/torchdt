@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchdt"
-version = "1.0.0"
+version = "0.1.0"
 description = "torchdt is a python package that provides custom datatypes for training and inference in PyTorch."
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -24,7 +24,11 @@ dependencies = ["torch>=2.0", "numpy"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-"torchdt" = ["include/torchdt/*.h"]
+"torchdt" = [
+    "include/torchdt/**/*.h",
+    "csrc/**/*.cpp",
+    "csrc/**/*.h",
+]
 
 [[tool.setuptools.ext-modules]]
 name = "torchdt._C"
