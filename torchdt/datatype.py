@@ -254,13 +254,13 @@ class DType(Tensor):
                 bound = sig.bind_partial(*args, **kwargs)
                 for pname in cast_names:
                     if pname in bound.arguments:
-                        if bound.arguments[pname] is not None and type(bound.arguments[pname]) != _dtype_cls:
+                        if bound.arguments[pname] is not None:
                             # convert argument to the correct DType subclass - can also handle lists, tuples, etc?
                             if isinstance(bound.arguments[pname], (list, tuple)):
                                 bound.arguments[pname] = type(bound.arguments[pname])(
-                                    _dtype_cls(x) for x in bound.arguments[pname]
+                                    _dtype_cls(x) if type(x) != _dtype_cls else x for x in bound.arguments[pname]
                                 )
-                            else:
+                            elif type(bound.arguments[pname]) != _dtype_cls:
                                 bound.arguments[pname] = _dtype_cls(bound.arguments[pname])
 
                 return func(*bound.args, **bound.kwargs)
