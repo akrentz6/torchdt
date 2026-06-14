@@ -1,14 +1,48 @@
 import torch
 from torch import Tensor
 from torchdt import DType
+from ._tables import lns_base, load_or_create_table, register_table_add, validate_precision
 
 ZERO = torch.tensor(-2_147_483_648, dtype=torch.int32) # smallest positive value in LNS
 POS_INF = torch.tensor(2_147_483_646, dtype=torch.int32) # largest positive value in LNS
 NEG_INF = torch.tensor(2_147_483_647, dtype=torch.int32) # largest negative value in LNS
-base = 2.0 ** (2.0 ** torch.tensor(-20, dtype=torch.float64))
+base = lns_base(23)
+tab_sbdb = None
+tab_ez = None
 
 class LNS32(DType, bitwidth=32):
-    pass
+
+    @staticmethod
+    def set_prec(prec: int, table: bool = False, table_device: str = None, filestem: str = "tab"):
+        global base, tab_sbdb, tab_ez
+
+        validate_precision(prec, table)
+        base = lns_base(prec)
+
+        if table:
+            tab_sbdb, tab_ez = load_or_create_table(
+                bitwidth=32,
+                prec=prec,
+                int_dtype=torch.int32,
+                base=base,
+                table_device=table_device,
+                filestem=filestem,
+            )
+            register_table_add(LNS32, zero=ZERO, tab_sbdb=tab_sbdb, tab_ez=tab_ez)
+
+    @classmethod
+    def enable_triton(cls):
+        from ._triton import enable_lns_triton_backend
+
+        enable_lns_triton_backend(
+            cls,
+            base=base,
+            zero_value=ZERO.item(),
+            pos_inf_value=POS_INF.item(),
+            neg_inf_value=NEG_INF.item(),
+            tab_sbdb=tab_sbdb,
+            tab_ez=tab_ez,
+        )
 
 @LNS32.register_op("from_float")
 def lns32_from_float(ops, t: Tensor) -> Tensor:

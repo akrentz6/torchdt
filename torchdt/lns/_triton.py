@@ -1,0 +1,262 @@
+import hashlib
+
+import torch
+from torchdt.ops import TritonScalarOps, register_triton_ops, require_triton
+
+
+def _bump_triton_jit_hash(fn, **values):
+    items = tuple(sorted((key, repr(getattr(value, "value", value))) for key, value in values.items()))
+    fn.hash = hashlib.sha256(repr(items).encode()).hexdigest()
+    return fn
+
+
+def enable_lns_triton_backend(
+    dtype_cls: type,
+    *,
+    base: torch.Tensor,
+    zero_value: int,
+    pos_inf_value: int,
+    neg_inf_value: int,
+    tab_sbdb=None,
+    tab_ez=None,
+) -> None:
+    backend = make_lns_triton_scalar_ops(
+        bitwidth=dtype_cls.bitwidth,
+        base=base,
+        zero_value=zero_value,
+        pos_inf_value=pos_inf_value,
+        neg_inf_value=neg_inf_value,
+        tab_sbdb=tab_sbdb,
+        tab_ez=tab_ez,
+    )
+    register_triton_ops(dtype_cls, backend)
+
+
+def make_lns_triton_scalar_ops(
+    *,
+    bitwidth: int,
+    base: torch.Tensor,
+    zero_value: int,
+    pos_inf_value: int,
+    neg_inf_value: int,
+    tab_sbdb=None,
+    tab_ez=None,
+) -> TritonScalarOps:
+    triton, tl = require_triton()
+
+    if bitwidth == 16:
+        tl_int_dtype = tl.int16
+        asm_output_constraint = tl.constexpr("=h, l")
+        asm_load = tl.constexpr("ld.global.b16 $0, [$1];")
+        bytes_per_value = tl.constexpr(2)
+    elif bitwidth == 32:
+        tl_int_dtype = tl.int32
+        asm_output_constraint = tl.constexpr("=r, l")
+        asm_load = tl.constexpr("ld.global.b32 $0, [$1];")
+        bytes_per_value = tl.constexpr(4)
+    elif bitwidth == 64:
+        tl_int_dtype = tl.int64
+        asm_output_constraint = tl.constexpr("=l, l")
+        asm_load = tl.constexpr("ld.global.b64 $0, [$1];")
+        bytes_per_value = tl.constexpr(8)
+    else:
+        raise ValueError(f"LNS Triton backend does not support bitwidth {bitwidth}.")
+
+    LOG_BASE = tl.constexpr(torch.log(base).item())
+    ZERO = tl.constexpr(zero_value)
+    POS_INF = tl.constexpr(pos_inf_value)
+    NEG_INF = tl.constexpr(neg_inf_value)
+
+    @triton.jit
+    def from_float(x):
+        abs_x = tl.abs(tl.cast(x, tl.float64))
+        log_x = tl.log(abs_x) / tl.cast(LOG_BASE, tl.float64)
+
+        rounded = tl.where(log_x >= 0, tl.floor(log_x + 0.5), tl.ceil(log_x - 0.5))
+        sign_bit = tl.cast(x < 0, tl_int_dtype)
+        packed = (tl.cast(rounded, tl_int_dtype) << 1) | sign_bit
+
+        return tl.where(x == 0.0, tl.cast(ZERO, tl_int_dtype), tl.where(x == float("inf"), tl.cast(POS_INF, tl_int_dtype), tl.where(x == float("-inf"), tl.cast(NEG_INF, tl_int_dtype), packed)))
+
+    @triton.jit
+    def to_float(x):
+        log_x = x >> 1
+        sign = tl.where((x & 1) == 1, -1.0, 1.0)
+
+        abs_x = tl.exp(tl.cast(LOG_BASE, tl.float64) * tl.cast(log_x, tl.float64))
+        float_x = sign * abs_x
+
+        return tl.where(
+            x == ZERO,
+            0.0,
+            tl.where(x == POS_INF, float("inf"), tl.where(x == NEG_INF, float("-inf"), float_x.to(tl.float32))),
+        )
+
+    @triton.jit
+    def sub(x, y):
+        return add(x, neg(y))
+
+    # @triton.jit
+    # def checked_add(a, b, overflow_sign):
+    #     result = tl.cast(a + b, tl_int_dtype)
+
+    #     underflow = (a < 0) & (b < 0) & (result >= 0)
+    #     overflow = (a >= 0) & (b >= 0) & (result < 0)
+    #     inf_signed = tl.where(overflow_sign == 0, tl.cast(POS_INF, tl_int_dtype), tl.cast(NEG_INF, tl_int_dtype))
+
+    #     return tl.where(underflow, tl.cast(ZERO, tl_int_dtype), tl.where(overflow, inf_signed, result))
+
+    @triton.jit
+    def mul(x, y):
+        # prod = checked_add(x, y - (y & 1), (x ^ y) & 1) ^ (y & 1)
+        prod = (x + y - (y & 1)) ^ (y & 1)
+        return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), tl.where(y == tl.cast(ZERO, tl_int_dtype), tl.cast(ZERO, tl_int_dtype), prod))
+
+    @triton.jit
+    def div(x, y):
+        # quotient = checked_add(x, -y + (y & 1), (x ^ y) & 1) ^ (y & 1)
+        quotient = (x - y + (y & 1)) ^ (y & 1)
+        div_by_zero = tl.where((x & 1) == 0, tl.cast(POS_INF, tl_int_dtype), tl.cast(NEG_INF, tl_int_dtype))
+        return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), tl.where(y == ZERO, div_by_zero, quotient))
+
+    @triton.jit
+    def sqrt(x):
+        result = ((x & (-2)) // 2) & (-2)
+        return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), result)
+
+    @triton.jit
+    def neg(x):
+        return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), x ^ 1)
+
+    @triton.jit
+    def gt(x, y):
+        x_log = x >> 1
+        y_log = y >> 1
+        x_sign = x & 1
+        y_sign = y & 1
+
+        both_pos = (x_sign == 0) & (y_sign == 0)
+        x_pos_y_neg = (x_sign == 0) & (y_sign == 1)
+        both_neg = (x_sign == 1) & (y_sign == 1)
+
+        return x_pos_y_neg | (both_pos & (x_log > y_log)) | (both_neg & (y_log > x_log))
+
+    @triton.jit
+    def ge(x, y):
+        x_log = x >> 1
+        y_log = y >> 1
+        x_sign = x & 1
+        y_sign = y & 1
+
+        both_pos = (x_sign == 0) & (y_sign == 0)
+        x_pos_y_neg = (x_sign == 0) & (y_sign == 1)
+        both_neg = (x_sign == 1) & (y_sign == 1)
+
+        return x_pos_y_neg | (both_pos & (x_log >= y_log)) | (both_neg & (y_log >= x_log))
+
+    @triton.jit
+    def lt(x, y):
+        x_log = x >> 1
+        y_log = y >> 1
+        x_sign = x & 1
+        y_sign = y & 1
+
+        both_pos = (x_sign == 0) & (y_sign == 0)
+        x_neg_y_pos = (x_sign == 1) & (y_sign == 0)
+        both_neg = (x_sign == 1) & (y_sign == 1)
+
+        return x_neg_y_pos | (both_pos & (x_log < y_log)) | (both_neg & (y_log < x_log))
+
+    @triton.jit
+    def le(x, y):
+        x_log = x >> 1
+        y_log = y >> 1
+        x_sign = x & 1
+        y_sign = y & 1
+
+        both_pos = (x_sign == 0) & (y_sign == 0)
+        x_neg_y_pos = (x_sign == 1) & (y_sign == 0)
+        both_neg = (x_sign == 1) & (y_sign == 1)
+
+        return x_neg_y_pos | (both_pos & (x_log <= y_log)) | (both_neg & (y_log <= x_log))
+
+    if tab_sbdb is not None and tab_ez is not None:
+        if tab_sbdb.device.type != "cuda":
+            raise ValueError("LNS Triton table backend requires tab_sbdb to be on a CUDA device.")
+
+        tab_sbdb_size = tl.constexpr(tab_sbdb.size(1))
+        tab_sbdb_data_ptr = tl.constexpr(tab_sbdb.data_ptr())
+        tab_ez_item = tl.constexpr(tab_ez.item())
+
+        @triton.jit
+        def add(x, y):
+            max_operand = tl.maximum(x, y)
+
+            z = -tl.abs((x >> 1) - (y >> 1)).to(tl.int64)
+            s = ((x ^ y) & 1).to(tl.int64)
+
+            idx = (s + 1) * tab_sbdb_size + tl.where(z < tab_ez_item, tab_ez_item, tl.where(z == 0, -1, z))
+            abs_ptr = tab_sbdb_data_ptr + idx * bytes_per_value
+
+            sbdb = tl.inline_asm_elementwise(
+                "{{\n   " + asm_load + "\n}}",
+                asm_output_constraint,
+                [abs_ptr],
+                dtype=tl_int_dtype,
+                is_pure=True,
+                pack=1,
+            )
+
+            # result = checked_add(max_operand, sbdb, max_operand & 1)
+            result = max_operand + sbdb
+            return tl.where(x == ZERO, y, tl.where(y == ZERO, x, tl.where(x == neg(y), tl.cast(ZERO, tl_int_dtype), result)))
+
+        _bump_triton_jit_hash(
+            add,
+            ZERO=ZERO,
+            tab_sbdb=tab_sbdb.data_ptr(),
+            tab_ez=tab_ez.item(),
+            bitwidth=bitwidth,
+        )
+
+    else:
+        @triton.jit
+        def add(x, y):
+            max_operand = tl.maximum(x, y)
+
+            abs_diff = tl.abs((x >> 1) - (y >> 1)).to(tl.float64)
+            sign_diff = ((x ^ y) & 1).to(tl.float64)
+
+            power_term = tl.exp(LOG_BASE * -abs_diff)
+            magnitude = tl.abs(1.0 - 2.0 * sign_diff + power_term)
+
+            log_term = tl.log(magnitude) / LOG_BASE
+            rounded = tl.where(log_term >= 0, tl.floor(log_term + 0.5), tl.ceil(log_term - 0.5))
+            sbdb = rounded.to(tl_int_dtype) * 2
+
+            # result = checked_add(max_operand, sbdb, max_operand & 1)
+            result = max_operand + sbdb
+            return tl.where(x == ZERO, y, tl.where(y == ZERO, x, tl.where(x == neg(y), tl.cast(ZERO, tl_int_dtype), result)))
+
+        _bump_triton_jit_hash(add, LOG_BASE=LOG_BASE, ZERO=ZERO, bitwidth=bitwidth)
+
+    _bump_triton_jit_hash(from_float, LOG_BASE=LOG_BASE, ZERO=ZERO, bitwidth=bitwidth)
+    _bump_triton_jit_hash(to_float, LOG_BASE=LOG_BASE, ZERO=ZERO, bitwidth=bitwidth)
+    _bump_triton_jit_hash(mul, ZERO=ZERO, bitwidth=bitwidth)
+    _bump_triton_jit_hash(div, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
+    _bump_triton_jit_hash(sqrt, ZERO=ZERO, bitwidth=bitwidth)
+
+    return TritonScalarOps(
+        from_float=from_float,
+        to_float=to_float,
+        add=add,
+        sub=sub,
+        mul=mul,
+        div=div,
+        sqrt=sqrt,
+        gt=gt,
+        ge=ge,
+        lt=lt,
+        le=le,
+        neg=neg,
+    )
