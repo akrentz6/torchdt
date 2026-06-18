@@ -32,6 +32,30 @@ def register_triton_ops(
     if not HAS_TRITON:
         raise ImportError("Triton is not installed. Please install Triton to use Triton backend.")
 
+    cpu_from_float = dtype_cls.ops.from_float
+    cpu_to_float = dtype_cls.ops.to_float
+
+    def scalar_from_float_cpu(cls, x):
+        if isinstance(x, torch.Tensor):
+            if x.numel() != 1:
+                raise ValueError("scalar_from_float expects a scalar value")
+            x_tensor = x.detach().to(device="cpu", dtype=torch.float32).reshape(())
+        else:
+            x_tensor = torch.tensor(x, dtype=torch.float32)
+        return cpu_from_float(x_tensor)
+
+    def scalar_to_float_cpu(cls, x):
+        if isinstance(x, torch.Tensor):
+            if x.numel() != 1:
+                raise ValueError("scalar_to_float expects a scalar tensor")
+            x_tensor = x.detach().to(device="cpu", dtype=dtype_cls.int_dtype).reshape(())
+        else:
+            x_tensor = torch.tensor(x, dtype=dtype_cls.int_dtype)
+        return cpu_to_float(x_tensor).item()
+
+    dtype_cls.ops.scalar_from_float = classmethod(scalar_from_float_cpu)
+    dtype_cls.ops.scalar_to_float = classmethod(scalar_to_float_cpu)
+
     if dtype_cls.bitwidth == 8:
         tl_int_dtype = tl.constexpr(tl.int8)
     elif dtype_cls.bitwidth == 16:
@@ -1700,6 +1724,14 @@ def register_triton_ops(
         return DTAdaptiveAvgPool2dFunction.apply(input, output_size)
 
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK": 128}, num_warps=1, num_stages=1),
+            triton.Config({"BLOCK": 128}, num_warps=2, num_stages=1),
+            triton.Config({"BLOCK": 128}, num_warps=4, num_stages=1),
+        ],
+        key=["count", "HW", "W"],
+    )
     @triton.jit
     def batch_norm2d_sum_kernel(
         X_ptr, partial_sum_ptr,
@@ -1728,6 +1760,19 @@ def register_triton_ops(
 
         tl.store(partial_sum_ptr + pid0 * ps_s0 + pid1 * ps_s1, block_sum)
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_T": 16},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_T": 32},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_T": 64},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_T": 128}, num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_T": 128}, num_warps=2, num_stages=1),
+            triton.Config({"BLOCK_T": 256}, num_warps=2, num_stages=1),
+            triton.Config({"BLOCK_T": 512}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_T": 1024}, num_warps=4, num_stages=1),
+        ],
+        key=["ntiles"],
+    )
     @triton.jit
     def batch_norm2d_mean_finalize_kernel(
         partial_sum_ptr,
@@ -1761,6 +1806,14 @@ def register_triton_ops(
         tl.store(rm_ptr + pid, new_rm)
         tl.store(sm_ptr + pid, mean)
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK": 128}, num_warps=1, num_stages=1),
+            triton.Config({"BLOCK": 128}, num_warps=2, num_stages=1),
+            triton.Config({"BLOCK": 128}, num_warps=4, num_stages=1),
+        ],
+        key=["count", "HW", "W"],
+    )
     @triton.jit
     def batch_norm2d_centered_var_kernel(
         X_ptr, sm_ptr, partial_var_ptr,
@@ -1794,6 +1847,19 @@ def register_triton_ops(
 
         tl.store(partial_var_ptr + pid0 * pv_s0 + pid1 * pv_s1, block_var_sum)
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_T": 16},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_T": 32},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_T": 64},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_T": 128}, num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_T": 128}, num_warps=2, num_stages=1),
+            triton.Config({"BLOCK_T": 256}, num_warps=2, num_stages=1),
+            triton.Config({"BLOCK_T": 512}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_T": 1024}, num_warps=4, num_stages=1),
+        ],
+        key=["ntiles"],
+    )
     @triton.jit
     def batch_norm2d_var_finalize_kernel(
         partial_var_ptr,
@@ -1857,6 +1923,18 @@ def register_triton_ops(
         tl.store(sm_ptr + pid, mean)
         tl.store(sis_ptr + pid, invstd)
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK": 64},  num_warps=2, num_stages=1),
+            triton.Config({"BLOCK": 128}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 256}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 512}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 512}, num_warps=8, num_stages=1),
+            triton.Config({"BLOCK": 1024}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 1024}, num_warps=8, num_stages=1),
+        ],
+        key=["count", "HW", "W"],
+    )
     @triton.jit
     def batch_norm2d_apply_kernel(
         X_ptr, Y_ptr,
@@ -1904,16 +1982,12 @@ def register_triton_ops(
 
     @dtype_cls.register_op("batch_norm")
     def dt_batch_norm(ops, x, running_mean, running_var, momentum, eps, weight=None, bias=None, training=False):
-        BLOCK = 128
-        BLOCK_T = 128
-        num_warps_partials = 4
-        num_warps_apply = 4
-        num_warps_finalize = 1
+        PARTIAL_BLOCK = 128
 
         N, C, H, W = x.shape
         HW = H * W
         count = N * H * W
-        ntiles = triton.cdiv(count, BLOCK)
+        partial_tiles = triton.cdiv(count, PARTIAL_BLOCK)
 
         has_weight = weight is not None
         has_bias = bias is not None
@@ -1923,9 +1997,9 @@ def register_triton_ops(
         if not has_bias:
             bias = torch.empty(0, device=x.device, dtype=dtype_cls.int_dtype)
 
-        count_dt = dtype_cls(count, device=x.device)._int.item()
-        eps_dt = dtype_cls(eps, device=x.device)._int.item()
-        momentum_dt = dtype_cls(momentum, device=x.device)._int.item()
+        count_dt = ops.scalar_from_float(count).item()
+        eps_dt = ops.scalar_from_float(eps).item()
+        momentum_dt = ops.scalar_from_float(momentum).item()
 
         output = torch.empty((N, C, H, W), device=x.device, dtype=dtype_cls.int_dtype)
         save_mean = torch.empty((C,), device=x.device, dtype=dtype_cls.int_dtype)
@@ -1935,19 +2009,17 @@ def register_triton_ops(
         s_y_n, s_y_c, s_y_h, s_y_w = output.stride()
 
         if training:
-            partial_sum = torch.empty((C, ntiles), device=x.device, dtype=dtype_cls.int_dtype)
-            partial_var = torch.empty((C, ntiles), device=x.device, dtype=dtype_cls.int_dtype)
+            partial_sum = torch.empty((C, partial_tiles), device=x.device, dtype=dtype_cls.int_dtype)
+            partial_var = torch.empty((C, partial_tiles), device=x.device, dtype=dtype_cls.int_dtype)
 
             ps_s0, ps_s1 = partial_sum.stride()
             pv_s0, pv_s1 = partial_var.stride()
 
-            batch_norm2d_sum_kernel[(C, ntiles)](
+            batch_norm2d_sum_kernel[(C, partial_tiles)](
                 x, partial_sum,
                 HW, W, count,
                 s_x_n, s_x_c, s_x_h, s_x_w,
                 ps_s0, ps_s1,
-                BLOCK=BLOCK,
-                num_warps=num_warps_partials,
             )
 
             batch_norm2d_mean_finalize_kernel[(C,)](
@@ -1956,19 +2028,15 @@ def register_triton_ops(
                 save_mean,
                 momentum_dt,
                 count_dt,
-                ntiles,
+                partial_tiles,
                 ps_s0, ps_s1,
-                BLOCK_T=BLOCK_T,
-                num_warps=num_warps_finalize,
             )
 
-            batch_norm2d_centered_var_kernel[(C, ntiles)](
+            batch_norm2d_centered_var_kernel[(C, partial_tiles)](
                 x, save_mean, partial_var,
                 HW, W, count,
                 s_x_n, s_x_c, s_x_h, s_x_w,
                 pv_s0, pv_s1,
-                BLOCK=BLOCK,
-                num_warps=num_warps_partials,
             )
 
             batch_norm2d_var_finalize_kernel[(C,)](
@@ -1977,10 +2045,8 @@ def register_triton_ops(
                 save_invstd,
                 eps_dt, momentum_dt,
                 count, count_dt,
-                ntiles,
+                partial_tiles,
                 pv_s0, pv_s1,
-                BLOCK_T=BLOCK_T,
-                num_warps=num_warps_finalize,
             )
         else:
             batch_norm2d_eval_stats_kernel[(C,)](
@@ -1989,10 +2055,11 @@ def register_triton_ops(
                 save_mean,
                 save_invstd,
                 eps_dt,
-                num_warps=num_warps_finalize,
+                num_warps=1,
             )
 
-        batch_norm2d_apply_kernel[(C, ntiles)](
+        grid_apply = lambda META: (C, triton.cdiv(count, META["BLOCK"]))
+        batch_norm2d_apply_kernel[grid_apply](
             x, output,
             weight, bias,
             save_mean, save_invstd,
@@ -2001,12 +2068,18 @@ def register_triton_ops(
             s_y_n, s_y_c, s_y_h, s_y_w,
             has_weight,
             has_bias,
-            BLOCK=BLOCK,
-            num_warps=num_warps_apply,
         )
 
         return output, save_mean, save_invstd
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK": 256}, num_warps=1, num_stages=1),
+            triton.Config({"BLOCK": 256}, num_warps=2, num_stages=1),
+            triton.Config({"BLOCK": 256}, num_warps=4, num_stages=1),
+        ],
+        key=["N", "HW", "W"],
+    )
     @triton.jit
     def batch_norm2d_backward_partials_kernel(
         X_ptr, dY_ptr,
@@ -2054,6 +2127,18 @@ def register_triton_ops(
         tl.store(p_dy_ptr + pid0 * (N * num_hw_blks) + tile_id, partial_dy)
         tl.store(p_dy_xhat_ptr + pid0 * (N * num_hw_blks) + tile_id, partial_dy_xhat)
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_R": 64},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_R": 128}, num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_R": 256}, num_warps=1, num_stages=1),
+            triton.Config({"BLOCK_R": 256}, num_warps=2, num_stages=1),
+            triton.Config({"BLOCK_R": 512}, num_warps=2, num_stages=1),
+            triton.Config({"BLOCK_R": 512}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_R": 1024}, num_warps=4, num_stages=1),
+        ],
+        key=["K"],
+    )
     @triton.jit
     def batch_norm2d_backward_reduce_kernel(
         p_dy_ptr, p_dy_xhat_ptr,
@@ -2087,6 +2172,19 @@ def register_triton_ops(
         tl.store(m_dy_ptr + pid, div(sum_dy, tl.cast(count_dt, tl_int_dtype)))
         tl.store(m_dy_xhat_ptr + pid, div(sum_dy_xhat, tl.cast(count_dt, tl_int_dtype)))
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK": 32},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK": 64},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK": 64},  num_warps=2, num_stages=1),
+            triton.Config({"BLOCK": 128}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 256}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 512}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 512}, num_warps=8, num_stages=1),
+            triton.Config({"BLOCK": 1024}, num_warps=8, num_stages=1),
+        ],
+        key=["HW", "W"],
+    )
     @triton.jit
     def batch_norm2d_backward_dx_kernel(
         X_ptr, dY_ptr, dX_ptr,
@@ -2137,6 +2235,19 @@ def register_triton_ops(
 
         tl.store(dx_ptrs, dx, mask=mask)
 
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK": 32},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK": 64},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK": 64},  num_warps=2, num_stages=1),
+            triton.Config({"BLOCK": 128}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 256}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 512}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 512}, num_warps=8, num_stages=1),
+            triton.Config({"BLOCK": 1024}, num_warps=8, num_stages=1),
+        ],
+        key=["HW", "W"],
+    )
     @triton.jit
     def batch_norm2d_backward_dx_eval_kernel(
         dY_ptr, dX_ptr,
@@ -2180,10 +2291,7 @@ def register_triton_ops(
         weight=None, bias=None,
         training=False,
     ):
-        BLOCK = 256
-        BLOCK_R = 128
-        num_warps = 4
-        num_stages = 2
+        PARTIAL_BLOCK = 256
 
         N, C, H, W = input.shape
         HW = H * W
@@ -2192,7 +2300,7 @@ def register_triton_ops(
         has_weight = weight is not None
         has_bias = bias is not None
 
-        count_dt = dtype_cls(count, device=input.device)._int.item()
+        count_dt = dtype_cls.ops.scalar_from_float(count).item()
 
         if not has_weight:
             weight = torch.empty(0, device=input.device, dtype=dtype_cls.int_dtype)
@@ -2215,7 +2323,7 @@ def register_triton_ops(
         s_dy_n, s_dy_c, s_dy_h, s_dy_w = grad_output.stride()
         s_dx_n, s_dx_c, s_dx_h, s_dx_w = grad_input.stride()
 
-        num_hw_blks = triton.cdiv(HW, BLOCK)
+        num_hw_blks = triton.cdiv(HW, PARTIAL_BLOCK)
         K = N * num_hw_blks
 
         if training or has_weight or has_bias:
@@ -2233,9 +2341,6 @@ def register_triton_ops(
                 N, HW, W,
                 s_x_n, s_x_c, s_x_h, s_x_w,
                 s_dy_n, s_dy_c, s_dy_h, s_dy_w,
-                BLOCK=BLOCK,
-                num_warps=num_warps,
-                num_stages=num_stages,
             )
 
             grid_reduce = (C,)
@@ -2245,16 +2350,13 @@ def register_triton_ops(
                 mean_dy, mean_dy_xhat,
                 count_dt, K,
                 has_weight, has_bias,
-                BLOCK_R=BLOCK_R,
-                num_warps=1,
-                num_stages=1,
             )
 
         else:
             mean_dy = None
             mean_dy_xhat = None
 
-        grid_dx = (C, N, num_hw_blks)
+        grid_dx = lambda META: (C, N, triton.cdiv(HW, META["BLOCK"]))
 
         if training:
             batch_norm2d_backward_dx_kernel[grid_dx](
@@ -2266,9 +2368,6 @@ def register_triton_ops(
                 s_dy_n, s_dy_c, s_dy_h, s_dy_w,
                 s_dx_n, s_dx_c, s_dx_h, s_dx_w,
                 has_weight,
-                BLOCK=BLOCK,
-                num_warps=num_warps,
-                num_stages=num_stages,
             )
         else:
             batch_norm2d_backward_dx_eval_kernel[grid_dx](
@@ -2278,9 +2377,6 @@ def register_triton_ops(
                 s_dy_n, s_dy_c, s_dy_h, s_dy_w,
                 s_dx_n, s_dx_c, s_dx_h, s_dx_w,
                 has_weight,
-                BLOCK=BLOCK,
-                num_warps=num_warps,
-                num_stages=num_stages,
             )
 
         if not has_weight:
@@ -2473,7 +2569,8 @@ def register_triton_ops(
     @triton.jit
     def sgd_step_kernel(
         p_ptr, g_ptr, buf_ptr,
-        N, lr, momentum, dampening, weight_decay,
+        lr_ptr, momentum_ptr, dampening_ptr, weight_decay_ptr,
+        N,
         MAXIMIZE: tl.constexpr, NESTEROV: tl.constexpr,
         FIRST_MOMENTUM: tl.constexpr, BLOCK: tl.constexpr,
     ):
@@ -2483,6 +2580,10 @@ def register_triton_ops(
 
         p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
         g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
+        lr = tl.load(lr_ptr)
+        momentum = tl.load(momentum_ptr)
+        dampening = tl.load(dampening_ptr)
+        weight_decay = tl.load(weight_decay_ptr)
 
         if MAXIMIZE:
             g = neg(g)
@@ -2520,10 +2621,8 @@ def register_triton_ops(
 
         sgd_step_kernel[grid](
             p, grad, buf,
-            N, lr.item(),
-            momentum.item(),
-            dampening.item(),
-            weight_decay.item(),
+            lr, momentum, dampening, weight_decay,
+            N,
             maximize, nesterov,
             first_mom, BLOCK
         )
@@ -2534,8 +2633,9 @@ def register_triton_ops(
     @triton.jit
     def madam_step_kernel(
         p_ptr, g_ptr, exp_avg_sq_ptr,
-        N, lr, beta, eps,
-        g_bound, max, bias_corr,
+        lr_ptr, beta_ptr, eps_ptr,
+        g_bound_ptr, max_ptr, bias_corr_ptr,
+        N,
         MAXIMIZE: tl.constexpr, USE_POW: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
@@ -2546,6 +2646,12 @@ def register_triton_ops(
         p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
         g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
         v = tl.load(exp_avg_sq_ptr + offs, mask=mask, other=_ZERO)
+        lr = tl.load(lr_ptr)
+        beta = tl.load(beta_ptr)
+        eps = tl.load(eps_ptr)
+        g_bound = tl.load(g_bound_ptr)
+        max = tl.load(max_ptr)
+        bias_corr = tl.load(bias_corr_ptr)
 
         g2 = mul(g, g)
         v_new = add(
@@ -2580,10 +2686,9 @@ def register_triton_ops(
 
         madam_step_kernel[grid](
             p, grad, exp_avg_sq,
-            N, lr.item(),
-            beta.item(), eps.item(),
-            g_bound.item(), max.item(),
-            bias_corr.item(),
+            lr, beta, eps,
+            g_bound, max, bias_corr,
+            N,
             maximize, use_pow,
             BLOCK=BLOCK,
         )
@@ -2594,9 +2699,9 @@ def register_triton_ops(
     def adam_step_kernel(
         p_ptr, g_ptr,
         m_ptr, v_ptr, vhat_ptr,
+        lr_ptr, beta1_ptr, beta2_ptr, eps_ptr, weight_decay_ptr,
+        bias_corr1_ptr, bias_corr2_ptr,
         N,
-        lr, beta1, beta2, eps, weight_decay,
-        bias_corr1, bias_corr2,
         MAXIMIZE: tl.constexpr, AMSGRAD: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
@@ -2606,6 +2711,13 @@ def register_triton_ops(
 
         p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
         g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
+        lr = tl.load(lr_ptr)
+        beta1 = tl.load(beta1_ptr)
+        beta2 = tl.load(beta2_ptr)
+        eps = tl.load(eps_ptr)
+        weight_decay = tl.load(weight_decay_ptr)
+        bias_corr1 = tl.load(bias_corr1_ptr)
+        bias_corr2 = tl.load(bias_corr2_ptr)
 
         if MAXIMIZE:
             g = neg(g)
@@ -2661,9 +2773,9 @@ def register_triton_ops(
         adam_step_kernel[grid](
             p, grad,
             exp_avg, exp_avg_sq, max_exp_avg_sq,
+            lr, beta1, beta2, eps, weight_decay,
+            bias_corr1, bias_corr2,
             N,
-            lr.item(), beta1.item(), beta2.item(), eps.item(), weight_decay.item(),
-            bias_corr1.item(), bias_corr2.item(),
             maximize, amsgrad,
             BLOCK=BLOCK,
         )

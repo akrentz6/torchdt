@@ -306,7 +306,7 @@ class DType(Tensor):
         return self.ops.to_float(self._int)
 
     def __float__(self):
-        return self.ops.to_float(self._int).item()
+        return self.ops.scalar_to_float(self._int)
 
     def __repr__(self):
         return (

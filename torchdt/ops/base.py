@@ -33,6 +33,10 @@ class OpsBase:
         return cls.from_float(x_tensor)
 
     @classmethod
+    def scalar_to_float(cls, x: InternalTensor):
+        return cls.to_float(x).item()
+
+    @classmethod
     def zeros(cls, size, device=None):
         return torch.full(size, cls.scalar_from_float(0.0), dtype=cls.dtype.int_dtype, device=device)
 

@@ -129,4 +129,4 @@ def dt_reshape(input, shape):
 @DType.register_func(torch.Tensor.item,
                      cast=("input",))
 def dt_item(input):
-    return input.to_float().item()
+    return input.__class__.ops.scalar_to_float(input._int)
