@@ -92,6 +92,7 @@ class Adam(DTOptimizer):
                 step_size = lr * torch.sqrt(bias_corr2) / bias_corr1
                 p.data.copy_(p - step_size * exp_avg / (torch.sqrt(v_denom) + eps))
 
+                state["step"] = step
                 state["exp_avg"] = exp_avg
                 state["exp_avg_sq"] = exp_avg_sq
 
@@ -182,6 +183,7 @@ class TritonAdam(DTOptimizer):
 
                 state["exp_avg"] = exp_avg
                 state["exp_avg_sq"] = exp_avg_sq
+                state["step"] = step
                 if amsgrad:
                     state["max_exp_avg_sq"] = max_exp_avg_sq
 
