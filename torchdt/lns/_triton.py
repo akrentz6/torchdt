@@ -66,6 +66,10 @@ def make_lns_triton_scalar_ops(
     ZERO = tl.constexpr(zero_value)
     POS_INF = tl.constexpr(pos_inf_value)
     NEG_INF = tl.constexpr(neg_inf_value)
+    MIN_LOG = tl.constexpr(zero_value >> 1)
+    MAX_LOG = tl.constexpr(pos_inf_value >> 1)
+    MIN_FINITE_LOG = tl.constexpr((zero_value >> 1) + 1)
+    MAX_FINITE_LOG = tl.constexpr((pos_inf_value >> 1) - 1)
 
     @triton.jit
     def from_float(x):
@@ -74,9 +78,20 @@ def make_lns_triton_scalar_ops(
 
         rounded = tl.where(log_x >= 0, tl.floor(log_x + 0.5), tl.ceil(log_x - 0.5))
         sign_bit = tl.cast(x < 0, tl_int_dtype)
-        packed = (tl.cast(rounded, tl_int_dtype) << 1) | sign_bit
+        finite_rounded = tl.minimum(
+            tl.maximum(rounded, tl.cast(MIN_FINITE_LOG, tl.float64)),
+            tl.cast(MAX_FINITE_LOG, tl.float64),
+        )
+        packed = (tl.cast(finite_rounded, tl_int_dtype) << 1) | sign_bit
+        overflow = rounded >= tl.cast(MAX_LOG, tl.float64)
+        underflow = rounded <= tl.cast(MIN_LOG, tl.float64)
+        inf = tl.where(sign_bit == 0, tl.cast(POS_INF, tl_int_dtype), tl.cast(NEG_INF, tl_int_dtype))
 
-        return tl.where(x == 0.0, tl.cast(ZERO, tl_int_dtype), tl.where(x == float("inf"), tl.cast(POS_INF, tl_int_dtype), tl.where(x == float("-inf"), tl.cast(NEG_INF, tl_int_dtype), packed)))
+        return tl.where(
+            x == 0.0,
+            tl.cast(ZERO, tl_int_dtype),
+            tl.where(overflow, inf, tl.where(underflow, tl.cast(ZERO, tl_int_dtype), packed)),
+        )
 
     @triton.jit
     def to_float(x):
@@ -96,33 +111,36 @@ def make_lns_triton_scalar_ops(
     def sub(x, y):
         return add(x, neg(y))
 
-    # @triton.jit
-    # def checked_add(a, b, overflow_sign):
-    #     result = tl.cast(a + b, tl_int_dtype)
+    @triton.jit
+    def checked_add(a, b, overflow_sign):
+        result = tl.cast(a + b, tl_int_dtype)
 
-    #     underflow = (a < 0) & (b < 0) & (result >= 0)
-    #     overflow = (a >= 0) & (b >= 0) & (result < 0)
-    #     inf_signed = tl.where(overflow_sign == 0, tl.cast(POS_INF, tl_int_dtype), tl.cast(NEG_INF, tl_int_dtype))
+        underflow = (a < 0) & (b < 0) & (result >= 0)
+        overflow = (a >= 0) & (b >= 0) & (result < 0)
+        inf_signed = tl.where(overflow_sign == 0, tl.cast(POS_INF, tl_int_dtype), tl.cast(NEG_INF, tl_int_dtype))
 
-    #     return tl.where(underflow, tl.cast(ZERO, tl_int_dtype), tl.where(overflow, inf_signed, result))
+        return tl.where(underflow, tl.cast(ZERO, tl_int_dtype), tl.where(overflow, inf_signed, result))
 
     @triton.jit
     def mul(x, y):
-        # prod = checked_add(x, y - (y & 1), (x ^ y) & 1) ^ (y & 1)
-        prod = (x + y - (y & 1)) ^ (y & 1)
+        y_magnitude = y - (y & 1)
+        prod_unsigned = checked_add(x, y_magnitude, x & 1)
+        prod = tl.where(prod_unsigned == ZERO, tl.cast(ZERO, tl_int_dtype), prod_unsigned ^ (y & 1))
         return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), tl.where(y == tl.cast(ZERO, tl_int_dtype), tl.cast(ZERO, tl_int_dtype), prod))
 
     @triton.jit
     def div(x, y):
-        # quotient = checked_add(x, -y + (y & 1), (x ^ y) & 1) ^ (y & 1)
-        quotient = (x - y + (y & 1)) ^ (y & 1)
+        safe_y = tl.where(y == ZERO, tl.cast(0, tl_int_dtype), y)
+        divisor_delta = -safe_y + (safe_y & 1)
+        quotient_unsigned = checked_add(x, divisor_delta, x & 1)
+        quotient = tl.where(quotient_unsigned == ZERO, tl.cast(ZERO, tl_int_dtype), quotient_unsigned ^ (safe_y & 1))
         div_by_zero = tl.where((x & 1) == 0, tl.cast(POS_INF, tl_int_dtype), tl.cast(NEG_INF, tl_int_dtype))
         return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), tl.where(y == ZERO, div_by_zero, quotient))
 
     @triton.jit
     def sqrt(x):
         result = ((x & (-2)) // 2) & (-2)
-        return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), result)
+        return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), tl.where(x == POS_INF, tl.cast(POS_INF, tl_int_dtype), result))
 
     @triton.jit
     def neg(x):
@@ -207,13 +225,14 @@ def make_lns_triton_scalar_ops(
                 pack=1,
             )
 
-            # result = checked_add(max_operand, sbdb, max_operand & 1)
-            result = max_operand + sbdb
+            result = checked_add(max_operand, sbdb, max_operand & 1)
             return tl.where(x == ZERO, y, tl.where(y == ZERO, x, tl.where(x == neg(y), tl.cast(ZERO, tl_int_dtype), result)))
 
         _bump_triton_jit_hash(
             add,
             ZERO=ZERO,
+            POS_INF=POS_INF,
+            NEG_INF=NEG_INF,
             tab_sbdb=tab_sbdb.data_ptr(),
             tab_ez=tab_ez.item(),
             bitwidth=bitwidth,
@@ -234,15 +253,14 @@ def make_lns_triton_scalar_ops(
             rounded = tl.where(log_term >= 0, tl.floor(log_term + 0.5), tl.ceil(log_term - 0.5))
             sbdb = rounded.to(tl_int_dtype) * 2
 
-            # result = checked_add(max_operand, sbdb, max_operand & 1)
-            result = max_operand + sbdb
+            result = checked_add(max_operand, sbdb, max_operand & 1)
             return tl.where(x == ZERO, y, tl.where(y == ZERO, x, tl.where(x == neg(y), tl.cast(ZERO, tl_int_dtype), result)))
 
-        _bump_triton_jit_hash(add, LOG_BASE=LOG_BASE, ZERO=ZERO, bitwidth=bitwidth)
+        _bump_triton_jit_hash(add, LOG_BASE=LOG_BASE, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
 
-    _bump_triton_jit_hash(from_float, LOG_BASE=LOG_BASE, ZERO=ZERO, bitwidth=bitwidth)
+    _bump_triton_jit_hash(from_float, LOG_BASE=LOG_BASE, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
     _bump_triton_jit_hash(to_float, LOG_BASE=LOG_BASE, ZERO=ZERO, bitwidth=bitwidth)
-    _bump_triton_jit_hash(mul, ZERO=ZERO, bitwidth=bitwidth)
+    _bump_triton_jit_hash(mul, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
     _bump_triton_jit_hash(div, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
     _bump_triton_jit_hash(sqrt, ZERO=ZERO, bitwidth=bitwidth)
 

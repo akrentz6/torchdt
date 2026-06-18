@@ -6,6 +6,10 @@ from ._tables import lns_base, load_or_create_table, register_table_add, validat
 ZERO = torch.tensor(-2_147_483_648, dtype=torch.int32) # smallest positive value in LNS
 POS_INF = torch.tensor(2_147_483_646, dtype=torch.int32) # largest positive value in LNS
 NEG_INF = torch.tensor(2_147_483_647, dtype=torch.int32) # largest negative value in LNS
+MIN_LOG = ZERO.item() >> 1
+MAX_LOG = POS_INF.item() >> 1
+MIN_FINITE_LOG = MIN_LOG + 1
+MAX_FINITE_LOG = MAX_LOG - 1
 base = lns_base(23)
 tab_sbdb = None
 tab_ez = None
@@ -44,22 +48,41 @@ class LNS32(DType, bitwidth=32):
             tab_ez=tab_ez,
         )
 
+def _checked_add(x: Tensor, y: Tensor, overflow_sign: Tensor) -> Tensor:
+    result = (x + y).to(torch.int32)
+
+    zero = ZERO.to(device=result.device)
+    pos_inf = POS_INF.to(device=result.device)
+    neg_inf = NEG_INF.to(device=result.device)
+
+    underflow = (x < 0) & (y < 0) & (result >= 0)
+    overflow = (x >= 0) & (y >= 0) & (result < 0)
+    inf_signed = torch.where((overflow_sign & 1) == 0, pos_inf, neg_inf)
+
+    return torch.where(underflow, zero, torch.where(overflow, inf_signed, result))
+
 @LNS32.register_op("from_float")
 def lns32_from_float(ops, t: Tensor) -> Tensor:
     t = t.to(dtype=torch.float64)
     abs_t = torch.abs(t)
 
     log_t = torch.log(abs_t) / torch.log(base)
-    # clamp to first 31 bits then bitshift to 32 bits
-    packed = torch.round(log_t).to(torch.int32).clamp(-1_073_741_824, 1_073_741_823) << 1 | (t < 0)
+    rounded = torch.round(log_t)
+    sign_bit = (t < 0).to(torch.int32)
+    finite_rounded = rounded.clamp(MIN_FINITE_LOG, MAX_FINITE_LOG)
+    packed = (finite_rounded.to(torch.int32) << 1) | sign_bit
+
+    zero = ZERO.to(device=t.device)
+    pos_inf = POS_INF.to(device=t.device)
+    neg_inf = NEG_INF.to(device=t.device)
+    overflow = rounded >= MAX_LOG
+    underflow = rounded <= MIN_LOG
+    inf = torch.where(sign_bit == 0, pos_inf, neg_inf)
 
     lns_t = torch.where(
-        abs_t == 0, ZERO,
-        torch.where(
-            torch.isposinf(t), POS_INF,
-            torch.where(
-                torch.isneginf(t), NEG_INF,
-                packed.to(torch.int32))))
+        abs_t == 0,
+        zero,
+        torch.where(overflow, inf, torch.where(underflow, zero, packed.to(torch.int32))))
     return lns_t
 
 @LNS32.register_op("to_float")
@@ -99,7 +122,7 @@ def lns32_add(ops, x, y):
             y == ZERO,
             x, torch.where(
                 x == ops.neg(y),
-                ZERO, max_operand + sbdb)))
+                ZERO, _checked_add(max_operand, sbdb, max_operand & 1))))
 
 @LNS32.register_op("sub")
 def lns32_sub(ops, x, y):
@@ -107,21 +130,47 @@ def lns32_sub(ops, x, y):
 
 @LNS32.register_op("mul")
 def lns32_mul(ops, x, y):
+    zero = ZERO.to(device=x.device)
+    prod_unsigned = _checked_add(x, y - (y & 1), x & 1)
+    prod = torch.where(prod_unsigned == zero, zero, prod_unsigned ^ (y & 1))
+
     return torch.where(
-        x == ZERO,
-        ZERO, torch.where(
-            y == ZERO,
-            ZERO, (x + y - (y & 1)) ^ (y & 1)))
+        x == zero,
+        zero, torch.where(
+            y == zero,
+            zero, prod))
 
 @LNS32.register_op("div")
 def lns32_div(ops, x, y):
+    zero = ZERO.to(device=x.device)
+    pos_inf = POS_INF.to(device=x.device)
+    neg_inf = NEG_INF.to(device=x.device)
+    safe_y = torch.where(y == zero, torch.zeros((), dtype=torch.int32, device=y.device), y)
+    quotient_unsigned = _checked_add(x, -safe_y + (safe_y & 1), x & 1)
+    quotient = torch.where(quotient_unsigned == zero, zero, quotient_unsigned ^ (safe_y & 1))
+    div_by_zero = torch.where((x & 1) == 0, pos_inf, neg_inf)
+
     return torch.where(
-        x == ZERO,
-        ZERO, torch.where(
-            y == ZERO,
-            torch.where(
-                ops.gt(x, ZERO), POS_INF, NEG_INF),
-                (x - y + (y & 1)) ^ (y & 1)))
+        x == zero,
+        zero, torch.where(
+            y == zero,
+            div_by_zero,
+            quotient))
+
+@LNS32.register_op("sqrt")
+def lns32_sqrt(ops, x):
+    zero = ZERO.to(device=x.device)
+    pos_inf = POS_INF.to(device=x.device)
+
+    result = ((x & (-2)) // 2) & (-2)
+    return torch.where(
+        x == zero,
+        zero, torch.where(
+            x == pos_inf,
+            pos_inf,
+            result
+        )
+    )
 
 @LNS32.register_op("pow")
 def lns32_pow(ops, x, y):
