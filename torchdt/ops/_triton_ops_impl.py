@@ -1701,19 +1701,17 @@ def register_triton_ops(
 
 
     @triton.jit
-    def batch_norm2d_partials_kernel(
-        X_ptr, partial_sum_ptr, partial_sum_sq_ptr,
+    def batch_norm2d_sum_kernel(
+        X_ptr, partial_sum_ptr,
         HW, W, count,
         s_x_n, s_x_c, s_x_h, s_x_w,
         ps_s0, ps_s1,
-        pq_s0, pq_s1,
         BLOCK: tl.constexpr,
     ):
         pid0 = tl.program_id(0)
         pid1 = tl.program_id(1)
 
         lane = tl.arange(0, BLOCK)
-
         idx = pid1 * BLOCK + lane
         mask = idx < count
 
@@ -1724,70 +1722,136 @@ def register_triton_ops(
 
         x_ptrs = X_ptr + n * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
         x = tl.load(x_ptrs, mask=mask, other=_ZERO)
+        x = tl.where(mask, x, tl.cast(_ZERO, tl_int_dtype))
 
         block_sum = tl.reduce(x, axis=0, combine_fn=add)
-        block_sum_sq = tl.reduce(mul(x, x), axis=0, combine_fn=add)
 
         tl.store(partial_sum_ptr + pid0 * ps_s0 + pid1 * ps_s1, block_sum)
-        tl.store(partial_sum_sq_ptr + pid0 * pq_s0 + pid1 * pq_s1, block_sum_sq)
 
     @triton.jit
-    def batch_norm2d_finalize_kernel(
-        partial_sum_ptr, partial_sum_sq_ptr,
-        rm_ptr, rv_ptr,
-        sm_ptr, sis_ptr,
-        eps, momentum,
-        count, count_dt,
+    def batch_norm2d_mean_finalize_kernel(
+        partial_sum_ptr,
+        rm_ptr, sm_ptr,
+        momentum, count_dt,
         ntiles,
         ps_s0, ps_s1,
-        pq_s0, pq_s1,
         BLOCK_T: tl.constexpr,
-        TRAINING: tl.constexpr,
     ):
         pid = tl.program_id(0)
         lane = tl.arange(0, BLOCK_T)
 
-        count_dt = tl.cast(count_dt, tl_int_dtype)
-        eps = tl.cast(eps, tl_int_dtype)
         momentum = tl.cast(momentum, tl_int_dtype)
+        count_dt = tl.cast(count_dt, tl_int_dtype)
 
         acc_sum = tl.cast(_ZERO, tl_int_dtype)
-        acc_sum_sq = tl.cast(_ZERO, tl_int_dtype)
 
         for t0 in range(0, ntiles, BLOCK_T):
             t = t0 + lane
             mask = t < ntiles
 
             s = tl.load(partial_sum_ptr + pid * ps_s0 + t * ps_s1, mask=mask, other=_ZERO)
-            q = tl.load(partial_sum_sq_ptr + pid * pq_s0 + t * pq_s1, mask=mask, other=_ZERO)
-
             acc_sum = add(acc_sum, tl.reduce(s, axis=0, combine_fn=add))
-            acc_sum_sq = add(acc_sum_sq, tl.reduce(q, axis=0, combine_fn=add))
 
         mean = div(acc_sum, count_dt)
-        var = sub(div(acc_sum_sq, count_dt), mul(mean, mean))
+
+        rm = tl.load(rm_ptr + pid)
+        one_minus_m = sub(tl.cast(_ONE, tl_int_dtype), momentum)
+        new_rm = add(mul(one_minus_m, rm), mul(momentum, mean))
+
+        tl.store(rm_ptr + pid, new_rm)
+        tl.store(sm_ptr + pid, mean)
+
+    @triton.jit
+    def batch_norm2d_centered_var_kernel(
+        X_ptr, sm_ptr, partial_var_ptr,
+        HW, W, count,
+        s_x_n, s_x_c, s_x_h, s_x_w,
+        pv_s0, pv_s1,
+        BLOCK: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        pid1 = tl.program_id(1)
+
+        lane = tl.arange(0, BLOCK)
+        idx = pid1 * BLOCK + lane
+        mask = idx < count
+
+        n = idx // HW
+        rem = idx - n * HW
+        h = rem // W
+        w = rem - h * W
+
+        mean = tl.load(sm_ptr + pid0)
+
+        x_ptrs = X_ptr + n * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
+        x = tl.load(x_ptrs, mask=mask, other=_ZERO)
+
+        centered = sub(x, mean)
+        sq = mul(centered, centered)
+
+        sq = tl.where(mask, sq, tl.cast(_ZERO, tl_int_dtype))
+        block_var_sum = tl.reduce(sq, axis=0, combine_fn=add)
+
+        tl.store(partial_var_ptr + pid0 * pv_s0 + pid1 * pv_s1, block_var_sum)
+
+    @triton.jit
+    def batch_norm2d_var_finalize_kernel(
+        partial_var_ptr,
+        rv_ptr,
+        sis_ptr,
+        eps, momentum,
+        count, count_dt,
+        ntiles,
+        pv_s0, pv_s1,
+        BLOCK_T: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        lane = tl.arange(0, BLOCK_T)
+
+        eps = tl.cast(eps, tl_int_dtype)
+        momentum = tl.cast(momentum, tl_int_dtype)
+        count_dt = tl.cast(count_dt, tl_int_dtype)
+
+        acc_var_sum = tl.cast(_ZERO, tl_int_dtype)
+
+        for t0 in range(0, ntiles, BLOCK_T):
+            t = t0 + lane
+            mask = t < ntiles
+
+            v = tl.load(partial_var_ptr + pid * pv_s0 + t * pv_s1, mask=mask, other=_ZERO)
+            acc_var_sum = add(acc_var_sum, tl.reduce(v, axis=0, combine_fn=add))
+
+        var = div(acc_var_sum, count_dt)
         var = tl.where(lt(var, tl.cast(_ZERO, tl_int_dtype)), tl.cast(_ZERO, tl_int_dtype), var)
 
-        if TRAINING:
-            if count > 1:
-                sample_var = mul(var, div(count_dt, sub(count_dt, tl.cast(_ONE, tl_int_dtype))))
-            else:
-                sample_var = tl.cast(_ZERO, tl_int_dtype)
-
-            rm = tl.load(rm_ptr + pid)
-            rv = tl.load(rv_ptr + pid)
-
-            one_minus_m = sub(tl.cast(_ONE, tl_int_dtype), momentum)
-            new_rm = add(mul(one_minus_m, rm), mul(momentum, mean))
-            new_rv = add(mul(one_minus_m, rv), mul(momentum, sample_var))
-
-            tl.store(rm_ptr + pid, new_rm)
-            tl.store(rv_ptr + pid, new_rv)
-
+        if count > 1:
+            sample_var = mul(var, div(count_dt, sub(count_dt, tl.cast(_ONE, tl_int_dtype))))
         else:
-            mean = tl.load(rm_ptr + pid)
-            var = tl.load(rv_ptr + pid)
-            var = tl.where(lt(var, tl.cast(_ZERO, tl_int_dtype)), tl.cast(_ZERO, tl_int_dtype), var)
+            sample_var = tl.cast(_ZERO, tl_int_dtype)
+
+        rv = tl.load(rv_ptr + pid)
+
+        one_minus_m = sub(tl.cast(_ONE, tl_int_dtype), momentum)
+        new_rv = add(mul(one_minus_m, rv), mul(momentum, sample_var))
+
+        tl.store(rv_ptr + pid, new_rv)
+
+        invstd = div(tl.cast(_ONE, tl_int_dtype), sqrt(add(var, eps)))
+        tl.store(sis_ptr + pid, invstd)
+
+    @triton.jit
+    def batch_norm2d_eval_stats_kernel(
+        rm_ptr, rv_ptr,
+        sm_ptr, sis_ptr,
+        eps,
+    ):
+        pid = tl.program_id(0)
+
+        eps = tl.cast(eps, tl_int_dtype)
+
+        mean = tl.load(rm_ptr + pid)
+        var = tl.load(rv_ptr + pid)
+        var = tl.where(lt(var, tl.cast(_ZERO, tl_int_dtype)), tl.cast(_ZERO, tl_int_dtype), var)
 
         invstd = div(tl.cast(_ONE, tl_int_dtype), sqrt(add(var, eps)))
         tl.store(sm_ptr + pid, mean)
@@ -1806,7 +1870,10 @@ def register_triton_ops(
     ):
         pid0 = tl.program_id(0)
         pid1 = tl.program_id(1)
+
         lane = tl.arange(0, BLOCK)
+        idx = pid1 * BLOCK + lane
+        mask = idx < count
 
         mean = tl.load(sm_ptr + pid0)
         invstd = tl.load(sis_ptr + pid0)
@@ -1820,9 +1887,6 @@ def register_triton_ops(
             bias = tl.load(b_ptr + pid0)
         else:
             bias = tl.cast(_ZERO, tl_int_dtype)
-
-        idx = pid1 * BLOCK + lane
-        mask = idx < count
 
         n = idx // HW
         rem = idx - n * HW
@@ -1840,11 +1904,11 @@ def register_triton_ops(
 
     @dtype_cls.register_op("batch_norm")
     def dt_batch_norm(ops, x, running_mean, running_var, momentum, eps, weight=None, bias=None, training=False):
-        BLOCK=128
-        BLOCK_T=128
-        num_warps_partials=4
-        num_warps_apply=4
-        num_warps_finalize=1
+        BLOCK = 128
+        BLOCK_T = 128
+        num_warps_partials = 4
+        num_warps_apply = 4
+        num_warps_finalize = 1
 
         N, C, H, W = x.shape
         HW = H * W
@@ -1854,53 +1918,81 @@ def register_triton_ops(
         has_weight = weight is not None
         has_bias = bias is not None
 
-        count_dt = dtype_cls(count, device=x.device)._int.item()
-
         if not has_weight:
-            weight = torch.empty(0, device=x.device)
+            weight = torch.empty(0, device=x.device, dtype=dtype_cls.int_dtype)
         if not has_bias:
-            bias = torch.empty(0, device=x.device)
+            bias = torch.empty(0, device=x.device, dtype=dtype_cls.int_dtype)
+
+        count_dt = dtype_cls(count, device=x.device)._int.item()
+        eps_dt = dtype_cls(eps, device=x.device)._int.item()
+        momentum_dt = dtype_cls(momentum, device=x.device)._int.item()
 
         output = torch.empty((N, C, H, W), device=x.device, dtype=dtype_cls.int_dtype)
         save_mean = torch.empty((C,), device=x.device, dtype=dtype_cls.int_dtype)
         save_invstd = torch.empty((C,), device=x.device, dtype=dtype_cls.int_dtype)
 
-        partial_sum = torch.empty((C, ntiles), device=x.device, dtype=dtype_cls.int_dtype)
-        partial_sum_sq = torch.empty((C, ntiles), device=x.device, dtype=dtype_cls.int_dtype)
-
         s_x_n, s_x_c, s_x_h, s_x_w = x.stride()
         s_y_n, s_y_c, s_y_h, s_y_w = output.stride()
-        ps_s0, ps_s1 = partial_sum.stride()
-        pq_s0, pq_s1 = partial_sum_sq.stride()
 
-        grid_partials = (C, ntiles)
-        batch_norm2d_partials_kernel[grid_partials](
-            x, partial_sum, partial_sum_sq,
-            HW, W, count,
-            s_x_n, s_x_c, s_x_h, s_x_w,
-            ps_s0, ps_s1,
-            pq_s0, pq_s1,
-            BLOCK=BLOCK,
-            num_warps=num_warps_partials,
-        )
+        if training:
+            partial_sum = torch.empty((C, ntiles), device=x.device, dtype=dtype_cls.int_dtype)
+            partial_var = torch.empty((C, ntiles), device=x.device, dtype=dtype_cls.int_dtype)
 
-        grid_finalize = (C,)
-        batch_norm2d_finalize_kernel[grid_finalize](
-            partial_sum, partial_sum_sq,
-            running_mean, running_var,
-            save_mean, save_invstd,
-            eps, momentum,
-            count, count_dt,
-            ntiles,
-            ps_s0, ps_s1,
-            pq_s0, pq_s1,
-            BLOCK_T=BLOCK_T,
-            TRAINING=training,
-            num_warps=num_warps_finalize,
-        )
+            ps_s0, ps_s1 = partial_sum.stride()
+            pv_s0, pv_s1 = partial_var.stride()
 
-        grid_apply = (C, ntiles)
-        batch_norm2d_apply_kernel[grid_apply](
+            batch_norm2d_sum_kernel[(C, ntiles)](
+                x, partial_sum,
+                HW, W, count,
+                s_x_n, s_x_c, s_x_h, s_x_w,
+                ps_s0, ps_s1,
+                BLOCK=BLOCK,
+                num_warps=num_warps_partials,
+            )
+
+            batch_norm2d_mean_finalize_kernel[(C,)](
+                partial_sum,
+                running_mean,
+                save_mean,
+                momentum_dt,
+                count_dt,
+                ntiles,
+                ps_s0, ps_s1,
+                BLOCK_T=BLOCK_T,
+                num_warps=num_warps_finalize,
+            )
+
+            batch_norm2d_centered_var_kernel[(C, ntiles)](
+                x, save_mean, partial_var,
+                HW, W, count,
+                s_x_n, s_x_c, s_x_h, s_x_w,
+                pv_s0, pv_s1,
+                BLOCK=BLOCK,
+                num_warps=num_warps_partials,
+            )
+
+            batch_norm2d_var_finalize_kernel[(C,)](
+                partial_var,
+                running_var,
+                save_invstd,
+                eps_dt, momentum_dt,
+                count, count_dt,
+                ntiles,
+                pv_s0, pv_s1,
+                BLOCK_T=BLOCK_T,
+                num_warps=num_warps_finalize,
+            )
+        else:
+            batch_norm2d_eval_stats_kernel[(C,)](
+                running_mean,
+                running_var,
+                save_mean,
+                save_invstd,
+                eps_dt,
+                num_warps=num_warps_finalize,
+            )
+
+        batch_norm2d_apply_kernel[(C, ntiles)](
             x, output,
             weight, bias,
             save_mean, save_invstd,
@@ -1938,16 +2030,23 @@ def register_triton_ops(
 
         h = hw // W
         w = hw - h * W
-        x_ptrs  = X_ptr + pid1 * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
+        x_ptrs = X_ptr + pid1 * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
         dy_ptrs = dY_ptr + pid1 * s_dy_n + pid0 * s_dy_c + h * s_dy_h + w * s_dy_w
 
         x = tl.load(x_ptrs, mask=mask, other=_ZERO)
         dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
 
+        x = tl.where(mask, x, tl.cast(_ZERO, tl_int_dtype))
+        dy = tl.where(mask, dy, tl.cast(_ZERO, tl_int_dtype))
+
         xhat = mul(sub(x, mean), invstd)
+        xhat = tl.where(mask, xhat, tl.cast(_ZERO, tl_int_dtype))
+
+        dy_xhat = mul(dy, xhat)
+        dy_xhat = tl.where(mask, dy_xhat, tl.cast(_ZERO, tl_int_dtype))
 
         partial_dy = tl.reduce(dy, axis=0, combine_fn=add)
-        partial_dy_xhat = tl.reduce(mul(dy, xhat), axis=0, combine_fn=add)
+        partial_dy_xhat = tl.reduce(dy_xhat, axis=0, combine_fn=add)
 
         num_hw_blks = tl.cdiv(HW, BLOCK)
         tile_id = pid1 * num_hw_blks + pid2
@@ -2022,7 +2121,8 @@ def register_triton_ops(
 
         h = hw // W
         w = hw - h * W
-        x_ptrs  = X_ptr + pid1 * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
+
+        x_ptrs = X_ptr + pid1 * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
         dy_ptrs = dY_ptr + pid1 * s_dy_n + pid0 * s_dy_c + h * s_dy_h + w * s_dy_w
         dx_ptrs = dX_ptr + pid1 * s_dx_n + pid0 * s_dx_c + h * s_dx_h + w * s_dx_w
 
@@ -2065,23 +2165,25 @@ def register_triton_ops(
 
         h = hw // W
         w = hw - h * W
+
         dy_ptrs = dY_ptr + pid1 * s_dy_n + pid0 * s_dy_c + h * s_dy_h + w * s_dy_w
         dx_ptrs = dX_ptr + pid1 * s_dx_n + pid0 * s_dx_c + h * s_dx_h + w * s_dx_w
 
         dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
         dx = mul(w_over_std, dy)
+
         tl.store(dx_ptrs, dx, mask=mask)
 
     def batch_norm2d_backward(
         input, grad_output,
         save_mean, save_invstd,
         weight=None, bias=None,
-        training=False, eps=1e-5,
+        training=False,
     ):
-        BLOCK=256
-        BLOCK_R=128
-        num_warps=4
-        num_stages=2
+        BLOCK = 256
+        BLOCK_R = 128
+        num_warps = 4
+        num_stages = 2
 
         N, C, H, W = input.shape
         HW = H * W
@@ -2109,7 +2211,7 @@ def register_triton_ops(
         else:
             grad_bias = torch.empty(0, device=input.device, dtype=dtype_cls.int_dtype)
 
-        s_x_n, s_x_c, s_x_h, s_x_w  = input.stride()
+        s_x_n, s_x_c, s_x_h, s_x_w = input.stride()
         s_dy_n, s_dy_c, s_dy_h, s_dy_w = grad_output.stride()
         s_dx_n, s_dx_c, s_dx_h, s_dx_w = grad_input.stride()
 
@@ -2117,11 +2219,11 @@ def register_triton_ops(
         K = N * num_hw_blks
 
         if training or has_weight or has_bias:
-            partial_dy = torch.empty((C, K), device=input.device, dtype=input.dtype)
-            partial_dy_xhat = torch.empty((C, K), device=input.device, dtype=input.dtype)
+            partial_dy = torch.empty((C, K), device=input.device, dtype=dtype_cls.int_dtype)
+            partial_dy_xhat = torch.empty((C, K), device=input.device, dtype=dtype_cls.int_dtype)
 
-            mean_dy = torch.empty((C,), device=input.device, dtype=input.dtype)
-            mean_dy_xhat = torch.empty((C,), device=input.device, dtype=input.dtype)
+            mean_dy = torch.empty((C,), device=input.device, dtype=dtype_cls.int_dtype)
+            mean_dy_xhat = torch.empty((C,), device=input.device, dtype=dtype_cls.int_dtype)
 
             grid_partials = (C, N, num_hw_blks)
             batch_norm2d_backward_partials_kernel[grid_partials](
@@ -2153,6 +2255,7 @@ def register_triton_ops(
             mean_dy_xhat = None
 
         grid_dx = (C, N, num_hw_blks)
+
         if training:
             batch_norm2d_backward_dx_kernel[grid_dx](
                 input, grad_output, grad_input,
@@ -2197,49 +2300,23 @@ def register_triton_ops(
                 weight, bias,
                 training
             )
-            # rm_fp = ops.to_float(running_mean)
-            # rv_fp = ops.to_float(running_var)
-
-            # x = ops.to_float(x)
-            # if weight is not None:
-            #     weight = ops.to_float(weight)
-            # if bias is not None:
-            #     bias = ops.to_float(bias)
-
-            # output, save_mean, save_invstd = torch.ops.aten.native_batch_norm(
-            #     x, weight, bias,
-            #     rm_fp, rv_fp,
-            #     training,
-            #     momentum, eps
-            # )
-            # running_mean.data.copy_(ops.from_float(rm_fp))
-            # running_var.data.copy_(ops.from_float(rv_fp))
 
             ctx.save_for_backward(x, weight, bias, save_mean, save_invstd)
             ctx.training = training
-            ctx.eps = eps
 
             return output
 
         @staticmethod
         def backward(ctx, ops, grad_output):
             training = ctx.training
-            eps = ctx.eps
             x, weight, bias, save_mean, save_invstd = ctx.saved_tensors
 
             grad_input, grad_weight, grad_bias = batch_norm2d_backward(
                 x, grad_output,
                 save_mean, save_invstd,
                 weight, bias,
-                training, eps
+                training
             )
-
-            # grad_input, grad_weight, grad_bias = torch.ops.aten.native_batch_norm_backward(
-            #     ops.to_float(grad_output), x, weight,
-            #     ops.to_float(running_mean), ops.to_float(running_var),
-            #     save_mean, save_invstd,
-            #     training, eps,
-            #     (True, True, True))
 
             return grad_input, None, None, grad_weight, grad_bias, None, None, None
 
@@ -2247,9 +2324,6 @@ def register_triton_ops(
                              cast=("input", "running_mean", "running_var", "weight", "bias"))
     def dt_batch_norm(input, running_mean, running_var, weight=None, bias=None, training=False, momentum=0.1, eps=1e-5):
         assert input.dim() == 4, "torchdt only supports 2D batch norm for now"
-        # explicitly cast momentum and eps so that we can choose device
-        momentum = dtype_cls(momentum, device=input.device)._int.item()
-        eps = dtype_cls(eps, device=input.device)._int.item()
         return DTBatchNormFunction.apply(input, running_mean, running_var, weight, bias, training, momentum, eps)
 
 
