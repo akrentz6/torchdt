@@ -1,13 +1,38 @@
 import hashlib
 
 import torch
-from torchdt.ops import TritonScalarOps, register_triton_ops, require_triton
+from torchdt.ops import TritonAccumulatorOps, TritonScalarOps, register_triton_ops, require_triton
 
 
 def _bump_triton_jit_hash(fn, **values):
     items = tuple(sorted((key, repr(getattr(value, "value", value))) for key, value in values.items()))
     fn.hash = hashlib.sha256(repr(items).encode()).hexdigest()
     return fn
+
+
+def _lns_triton_bit_config(bitwidth: int, tl):
+    if bitwidth == 16:
+        return (
+            tl.int16,
+            tl.constexpr("=h, l"),
+            tl.constexpr("ld.global.b16 $0, [$1];"),
+            tl.constexpr(2),
+        )
+    if bitwidth == 32:
+        return (
+            tl.int32,
+            tl.constexpr("=r, l"),
+            tl.constexpr("ld.global.b32 $0, [$1];"),
+            tl.constexpr(4),
+        )
+    if bitwidth == 64:
+        return (
+            tl.int64,
+            tl.constexpr("=l, l"),
+            tl.constexpr("ld.global.b64 $0, [$1];"),
+            tl.constexpr(8),
+        )
+    raise ValueError(f"LNS Triton backend does not support bitwidth {bitwidth}.")
 
 
 def enable_lns_triton_backend(
@@ -19,8 +44,9 @@ def enable_lns_triton_backend(
     neg_inf_value: int,
     tab_sbdb=None,
     tab_ez=None,
+    accumulator_ops: TritonAccumulatorOps = None,
 ) -> None:
-    backend = make_lns_triton_scalar_ops(
+    scalar_ops = make_lns_triton_scalar_ops(
         bitwidth=dtype_cls.bitwidth,
         base=base,
         zero_value=zero_value,
@@ -29,7 +55,7 @@ def enable_lns_triton_backend(
         tab_sbdb=tab_sbdb,
         tab_ez=tab_ez,
     )
-    register_triton_ops(dtype_cls, backend)
+    register_triton_ops(dtype_cls, scalar_ops, accumulator_ops)
 
 
 def make_lns_triton_scalar_ops(
@@ -44,23 +70,7 @@ def make_lns_triton_scalar_ops(
 ) -> TritonScalarOps:
     triton, tl = require_triton()
 
-    if bitwidth == 16:
-        tl_int_dtype = tl.int16
-        asm_output_constraint = tl.constexpr("=h, l")
-        asm_load = tl.constexpr("ld.global.b16 $0, [$1];")
-        bytes_per_value = tl.constexpr(2)
-    elif bitwidth == 32:
-        tl_int_dtype = tl.int32
-        asm_output_constraint = tl.constexpr("=r, l")
-        asm_load = tl.constexpr("ld.global.b32 $0, [$1];")
-        bytes_per_value = tl.constexpr(4)
-    elif bitwidth == 64:
-        tl_int_dtype = tl.int64
-        asm_output_constraint = tl.constexpr("=l, l")
-        asm_load = tl.constexpr("ld.global.b64 $0, [$1];")
-        bytes_per_value = tl.constexpr(8)
-    else:
-        raise ValueError(f"LNS Triton backend does not support bitwidth {bitwidth}.")
+    tl_int_dtype, asm_output_constraint, asm_load, bytes_per_value = _lns_triton_bit_config(bitwidth, tl)
 
     LOG_BASE = tl.constexpr(torch.log(base).item())
     ZERO = tl.constexpr(zero_value)

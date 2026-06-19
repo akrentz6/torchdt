@@ -2,6 +2,7 @@ from .base import OpsBase, register_op, register_base_op
 from .cpp_ops import register_cpp_ops
 from .triton_ops import (
     HAS_TRITON,
+    TritonAccumulatorOps,
     TritonScalarOps,
     is_triton_available,
     register_triton_ops,
@@ -23,6 +24,7 @@ __all__ = [
     "register_base_op",
     "register_cpp_ops",
     "register_triton_ops",
+    "TritonAccumulatorOps",
     "TritonScalarOps",
     "is_triton_available",
     "require_triton",

@@ -3,6 +3,8 @@ from torch.nn import _reduction as _Reduction
 from torchdt.autograd import DTFunction
 import math
 
+from .triton_ops import TritonAccumulatorOps, TritonScalarOps
+
 try:
     import triton
     import triton.language as tl
@@ -12,29 +14,35 @@ except ImportError:
 
 def register_triton_ops(
     dtype_cls: type,
-    from_float=None,
-    to_float=None,
-    add=None,
-    sub=None,
-    mul=None,
-    div=None,
-    sqrt=None,
-    gt=None,
-    ge=None,
-    lt=None,
-    le=None,
-    neg=None,
-    exp=None,
-    log=None,
-    clamp=None,
-    sign=None,
+    scalar_ops: TritonScalarOps,
+    accumulator_ops: TritonAccumulatorOps = None,
 ) -> None:
     if not HAS_TRITON:
         raise ImportError("Triton is not installed. Please install Triton to use Triton backend.")
+    if not isinstance(scalar_ops, TritonScalarOps):
+        raise TypeError("scalar_ops must be a TritonScalarOps instance.")
+    if accumulator_ops is not None and not isinstance(accumulator_ops, TritonAccumulatorOps):
+        raise TypeError("accumulator_ops must be a TritonAccumulatorOps instance.")
+
+    from_float = scalar_ops.from_float
+    to_float = scalar_ops.to_float
+    add = scalar_ops.add
+    sub = scalar_ops.sub
+    mul = scalar_ops.mul
+    div = scalar_ops.div
+    sqrt = scalar_ops.sqrt
+    gt = scalar_ops.gt
+    ge = scalar_ops.ge
+    lt = scalar_ops.lt
+    le = scalar_ops.le
+    neg = scalar_ops.neg
+    exp = scalar_ops.exp
+    log = scalar_ops.log
+    clamp = scalar_ops.clamp
+    sign = scalar_ops.sign
 
     cpu_from_float = dtype_cls.ops.from_float
     cpu_to_float = dtype_cls.ops.to_float
-    cpu_nll_loss = dtype_cls.ops.nll_loss
 
     def scalar_from_float_cpu(cls, x):
         if isinstance(x, torch.Tensor):
