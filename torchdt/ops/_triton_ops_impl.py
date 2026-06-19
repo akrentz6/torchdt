@@ -34,6 +34,7 @@ def register_triton_ops(
 
     cpu_from_float = dtype_cls.ops.from_float
     cpu_to_float = dtype_cls.ops.to_float
+    cpu_nll_loss = dtype_cls.ops.nll_loss
 
     def scalar_from_float_cpu(cls, x):
         if isinstance(x, torch.Tensor):
@@ -68,6 +69,8 @@ def register_triton_ops(
     _ZERO = tl.constexpr(dtype_cls.ops.scalar_from_float(0.0).item())
     _NEG_INF = tl.constexpr(dtype_cls.ops.scalar_from_float(float("-inf")).item())
     _ONE = tl.constexpr(dtype_cls.ops.scalar_from_float(1.0).item())
+
+    can_register_sign = sign is not None or (lt is not None and neg is not None)
 
     if exp is None:
         @triton.jit
@@ -111,212 +114,460 @@ def register_triton_ops(
             active = active & (~success)
 
     @triton.jit
-    def from_float_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    def elementwise_unary_offsets(linear_offsets, shape_ptr, x_stride_ptr, NDIM: tl.constexpr):
+        remaining = linear_offsets
+        x_offsets = tl.cast(linear_offsets * 0, tl.int64)
+
+        for rev_dim in tl.static_range(0, NDIM):
+            dim = NDIM - 1 - rev_dim
+            dim_size = tl.load(shape_ptr + dim)
+            dim_index = remaining % dim_size
+            remaining = remaining // dim_size
+
+            x_stride = tl.load(x_stride_ptr + dim)
+            x_offsets = x_offsets + dim_index * x_stride
+
+        return x_offsets
+
+    @triton.jit
+    def elementwise_binary_offsets(linear_offsets, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM: tl.constexpr):
+        remaining = linear_offsets
+        x_offsets = tl.cast(linear_offsets * 0, tl.int64)
+        y_offsets = tl.cast(linear_offsets * 0, tl.int64)
+
+        for rev_dim in tl.static_range(0, NDIM):
+            dim = NDIM - 1 - rev_dim
+            dim_size = tl.load(shape_ptr + dim)
+            dim_index = remaining % dim_size
+            remaining = remaining // dim_size
+
+            x_stride = tl.load(x_stride_ptr + dim)
+            y_stride = tl.load(y_stride_ptr + dim)
+            x_offsets = x_offsets + dim_index * x_stride
+            y_offsets = y_offsets + dim_index * y_stride
+
+        return x_offsets, y_offsets
+
+    def _metadata_tensor(values, device):
+        if len(values) == 0:
+            values = (0,)
+        return torch.tensor(values, dtype=torch.int64, device=device)
+
+    def _prepare_unary(x, out_dtype):
+        out = torch.empty(x.shape, dtype=out_dtype, device=x.device)
+        if out.numel() == 0:
+            return out, None, None, 0
+
+        shape_meta = _metadata_tensor(tuple(x.shape), x.device)
+        stride_meta = _metadata_tensor(tuple(x.stride()), x.device)
+        return out, shape_meta, stride_meta, out.ndim
+
+    @triton.jit
+    def from_float_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask)
+        x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+        x = tl.load(x_ptr + x_offsets, mask=mask, other=0.0)
 
         out = from_float(x)
         tl.store(out_ptr + offs, out, mask=mask)
 
     @dtype_cls.register_op("from_float")
     def dt_from_float(ops, x):
-        x = x.contiguous()
-        out = torch.empty(x.size(), dtype=dtype_cls.int_dtype, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        from_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
+        if x.device.type != "cuda":
+            return cpu_from_float(x)
+
+        out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+        if out.numel() == 0:
+            return out
+
+        grid = (triton.cdiv(out.numel(), 1024),)
+        from_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
         return out
 
     @triton.jit
-    def to_float_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
+    def to_float_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < N
 
-        x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+        x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+        x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
         out = to_float(x)
         tl.store(out_ptr + offs, out, mask=mask)
 
     @dtype_cls.register_op("to_float")
     def dt_to_float(ops, x):
-        x = x.contiguous()
-        out = torch.empty(x.size(), dtype=torch.float32, device=x.device)
-        grid = (triton.cdiv(x.numel(), 1024),)
-        to_float_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
+        if x.device.type != "cuda":
+            return cpu_to_float(x)
+
+        out = torch.empty(x.shape, dtype=torch.float32, device=x.device)
+        if out.numel() == 0:
+            return out
+
+        shape_meta = _metadata_tensor(tuple(x.shape), x.device)
+        stride_meta = _metadata_tensor(tuple(x.stride()), x.device)
+        grid = (triton.cdiv(out.numel(), 1024),)
+        to_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), out.ndim, BLOCK_SIZE=1024)
         return out
 
-    # @triton.jit
-    # def add_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+    def _normalize_binary_devices(x, y):
+        if x.device == y.device:
+            return x, y
 
-    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+        if x.dim() == 0 and x.device.type == "cpu":
+            return x.to(device=y.device), y
+        if y.dim() == 0 and y.device.type == "cpu":
+            return x, y.to(device=x.device)
 
-    #     out = add(x, y)
-    #     tl.store(out_ptr + offs, out, mask=mask)
+        raise RuntimeError(f"Expected tensors to be on the same device, got {x.device} and {y.device}.")
 
-    # @dtype_cls.register_op("add")
-    # def dt_add(ops, x, y):
-    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     add_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+    def _prepare_binary(x, y, out_dtype):
+        x, y = _normalize_binary_devices(x, y)
+        out_shape = torch.broadcast_shapes(x.shape, y.shape)
+        x = x.expand(out_shape)
+        y = y.expand(out_shape)
+        out = torch.empty(out_shape, dtype=out_dtype, device=x.device)
 
-    # @triton.jit
-    # def sub_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+        if out.numel() == 0:
+            return out, x, y, None, None, None, 0
 
-    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+        shape_meta = _metadata_tensor(tuple(out_shape), x.device)
+        x_stride_meta = _metadata_tensor(tuple(x.stride()), x.device)
+        y_stride_meta = _metadata_tensor(tuple(y.stride()), x.device)
 
-    #     out = sub(x, y)
-    #     tl.store(out_ptr + offs, out, mask=mask)
+        return out, x, y, shape_meta, x_stride_meta, y_stride_meta, out.ndim
 
-    # @dtype_cls.register_op("sub")
-    # def dt_sub(ops, x, y):
-    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     sub_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+    @triton.jit
+    def add_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < N
 
-    # @triton.jit
-    # def mul_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+        x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+        x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+        y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
-    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+        out = add(x, y)
+        tl.store(out_ptr + offs, out, mask=mask)
 
-    #     out = mul(x, y)
-    #     tl.store(out_ptr + offs, out, mask=mask)
+    @dtype_cls.register_op("add")
+    def dt_add(ops, x, y):
+        out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
+        if out.numel() == 0:
+            return out
 
-    # @dtype_cls.register_op("mul")
-    # def dt_mul(ops, x, y):
-    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     mul_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+        grid = (triton.cdiv(out.numel(), 1024),)
+        add_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+        return out
 
-    # @triton.jit
-    # def div_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+    if sub is not None:
+        @triton.jit
+        def sub_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
 
-    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+            y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
-    #     out = div(x, y)
-    #     tl.store(out_ptr + offs, out, mask=mask)
+            out = sub(x, y)
+            tl.store(out_ptr + offs, out, mask=mask)
 
-    # @dtype_cls.register_op("div")
-    # def dt_div(ops, x, y):
-    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     div_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+        @dtype_cls.register_op("sub")
+        def dt_sub(ops, x, y):
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
+            if out.numel() == 0:
+                return out
 
-    # @triton.jit
-    # def sqrt_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+            grid = (triton.cdiv(out.numel(), 1024),)
+            sub_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
 
-    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+    if mul is not None:
+        @triton.jit
+        def mul_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
 
-    #     out = sqrt(x)
-    #     tl.store(out_ptr + offs, out, mask=mask)
+            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+            y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
-    # @dtype_cls.register_op("sqrt")
-    # def dt_sqrt(ops, x):
-    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     sqrt_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+            out = mul(x, y)
+            tl.store(out_ptr + offs, out, mask=mask)
 
-    # @triton.jit
-    # def gt_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+        @dtype_cls.register_op("mul")
+        def dt_mul(ops, x, y):
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
+            if out.numel() == 0:
+                return out
 
-    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+            grid = (triton.cdiv(out.numel(), 1024),)
+            mul_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
 
-    #     out = gt(x, y)
-    #     tl.store(out_ptr + offs, out, mask=mask)
+    if div is not None:
+        @triton.jit
+        def div_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
 
-    # @dtype_cls.register_op("gt")
-    # def dt_gt(ops, x, y):
-    #     out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     gt_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+            y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
-    # @triton.jit
-    # def ge_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+            out = div(x, y)
+            tl.store(out_ptr + offs, out, mask=mask)
 
-    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+        @dtype_cls.register_op("div")
+        def dt_div(ops, x, y):
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
+            if out.numel() == 0:
+                return out
 
-    #     out = ge(x, y)
-    #     tl.store(out_ptr + offs, out, mask=mask)
+            grid = (triton.cdiv(out.numel(), 1024),)
+            div_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
 
-    # @dtype_cls.register_op("ge")
-    # def dt_ge(ops, x, y):
-    #     out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     ge_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+    if sqrt is not None:
+        @triton.jit
+        def sqrt_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
 
-    # @triton.jit
-    # def lt_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+            x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
-    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+            out = sqrt(x)
+            tl.store(out_ptr + offs, out, mask=mask)
 
-    #     out = lt(x, y)
-    #     tl.store(out_ptr + offs, out, mask=mask)
+        @dtype_cls.register_op("sqrt")
+        def dt_sqrt(ops, x):
+            out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+            if out.numel() == 0:
+                return out
 
-    # @dtype_cls.register_op("lt")
-    # def dt_lt(ops, x, y):
-    #     out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     lt_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+            grid = (triton.cdiv(out.numel(), 1024),)
+            sqrt_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
 
-    # @triton.jit
-    # def le_kernel(x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+    if neg is not None:
+        @triton.jit
+        def neg_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
 
-    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
-    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+            x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
-    #     out = le(x, y)
-    #     tl.store(out_ptr + offs, out, mask=mask)
+            out = neg(x)
+            tl.store(out_ptr + offs, out, mask=mask)
 
-    # @dtype_cls.register_op("le")
-    # def dt_le(ops, x, y):
-    #     out = torch.empty(x.shape, dtype=torch.bool, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     le_kernel[grid](x, y, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+        @dtype_cls.register_op("neg")
+        def dt_neg(ops, x):
+            out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+            if out.numel() == 0:
+                return out
+
+            grid = (triton.cdiv(out.numel(), 1024),)
+            neg_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
+
+    @triton.jit
+    def exp_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < N
+
+        x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+        x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+
+        out = exp(x)
+        tl.store(out_ptr + offs, out, mask=mask)
+
+    @dtype_cls.register_op("exp")
+    def dt_exp(ops, x):
+        out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+        if out.numel() == 0:
+            return out
+
+        grid = (triton.cdiv(out.numel(), 1024),)
+        exp_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+        return out
+
+    @triton.jit
+    def log_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < N
+
+        x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+        x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+
+        out = log(x)
+        tl.store(out_ptr + offs, out, mask=mask)
+
+    @dtype_cls.register_op("log")
+    def dt_log(ops, x):
+        out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+        if out.numel() == 0:
+            return out
+
+        grid = (triton.cdiv(out.numel(), 1024),)
+        log_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+        return out
+
+    if can_register_sign:
+        @triton.jit
+        def sign_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
+
+            x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+
+            out = sign(x)
+            tl.store(out_ptr + offs, out, mask=mask)
+
+        @dtype_cls.register_op("sign")
+        def dt_sign(ops, x):
+            out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+            if out.numel() == 0:
+                return out
+
+            grid = (triton.cdiv(out.numel(), 1024),)
+            sign_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
+
+    if lt is not None and neg is not None:
+        @triton.jit
+        def abs_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
+
+            x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+
+            zero = tl.cast(_ZERO, tl_int_dtype)
+            out = tl.where(lt(x, zero), neg(x), x)
+            tl.store(out_ptr + offs, out, mask=mask)
+
+        @dtype_cls.register_op("abs")
+        def dt_abs(ops, x):
+            out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+            if out.numel() == 0:
+                return out
+
+            grid = (triton.cdiv(out.numel(), 1024),)
+            abs_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
+
+    if gt is not None:
+        @triton.jit
+        def gt_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
+
+            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+            y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
+
+            out = gt(x, y)
+            tl.store(out_ptr + offs, out, mask=mask)
+
+        @dtype_cls.register_op("gt")
+        def dt_gt(ops, x, y):
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
+            if out.numel() == 0:
+                return out
+
+            grid = (triton.cdiv(out.numel(), 1024),)
+            gt_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
+
+    if ge is not None:
+        @triton.jit
+        def ge_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
+
+            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+            y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
+
+            out = ge(x, y)
+            tl.store(out_ptr + offs, out, mask=mask)
+
+        @dtype_cls.register_op("ge")
+        def dt_ge(ops, x, y):
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
+            if out.numel() == 0:
+                return out
+
+            grid = (triton.cdiv(out.numel(), 1024),)
+            ge_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
+
+    if lt is not None:
+        @triton.jit
+        def lt_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
+
+            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+            y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
+
+            out = lt(x, y)
+            tl.store(out_ptr + offs, out, mask=mask)
+
+        @dtype_cls.register_op("lt")
+        def dt_lt(ops, x, y):
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
+            if out.numel() == 0:
+                return out
+
+            grid = (triton.cdiv(out.numel(), 1024),)
+            lt_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
+
+    if le is not None:
+        @triton.jit
+        def le_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
+
+            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
+            y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
+
+            out = le(x, y)
+            tl.store(out_ptr + offs, out, mask=mask)
+
+        @dtype_cls.register_op("le")
+        def dt_le(ops, x, y):
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
+            if out.numel() == 0:
+                return out
+
+            grid = (triton.cdiv(out.numel(), 1024),)
+            le_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            return out
 
 
     # @triton.jit
@@ -2423,147 +2674,324 @@ def register_triton_ops(
         return DTBatchNormFunction.apply(input, running_mean, running_var, weight, bias, training, momentum, eps)
 
 
-    # @triton.jit
-    # def nll_loss_kernel(x_ptr, t_ptr, w_ptr, out_ptr, N, has_weight: tl.constexpr, s_x_b, s_x_c, s_t_b, s_w, s_o_b):
-    #     pid = tl.program_id(0)
-    #     mask = pid < N
+    @triton.jit
+    def nll_target_offsets(linear_offsets, target_shape_ptr, x_nonclass_stride_ptr, t_stride_ptr, TARGET_NDIM: tl.constexpr):
+        remaining = linear_offsets
+        x_offsets = tl.cast(linear_offsets * 0, tl.int64)
+        t_offsets = tl.cast(linear_offsets * 0, tl.int64)
 
-    #     target_idx = tl.load(t_ptr + pid * s_t_b, mask=mask, other=0)
+        for rev_dim in tl.static_range(0, TARGET_NDIM):
+            dim = TARGET_NDIM - 1 - rev_dim
+            dim_size = tl.load(target_shape_ptr + dim)
+            dim_index = remaining % dim_size
+            remaining = remaining // dim_size
 
-    #     input_ptr = x_ptr + pid * s_x_b + target_idx * s_x_c
-    #     x_val = tl.load(input_ptr, mask=mask, other=_ZERO)
+            x_stride = tl.load(x_nonclass_stride_ptr + dim)
+            t_stride = tl.load(t_stride_ptr + dim)
+            x_offsets = x_offsets + dim_index * x_stride
+            t_offsets = t_offsets + dim_index * t_stride
 
-    #     if has_weight:
-    #         weight_ptr = w_ptr + target_idx * s_w
-    #         w_val = tl.load(weight_ptr, mask=mask, other=_ONE)
+        return x_offsets, t_offsets
 
-    #         loss = neg(mul(x_val, w_val))
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK": 128},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK": 256},  num_warps=2, num_stages=1),
+            triton.Config({"BLOCK": 512},  num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 1024}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 1024}, num_warps=8, num_stages=1),
+        ],
+        key=["total", "HAS_WEIGHT", "HAS_DENOM", "TARGET_NDIM"],
+    )
+    @triton.jit
+    def nll_loss_kernel(
+        x_ptr, t_ptr, w_ptr, loss_ptr, denom_ptr,
+        target_shape_ptr, x_nonclass_stride_ptr, t_stride_ptr,
+        total, x_class_stride, w_stride,
+        HAS_WEIGHT: tl.constexpr,
+        HAS_DENOM: tl.constexpr,
+        IGNORE_INDEX: tl.constexpr,
+        TARGET_NDIM: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < total
 
-    #     else:
-    #         loss = neg(x_val)
+        x_base_offsets, t_offsets = nll_target_offsets(
+            offs, target_shape_ptr, x_nonclass_stride_ptr, t_stride_ptr, TARGET_NDIM
+        )
+        target = tl.load(t_ptr + t_offsets, mask=mask, other=IGNORE_INDEX)
+        valid = mask & (target != IGNORE_INDEX)
+        safe_target = tl.where(valid, target, 0)
 
-    #     output_ptr = out_ptr + pid * s_o_b
-    #     tl.store(output_ptr, loss, mask=mask)
+        x_vals = tl.load(x_ptr + x_base_offsets + safe_target * x_class_stride, mask=valid, other=_ZERO)
 
-    # @dtype_cls.register_op("nll_loss")
-    # def dt_nll_loss(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
-    #     assert x.dim() == 2 and y.dim() == 1
-    #     N, C = x.shape
+        if HAS_WEIGHT:
+            weights = tl.load(w_ptr + safe_target * w_stride, mask=valid, other=_ZERO)
+            weighted = mul(x_vals, weights)
+            denom = weights
+        else:
+            weighted = x_vals
+            denom = tl.full((BLOCK,), _ONE, dtype=tl_int_dtype)
 
-    #     loss = torch.empty((N,), dtype=dtype_cls.int_dtype, device=x.device)
+        loss = tl.where(valid, neg(weighted), tl.cast(_ZERO, tl_int_dtype))
+        tl.store(loss_ptr + offs, loss, mask=mask)
 
-    #     has_weight = weight is not None
-    #     if not has_weight:
-    #         weight = torch.empty(0, device=x.device)
+        if HAS_DENOM:
+            denom = tl.where(valid, denom, tl.cast(_ZERO, tl_int_dtype))
+            tl.store(denom_ptr + offs, denom, mask=mask)
 
-    #     grid = (N,)
-    #     nll_loss_kernel[grid](
-    #         x, y, weight, loss,
-    #         N, has_weight,
-    #         x.stride(0), x.stride(1),
-    #         y.stride(0),
-    #         weight.stride(0),
-    #         loss.stride(0),
-    #     )
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK": 128},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK": 256},  num_warps=2, num_stages=1),
+            triton.Config({"BLOCK": 512},  num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 1024}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 1024}, num_warps=8, num_stages=1),
+        ],
+        key=["total", "HAS_WEIGHT", "TARGET_NDIM"],
+    )
+    @triton.jit
+    def nll_denominator_kernel(
+        t_ptr, w_ptr, denom_ptr,
+        target_shape_ptr, x_nonclass_stride_ptr, t_stride_ptr,
+        total, w_stride,
+        HAS_WEIGHT: tl.constexpr,
+        IGNORE_INDEX: tl.constexpr,
+        TARGET_NDIM: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < total
 
-    #     if reduction == 'none':
-    #         return loss
+        _, t_offsets = nll_target_offsets(
+            offs, target_shape_ptr, x_nonclass_stride_ptr, t_stride_ptr, TARGET_NDIM
+        )
+        target = tl.load(t_ptr + t_offsets, mask=mask, other=IGNORE_INDEX)
+        valid = mask & (target != IGNORE_INDEX)
+        safe_target = tl.where(valid, target, 0)
 
-    #     elif reduction == 'sum':
-    #         return ops.sum(loss)
+        if HAS_WEIGHT:
+            denom = tl.load(w_ptr + safe_target * w_stride, mask=valid, other=_ZERO)
+        else:
+            denom = tl.full((BLOCK,), _ONE, dtype=tl_int_dtype)
 
-    #     elif reduction == 'mean':
-    #         loss_sum = ops.sum(loss)
+        denom = tl.where(valid, denom, tl.cast(_ZERO, tl_int_dtype))
+        tl.store(denom_ptr + offs, denom, mask=mask)
 
-    #         if has_weight:
-    #             weight_sum = ops.sum(weight.gather(0, y))
-    #             return ops.div(loss_sum, weight_sum)
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK": 128},  num_warps=1, num_stages=1),
+            triton.Config({"BLOCK": 256},  num_warps=2, num_stages=1),
+            triton.Config({"BLOCK": 512},  num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 1024}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK": 1024}, num_warps=8, num_stages=1),
+        ],
+        key=["total", "HAS_WEIGHT", "REDUCTION_NONE", "REDUCTION_MEAN", "TARGET_NDIM"],
+    )
+    @triton.jit
+    def nll_loss_backward_kernel(
+        dy_ptr, t_ptr, w_ptr, dx_ptr, denom_ptr,
+        target_shape_ptr, dx_nonclass_stride_ptr, t_stride_ptr, dy_stride_ptr,
+        total, dx_class_stride, w_stride,
+        HAS_WEIGHT: tl.constexpr,
+        REDUCTION_NONE: tl.constexpr,
+        REDUCTION_MEAN: tl.constexpr,
+        IGNORE_INDEX: tl.constexpr,
+        TARGET_NDIM: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < total
 
-    #         else:
-    #             batch_size = ops.from_float(torch.tensor(y.size(0), dtype=torch.float32, device=x.device))
-    #             return ops.div(loss_sum, batch_size)
+        dx_base_offsets, t_offsets = nll_target_offsets(
+            offs, target_shape_ptr, dx_nonclass_stride_ptr, t_stride_ptr, TARGET_NDIM
+        )
+        target = tl.load(t_ptr + t_offsets, mask=mask, other=IGNORE_INDEX)
+        valid = mask & (target != IGNORE_INDEX)
+        safe_target = tl.where(valid, target, 0)
 
-    #     else:
-    #         raise ValueError(f"Invalid reduction: {reduction}")
+        if HAS_WEIGHT:
+            weights = tl.load(w_ptr + safe_target * w_stride, mask=valid, other=_ZERO)
+        else:
+            weights = tl.full((BLOCK,), _ONE, dtype=tl_int_dtype)
 
-    # @triton.jit
-    # def nll_loss_backward_kernel(dy_ptr, t_ptr, w_ptr, dx_ptr, N, has_weight: tl.constexpr, s_dy_b, s_t_b, s_w, s_dx_b, s_dx_c, denom):
-    #     pid = tl.program_id(0)
-    #     mask = pid < N
+        coeff = neg(weights)
 
-    #     dy = tl.load(dy_ptr + pid * s_dy_b, mask=mask, other=_ZERO)
-    #     target_idx = tl.load(t_ptr + pid * s_t_b, mask=mask, other=0)
+        if REDUCTION_MEAN:
+            denom = tl.load(denom_ptr)
+            coeff = div(coeff, denom)
 
-    #     if has_weight:
-    #         w = tl.load(w_ptr + target_idx * s_w, mask=mask, other=_ONE)
-    #         coeff = neg(div(mul(dy, w), denom))
+        if REDUCTION_NONE:
+            _, dy_offsets = nll_target_offsets(
+                offs, target_shape_ptr, dx_nonclass_stride_ptr, dy_stride_ptr, TARGET_NDIM
+            )
+            upstream = tl.load(dy_ptr + dy_offsets, mask=valid, other=_ZERO)
+        else:
+            upstream = tl.load(dy_ptr)
 
-    #     else:
-    #         coeff = neg(div(dy, denom))
+        coeff = mul(coeff, upstream)
+        tl.store(dx_ptr + dx_base_offsets + safe_target * dx_class_stride, coeff, mask=valid)
 
-    #     out_ptr = dx_ptr + pid * s_dx_b + target_idx * s_dx_c
-    #     tl.store(out_ptr, coeff, mask=mask)
+    def _nll_target_shape_and_strides(x, target):
+        if x.dim() < 1:
+            raise ValueError("nll_loss input must have at least 1 dimension.")
 
-    # def nll_loss_backward(ops, grad_output, target, weight, input_shape, reduction):
-    #     N, C = input_shape
+        if x.dim() == 1:
+            target_shape = tuple(target.shape)
+            x_nonclass_strides = (0,) * target.dim()
+            x_class_stride = x.stride(0)
+        else:
+            expected_target_shape = (x.shape[0], *x.shape[2:])
+            if tuple(target.shape) != expected_target_shape:
+                raise ValueError(
+                    f"Expected target shape {expected_target_shape} for input shape {tuple(x.shape)}, "
+                    f"got {tuple(target.shape)}."
+                )
+            target_shape = tuple(target.shape)
+            x_nonclass_strides = (x.stride(0), *x.stride()[2:])
+            x_class_stride = x.stride(1)
 
-    #     has_weight = weight is not None
-    #     if not has_weight:
-    #         weight = torch.empty(0, device=grad_output.device)
+        return target_shape, x_nonclass_strides, x_class_stride
 
-    #     if reduction == 'mean':
+    def _nll_metadata(x, target):
+        target_shape, x_nonclass_strides, x_class_stride = _nll_target_shape_and_strides(x, target)
+        target_shape_meta = _metadata_tensor(target_shape, target.device)
+        x_nonclass_stride_meta = _metadata_tensor(x_nonclass_strides, target.device)
+        target_stride_meta = _metadata_tensor(tuple(target.stride()), target.device)
+        return target_shape, target_shape_meta, x_nonclass_stride_meta, target_stride_meta, x_class_stride
 
-    #         if has_weight:
-    #             denom = ops.sum(weight.gather(0, target))
-    #         else:
-    #             denom = ops.from_float(torch.tensor(target.size(0), dtype=torch.float32, device=grad_output.device))
+    def _nll_empty_weight(device):
+        return torch.empty(0, device=device, dtype=dtype_cls.int_dtype)
 
-    #         denom = denom.item()
+    def _nll_weight_and_stride(weight, device):
+        has_weight = weight is not None
+        if has_weight:
+            return weight, weight.stride(0), True
+        return _nll_empty_weight(device), 0, False
 
-    #     else:
-    #         denom = _ONE.value
+    def _nll_denominator(ops, target, weight, x_shape, ignore_index):
+        if len(x_shape) == 1:
+            target_shape = tuple(target.shape)
+            x_nonclass_strides = (0,) * target.dim()
+        else:
+            target_shape = tuple(target.shape)
+            x_nonclass_strides = (0,) * len(target_shape)
 
-    #     if reduction == 'sum' or reduction == 'mean':
-    #         grad_output = torch.full((N,), grad_output.item(), dtype=dtype_cls.int_dtype, device=grad_output.device)
+        target_shape_meta = _metadata_tensor(target_shape, target.device)
+        x_nonclass_stride_meta = _metadata_tensor(x_nonclass_strides, target.device)
+        target_stride_meta = _metadata_tensor(tuple(target.stride()), target.device)
+        weight, weight_stride, has_weight = _nll_weight_and_stride(weight, target.device)
 
-    #     grad_input = torch.full((N, C), _ZERO.value, dtype=dtype_cls.int_dtype, device=grad_output.device)
+        denom_values = torch.empty(target_shape, device=target.device, dtype=dtype_cls.int_dtype)
+        if denom_values.numel() == 0:
+            return ops.sum(denom_values)
 
-    #     grid = (N,)
-    #     nll_loss_backward_kernel[grid](
-    #         grad_output, target, weight, grad_input,
-    #         N, has_weight,
-    #         grad_output.stride(0),
-    #         target.stride(0),
-    #         weight.stride(0),
-    #         grad_input.stride(0), grad_input.stride(1),
-    #         denom
-    #     )
+        grid = lambda META: (triton.cdiv(denom_values.numel(), META["BLOCK"]),)
+        nll_denominator_kernel[grid](
+            target, weight, denom_values,
+            target_shape_meta, x_nonclass_stride_meta, target_stride_meta,
+            denom_values.numel(), weight_stride,
+            has_weight,
+            ignore_index,
+            len(target_shape),
+        )
+        return ops.sum(denom_values)
 
-    #     return grad_input
+    @dtype_cls.register_op("nll_loss")
+    def dt_nll_loss(ops, x, target, weight=None, reduction='mean', ignore_index=-100):
+        if reduction not in ("none", "sum", "mean"):
+            raise ValueError(f"Invalid reduction: {reduction}")
 
-    # class DTNLLLossFunction(DTFunction):
+        target_shape, target_shape_meta, x_nonclass_stride_meta, target_stride_meta, x_class_stride = _nll_metadata(x, target)
+        loss = torch.empty(target_shape, device=x.device, dtype=dtype_cls.int_dtype)
+        denom_values = torch.empty(target_shape if reduction == "mean" else (0,), device=x.device, dtype=dtype_cls.int_dtype)
+        weight, weight_stride, has_weight = _nll_weight_and_stride(weight, x.device)
 
-    #     @staticmethod
-    #     def forward(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
-    #         return ops.nll_loss(x, y, weight, reduction, ignore_index)
+        if loss.numel() != 0:
+            grid = lambda META: (triton.cdiv(loss.numel(), META["BLOCK"]),)
+            nll_loss_kernel[grid](
+                x, target, weight, loss, denom_values,
+                target_shape_meta, x_nonclass_stride_meta, target_stride_meta,
+                loss.numel(), x_class_stride, weight_stride,
+                has_weight,
+                reduction == "mean",
+                ignore_index,
+                len(target_shape),
+            )
 
-    #     @staticmethod
-    #     def setup_context(ctx, ops, inputs, output):
-    #         x, y, weight, reduction, _ = inputs
-    #         ctx.save_for_backward(x, y, weight)
-    #         ctx.reduction = reduction
+        if reduction == "none":
+            return loss
 
-    #     @staticmethod
-    #     def backward(ctx, ops, grad_output):
-    #         x, y, weight = ctx.saved_tensors
-    #         return nll_loss_backward(ops, grad_output, y, weight, x.shape, ctx.reduction), None, None, None, None
+        loss_sum = ops.sum(loss)
+        if reduction == "sum":
+            return loss_sum
 
-    # @dtype_cls.register_func(torch.nn.functional.nll_loss,
-    #                          cast=("input", "weight"))
-    # def nll_loss(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean'):
-    #     if size_average is not None or reduce is not None:
-    #         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    #     return DTNLLLossFunction.apply(input, target, weight, reduction, ignore_index)
+        return ops.div(loss_sum, ops.sum(denom_values))
+
+    def nll_loss_backward(ops, grad_output, target, weight, input_shape, reduction, ignore_index):
+        if reduction not in ("none", "sum", "mean"):
+            raise ValueError(f"Invalid reduction: {reduction}")
+
+        grad_input = torch.full(input_shape, _ZERO.value, device=grad_output.device, dtype=dtype_cls.int_dtype)
+        target_shape, target_shape_meta, dx_nonclass_stride_meta, target_stride_meta, dx_class_stride = _nll_metadata(grad_input, target)
+        weight, weight_stride, has_weight = _nll_weight_and_stride(weight, grad_output.device)
+
+        if reduction == "none":
+            dy_stride_meta = _metadata_tensor(tuple(grad_output.stride()), grad_output.device)
+            denom = torch.empty(1, device=grad_output.device, dtype=dtype_cls.int_dtype)
+        elif reduction == "mean":
+            dy_stride_meta = _metadata_tensor((0,) * len(target_shape), grad_output.device)
+            denom = _nll_denominator(ops, target, None if not has_weight else weight, input_shape, ignore_index)
+        else:
+            dy_stride_meta = _metadata_tensor((0,) * len(target_shape), grad_output.device)
+            denom = torch.empty(1, device=grad_output.device, dtype=dtype_cls.int_dtype)
+
+        if target.numel() != 0:
+            grid = lambda META: (triton.cdiv(target.numel(), META["BLOCK"]),)
+            nll_loss_backward_kernel[grid](
+                grad_output, target, weight, grad_input, denom,
+                target_shape_meta, dx_nonclass_stride_meta, target_stride_meta, dy_stride_meta,
+                target.numel(), dx_class_stride, weight_stride,
+                has_weight,
+                reduction == "none",
+                reduction == "mean",
+                ignore_index,
+                len(target_shape),
+            )
+
+        return grad_input
+
+    class DTNLLLossFunction(DTFunction):
+
+        @staticmethod
+        def forward(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
+            return ops.nll_loss(x, y, weight, reduction, ignore_index)
+
+        @staticmethod
+        def setup_context(ctx, ops, inputs, output):
+            x, y, weight, reduction, ignore_index = inputs
+            ctx.save_for_backward(x, y, weight)
+            ctx.reduction = reduction
+            ctx.ignore_index = ignore_index
+
+        @staticmethod
+        def backward(ctx, ops, grad_output):
+            x, y, weight = ctx.saved_tensors
+            grad_input = nll_loss_backward(
+                ops, grad_output, y, weight, x.shape, ctx.reduction, ctx.ignore_index
+            )
+            return grad_input, None, None, None, None
+
+    @dtype_cls.register_func(torch.nn.functional.nll_loss,
+                             cast=("input", "weight"))
+    def nll_loss(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean'):
+        if size_average is not None or reduce is not None:
+            reduction = _Reduction.legacy_get_string(size_average, reduce)
+        return DTNLLLossFunction.apply(input, target, weight, reduction, ignore_index)
 
 
     @triton.jit
