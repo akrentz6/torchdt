@@ -10,7 +10,8 @@ MIN_LOG = ZERO.item() >> 1
 MAX_LOG = POS_INF.item() >> 1
 MIN_FINITE_LOG = MIN_LOG + 1
 MAX_FINITE_LOG = MAX_LOG - 1
-base = lns_base(23)
+precision = 23
+base = lns_base(precision)
 tab_sbdb = None
 tab_ez = None
 
@@ -18,10 +19,11 @@ class LNS64(DType, bitwidth=64):
 
     @staticmethod
     def set_prec(prec: int, table: bool = False, table_device: str = None, filestem: str = "tab"):
-        global base, tab_sbdb, tab_ez
+        global base, precision, tab_sbdb, tab_ez
 
         validate_precision(prec, table)
-        base = lns_base(prec)
+        precision = prec
+        base = lns_base(precision)
 
         if table:
             tab_sbdb, tab_ez = load_or_create_table(
