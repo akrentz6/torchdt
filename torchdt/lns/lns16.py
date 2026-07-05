@@ -148,6 +148,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
         )
 
         accumulator_ops = TritonAccumulatorOps(
+            int_dtype=torch.int32,
             scalar_ops=make_lns_triton_scalar_ops(
                 bitwidth=32,
                 base=lns32.base,

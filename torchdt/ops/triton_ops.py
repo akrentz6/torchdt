@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import Callable, Optional
 
+import torch
+
 
 TRITON_IMPORT_ERROR = "Triton is not installed. Please install Triton to use Triton backend."
 
@@ -32,6 +34,7 @@ class TritonScalarOps:
 class TritonAccumulatorOps:
     """Higher-precision scalar ops plus conversions to and from storage values."""
 
+    int_dtype: torch.dtype
     scalar_ops: TritonScalarOps
     to_accumulator: Callable
     from_accumulator: Callable

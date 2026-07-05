@@ -41,6 +41,27 @@ def register_triton_ops(
     clamp = scalar_ops.clamp
     sign = scalar_ops.sign
 
+    if accumulator_ops is None:
+        accumulator_scalar_ops = scalar_ops
+        acc_int_dtype = dtype_cls.int_dtype
+
+        @triton.jit
+        def to_accumulator(x):
+            return x
+
+        @triton.jit
+        def from_accumulator(x):
+            return x
+    else:
+        acc_int_dtype = accumulator_ops.int_dtype
+        accumulator_scalar_ops = accumulator_ops.scalar_ops
+        to_accumulator = accumulator_ops.to_accumulator
+        from_accumulator = accumulator_ops.from_accumulator
+
+    acc_from_float = accumulator_scalar_ops.from_float
+    acc_add = accumulator_scalar_ops.add
+    acc_div = accumulator_scalar_ops.div
+
     cpu_from_float = dtype_cls.ops.from_float
     cpu_to_float = dtype_cls.ops.to_float
 
@@ -760,16 +781,17 @@ def register_triton_ops(
     def sum_kernel(x_ptr, y_ptr, M, N: tl.constexpr, s_x_r, s_x_c, s_y_r, BLOCK: tl.constexpr):
         pid = tl.program_id(0)
         row_ptr = x_ptr + pid * s_x_r
-        acc = tl.cast(_ZERO, tl_int_dtype)
+        acc = to_accumulator(tl.cast(_ZERO, tl_int_dtype))
 
         for tile_idx in range(0, tl.cdiv(N, BLOCK)):
             offs = tile_idx * BLOCK + tl.arange(0, BLOCK)
             mask = offs < N
 
             vals = tl.load(row_ptr + offs * s_x_c, mask=mask, other=_ZERO)
-            acc = add(acc, tl.reduce(vals, axis=0, combine_fn=add))
+            vals = to_accumulator(vals)
+            acc = acc_add(acc, tl.reduce(vals, axis=0, combine_fn=acc_add))
 
-        tl.store(y_ptr + pid * s_y_r, acc)
+        tl.store(y_ptr + pid * s_y_r, from_accumulator(acc))
 
     @dtype_cls.register_op("sum")
     def dt_sum(ops, x, dim=None, keepdim=False):
@@ -873,7 +895,7 @@ def register_triton_ops(
         mask_m = offs_m < M
         mask_n = offs_n < N
 
-        acc = tl.full((BLOCK_M, BLOCK_N), _ZERO, dtype=tl_int_dtype)
+        acc = to_accumulator(tl.full((BLOCK_M, BLOCK_N), _ZERO, dtype=tl_int_dtype))
 
         for k0 in range(0, tl.cdiv(K, BLOCK_K)):
             k_offs = k0 * BLOCK_K + tl.arange(0, BLOCK_K)
@@ -889,10 +911,10 @@ def register_triton_ops(
                 a_k = tl.load(a_k_ptrs, mask=mask_m & mask_k, other=_ZERO)
                 b_k = tl.load(b_k_ptrs, mask=mask_n & mask_k, other=_ZERO)
 
-                acc = add(acc, mul(a_k[:, None], b_k[None, :]))
+                acc = acc_add(acc, to_accumulator(mul(a_k[:, None], b_k[None, :])))
 
         c_ptrs = base_c + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
-        tl.store(c_ptrs, acc, mask=mask_m[:, None] & mask_n[None, :] & (pid_b < BATCH))
+        tl.store(c_ptrs, from_accumulator(acc), mask=mask_m[:, None] & mask_n[None, :] & (pid_b < BATCH))
 
     @dtype_cls.register_op("matmul")
     def dt_matmul(ops, A, B):
@@ -1024,7 +1046,7 @@ def register_triton_ops(
         mask_n = pid1 < N
         mask_group = pid2 < groups
 
-        acc = tl.full((BLOCK_OC, BLOCK_HW), _ZERO, tl_int_dtype)
+        acc = to_accumulator(tl.full((BLOCK_OC, BLOCK_HW), _ZERO, tl_int_dtype))
 
         Xb = X_ptr + pid1 * s_x_n
         Yb = Y_ptr + pid1 * s_y_n
@@ -1049,13 +1071,13 @@ def register_triton_ops(
                     w_val = tl.load(w_ptrs, mask=mask_oc[:, None], other=_ZERO)
 
                     prod = mul(x[None, :], w_val)
-                    acc = add(acc, prod)
+                    acc = acc_add(acc, to_accumulator(prod))
 
-        bias = tl.load(B_ptr + oc_offsets, mask=mask_oc, other=_ZERO)
-        acc = add(acc, bias[:, None])
+        bias = to_accumulator(tl.load(B_ptr + oc_offsets, mask=mask_oc, other=_ZERO))
+        acc = acc_add(acc, bias[:, None])
 
         out_ptrs = Yb + oc_offsets[:, None] * s_y_c + h[None, :] * s_y_h + w[None, :] * s_y_w
-        tl.store(out_ptrs, acc, mask=mask_oc[:, None] & mask_hw & mask_n & mask_group)
+        tl.store(out_ptrs, from_accumulator(acc), mask=mask_oc[:, None] & mask_hw & mask_n & mask_group)
 
     @dtype_cls.register_op("conv2d")
     def dt_conv2d(ops, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
@@ -1159,7 +1181,7 @@ def register_triton_ops(
         cout_start = group_id * cout_per_g
         cout_end = cout_start + cout_per_g
 
-        acc = tl.full((BLOCK_HW,), _ZERO, dtype=tl_int_dtype)
+        acc = to_accumulator(tl.full((BLOCK_HW,), _ZERO, dtype=tl_int_dtype))
 
         for kh in range(Kh):
             numer_h = h + ph - kh * dh
@@ -1180,10 +1202,10 @@ def register_triton_ops(
                     w_idx = cout * s_w_co + base_w_cin * s_w_cinperg + kh * s_w_kh + kw * s_w_kw
                     w_val = tl.load(W_ptr + w_idx)
 
-                    acc = add(acc, mul(dy_vals, w_val))
+                    acc = acc_add(acc, to_accumulator(mul(dy_vals, w_val)))
 
         dx_idx = n * s_dx_n + cin * s_dx_c + h * s_dx_h + w * s_dx_w
-        tl.store(dX_ptr + dx_idx, acc, mask=mask)
+        tl.store(dX_ptr + dx_idx, from_accumulator(acc), mask=mask)
 
     def conv2d_dinput(grad_output, weight, input_shape, stride, padding, dilation, groups):
         N, Cin, Hin, Win = input_shape
@@ -1316,7 +1338,7 @@ def register_triton_ops(
         group_id = cout // Cout_per_group
         cin_abs = group_id * Cin_per_group + cin
 
-        acc = tl.full((BLOCK_NHW,), _ZERO, dtype=tl_int_dtype)
+        acc = to_accumulator(tl.full((BLOCK_NHW,), _ZERO, dtype=tl_int_dtype))
 
         for nhw_start in range(0, N * Hout * Wout, BLOCK_NHW):
             idx = nhw_start + offs
@@ -1339,10 +1361,10 @@ def register_triton_ops(
             dy_vals = tl.load(dY_ptr + dy_idx, mask=valid_mask, other=_ZERO)
 
             prod = mul(dy_vals, x_vals)
-            acc = add(prod, acc)
+            acc = acc_add(to_accumulator(prod), acc)
 
         dw_idx = cout * s_dw_co + cin * s_dw_cin + kh * s_dw_kh + kw * s_dw_kw
-        tl.store(dW_ptr + dw_idx, tl.reduce(acc, axis=0, combine_fn=add))
+        tl.store(dW_ptr + dw_idx, from_accumulator(tl.reduce(acc, axis=0, combine_fn=acc_add)))
 
     def conv2d_dweight(grad_output, input, weight_shape, stride, padding, dilation, groups):
         N, Cin, H, W = input.shape
@@ -1396,7 +1418,7 @@ def register_triton_ops(
         pid = tl.program_id(0)
         offs = tl.arange(0, BLOCK_NHW)
 
-        acc = tl.full((BLOCK_NHW,), _ZERO, dtype=tl_int_dtype)
+        acc = to_accumulator(tl.full((BLOCK_NHW,), _ZERO, dtype=tl_int_dtype))
 
         total = N * Hout * Wout
         for nhw_start in range(0, total, BLOCK_NHW):
@@ -1409,12 +1431,12 @@ def register_triton_ops(
             wout = rem % Wout
 
             dy_idx = n * s_dy_n + pid * s_dy_c + hout * s_dy_h + wout * s_dy_w
-            dy_vals = tl.load(dY_ptr + dy_idx, mask=mask, other=_ZERO)
+            dy_vals = to_accumulator(tl.load(dY_ptr + dy_idx, mask=mask, other=_ZERO))
 
-            acc = add(dy_vals, acc)
+            acc = acc_add(dy_vals, acc)
 
         db_idx = pid * s_db_c
-        tl.store(dB_ptr + db_idx, acc.reduce(0, add))
+        tl.store(dB_ptr + db_idx, from_accumulator(acc.reduce(0, acc_add)))
 
     def conv2d_dbias(grad_output, bias_shape):
         N, Cout, Hout, Wout = grad_output.shape
@@ -1772,7 +1794,7 @@ def register_triton_ops(
         kw_len = w_end - w_start
         area = kh_len * kw_len
 
-        acc = tl.full((BLOCK_C, BLOCK_HW), _ZERO, tl_int_dtype)
+        acc = to_accumulator(tl.full((BLOCK_C, BLOCK_HW), _ZERO, tl_int_dtype))
 
         for ky in range(Kh_max):
             ky_in = ky < kh_len
@@ -1786,15 +1808,15 @@ def register_triton_ops(
                 load_mask = in_mask & mask_hw & valid_hw[None, :]
 
                 x_ptrs = Xb + c_offsets[:, None] * s_x_c + in_h[None, :] * s_x_h + in_w[None, :] * s_x_w
-                x_vals = tl.load(x_ptrs, mask=load_mask, other=_ZERO)
+                x_vals = to_accumulator(tl.load(x_ptrs, mask=load_mask, other=_ZERO))
 
-                acc = add(x_vals, acc)
+                acc = acc_add(x_vals, acc)
 
         area = tl.maximum(area, 1).to(tl.float32)
-        acc = div(acc, from_float(area[None, :]))
+        acc = acc_div(acc, acc_from_float(area[None, :]))
 
         y_ptrs = Yb + c_offsets[:, None] * s_y_c + oh[None, :] * s_y_h + ow[None, :] * s_y_w
-        tl.store(y_ptrs, acc, mask=out_mask)
+        tl.store(y_ptrs, from_accumulator(acc), mask=out_mask)
 
     def _max_adaptive_window(in_size, out_size):
         m = 0
@@ -1892,7 +1914,7 @@ def register_triton_ops(
         ow_high = tl.minimum(ow_high, Wout - 1)
         ow_len = ow_high - ow_low + 1
 
-        acc = tl.full((BLOCK_C, BLOCK_HW), _ZERO, tl_int_dtype)
+        acc = to_accumulator(tl.full((BLOCK_C, BLOCK_HW), _ZERO, tl_int_dtype))
 
         for dh in tl.static_range(OVERLAP_H_MAX):
             oh = oh_low + dh
@@ -1921,10 +1943,10 @@ def register_triton_ops(
                 dy_vals = tl.load(dy_ptrs, mask=load_mask, other=_ZERO)
 
                 contrib = div(dy_vals, area_dt)
-                acc = add(acc, contrib)
+                acc = acc_add(acc, to_accumulator(contrib))
 
         dx_ptrs = dXb + c_offsets[:, None] * s_dx_c + ih[None, :] * s_dx_h + iw[None, :] * s_dx_w
-        tl.store(dx_ptrs, acc, mask=in_mask)
+        tl.store(dx_ptrs, from_accumulator(acc), mask=in_mask)
 
     def _max_adaptive_overlap(in_size: int, out_size: int) -> int:
         m = 1
@@ -2012,10 +2034,10 @@ def register_triton_ops(
         w = rem - h * W
 
         x_ptrs = X_ptr + n * s_x_n + pid0 * s_x_c + h * s_x_h + w * s_x_w
-        x = tl.load(x_ptrs, mask=mask, other=_ZERO)
-        x = tl.where(mask, x, tl.cast(_ZERO, tl_int_dtype))
+        x = to_accumulator(tl.load(x_ptrs, mask=mask, other=_ZERO))
+        x = tl.where(mask, x, to_accumulator(tl.cast(_ZERO, tl_int_dtype)))
 
-        block_sum = tl.reduce(x, axis=0, combine_fn=add)
+        block_sum = tl.reduce(x, axis=0, combine_fn=acc_add)
 
         tl.store(partial_sum_ptr + pid0 * ps_s0 + pid1 * ps_s1, block_sum)
 
@@ -2045,18 +2067,18 @@ def register_triton_ops(
         lane = tl.arange(0, BLOCK_T)
 
         momentum = tl.cast(momentum, tl_int_dtype)
-        count_dt = tl.cast(count_dt, tl_int_dtype)
+        count_acc = to_accumulator(tl.cast(count_dt, tl_int_dtype))
 
-        acc_sum = tl.cast(_ZERO, tl_int_dtype)
+        acc_sum = to_accumulator(tl.cast(_ZERO, tl_int_dtype))
 
         for t0 in range(0, ntiles, BLOCK_T):
             t = t0 + lane
             mask = t < ntiles
 
-            s = tl.load(partial_sum_ptr + pid * ps_s0 + t * ps_s1, mask=mask, other=_ZERO)
-            acc_sum = add(acc_sum, tl.reduce(s, axis=0, combine_fn=add))
+            s = tl.load(partial_sum_ptr + pid * ps_s0 + t * ps_s1, mask=mask, other=to_accumulator(tl.cast(_ZERO, tl_int_dtype)))
+            acc_sum = acc_add(acc_sum, tl.reduce(s, axis=0, combine_fn=acc_add))
 
-        mean = div(acc_sum, count_dt)
+        mean = from_accumulator(acc_div(acc_sum, count_acc))
 
         rm = tl.load(rm_ptr + pid)
         one_minus_m = sub(tl.cast(_ONE, tl_int_dtype), momentum)
@@ -2102,7 +2124,7 @@ def register_triton_ops(
         sq = mul(centered, centered)
 
         sq = tl.where(mask, sq, tl.cast(_ZERO, tl_int_dtype))
-        block_var_sum = tl.reduce(sq, axis=0, combine_fn=add)
+        block_var_sum = tl.reduce(to_accumulator(sq), axis=0, combine_fn=acc_add)
 
         tl.store(partial_var_ptr + pid0 * pv_s0 + pid1 * pv_s1, block_var_sum)
 
@@ -2135,22 +2157,22 @@ def register_triton_ops(
 
         eps = tl.cast(eps, tl_int_dtype)
         momentum = tl.cast(momentum, tl_int_dtype)
-        count_dt = tl.cast(count_dt, tl_int_dtype)
+        count_acc = to_accumulator(tl.cast(count_dt, tl_int_dtype))
 
-        acc_var_sum = tl.cast(_ZERO, tl_int_dtype)
+        acc_var_sum = to_accumulator(tl.cast(_ZERO, tl_int_dtype))
 
         for t0 in range(0, ntiles, BLOCK_T):
             t = t0 + lane
             mask = t < ntiles
 
-            v = tl.load(partial_var_ptr + pid * pv_s0 + t * pv_s1, mask=mask, other=_ZERO)
-            acc_var_sum = add(acc_var_sum, tl.reduce(v, axis=0, combine_fn=add))
+            v = tl.load(partial_var_ptr + pid * pv_s0 + t * pv_s1, mask=mask, other=to_accumulator(tl.cast(_ZERO, tl_int_dtype)))
+            acc_var_sum = acc_add(acc_var_sum, tl.reduce(v, axis=0, combine_fn=acc_add))
 
-        var = div(acc_var_sum, count_dt)
+        var = from_accumulator(acc_div(acc_var_sum, count_acc))
         var = tl.where(lt(var, tl.cast(_ZERO, tl_int_dtype)), tl.cast(_ZERO, tl_int_dtype), var)
 
         if count > 1:
-            sample_var = mul(var, div(count_dt, sub(count_dt, tl.cast(_ONE, tl_int_dtype))))
+            sample_var = mul(var, div(tl.cast(count_dt, tl_int_dtype), sub(tl.cast(count_dt, tl_int_dtype), tl.cast(_ONE, tl_int_dtype))))
         else:
             sample_var = tl.cast(_ZERO, tl_int_dtype)
 
@@ -2268,8 +2290,8 @@ def register_triton_ops(
         s_y_n, s_y_c, s_y_h, s_y_w = output.stride()
 
         if training:
-            partial_sum = torch.empty((C, partial_tiles), device=x.device, dtype=dtype_cls.int_dtype)
-            partial_var = torch.empty((C, partial_tiles), device=x.device, dtype=dtype_cls.int_dtype)
+            partial_sum = torch.empty((C, partial_tiles), device=x.device, dtype=acc_int_dtype)
+            partial_var = torch.empty((C, partial_tiles), device=x.device, dtype=acc_int_dtype)
 
             ps_s0, ps_s1 = partial_sum.stride()
             pv_s0, pv_s1 = partial_var.stride()
@@ -2377,8 +2399,8 @@ def register_triton_ops(
         dy_xhat = mul(dy, xhat)
         dy_xhat = tl.where(mask, dy_xhat, tl.cast(_ZERO, tl_int_dtype))
 
-        partial_dy = tl.reduce(dy, axis=0, combine_fn=add)
-        partial_dy_xhat = tl.reduce(dy_xhat, axis=0, combine_fn=add)
+        partial_dy = tl.reduce(to_accumulator(dy), axis=0, combine_fn=acc_add)
+        partial_dy_xhat = tl.reduce(to_accumulator(dy_xhat), axis=0, combine_fn=acc_add)
 
         num_hw_blks = tl.cdiv(HW, BLOCK)
         tile_id = pid1 * num_hw_blks + pid2
@@ -2410,26 +2432,27 @@ def register_triton_ops(
         pid = tl.program_id(0)
         base = tl.arange(0, BLOCK_R)
 
-        sum_dy = tl.cast(_ZERO, tl_int_dtype)
-        sum_dy_xhat = tl.cast(_ZERO, tl_int_dtype)
+        count_dt = to_accumulator(tl.cast(count_dt, tl_int_dtype))
+        sum_dy = to_accumulator(tl.cast(_ZERO, tl_int_dtype))
+        sum_dy_xhat = to_accumulator(tl.cast(_ZERO, tl_int_dtype))
 
         for start in range(0, K, BLOCK_R):
             idx = start + base
             mask = idx < K
 
-            pdy = tl.load(p_dy_ptr + pid * K + idx, mask=mask, other=_ZERO)
-            pdyx = tl.load(p_dy_xhat_ptr + pid * K + idx, mask=mask, other=_ZERO)
+            pdy = tl.load(p_dy_ptr + pid * K + idx, mask=mask, other=to_accumulator(tl.cast(_ZERO, tl_int_dtype)))
+            pdyx = tl.load(p_dy_xhat_ptr + pid * K + idx, mask=mask, other=to_accumulator(tl.cast(_ZERO, tl_int_dtype)))
 
-            sum_dy = add(sum_dy, tl.reduce(pdy, axis=0, combine_fn=add))
-            sum_dy_xhat = add(sum_dy_xhat, tl.reduce(pdyx, axis=0, combine_fn=add))
+            sum_dy = acc_add(sum_dy, tl.reduce(pdy, axis=0, combine_fn=acc_add))
+            sum_dy_xhat = acc_add(sum_dy_xhat, tl.reduce(pdyx, axis=0, combine_fn=acc_add))
 
         if has_bias:
-            tl.store(dB_ptr + pid, sum_dy)
+            tl.store(dB_ptr + pid, from_accumulator(sum_dy))
         if has_weight:
-            tl.store(dW_ptr + pid, sum_dy_xhat)
+            tl.store(dW_ptr + pid, from_accumulator(sum_dy_xhat))
 
-        tl.store(m_dy_ptr + pid, div(sum_dy, tl.cast(count_dt, tl_int_dtype)))
-        tl.store(m_dy_xhat_ptr + pid, div(sum_dy_xhat, tl.cast(count_dt, tl_int_dtype)))
+        tl.store(m_dy_ptr + pid, from_accumulator(acc_div(sum_dy, count_dt)))
+        tl.store(m_dy_xhat_ptr + pid, from_accumulator(acc_div(sum_dy_xhat, count_dt)))
 
     @triton.autotune(
         configs=[
@@ -2586,8 +2609,8 @@ def register_triton_ops(
         K = N * num_hw_blks
 
         if training or has_weight or has_bias:
-            partial_dy = torch.empty((C, K), device=input.device, dtype=dtype_cls.int_dtype)
-            partial_dy_xhat = torch.empty((C, K), device=input.device, dtype=dtype_cls.int_dtype)
+            partial_dy = torch.empty((C, K), device=input.device, dtype=acc_int_dtype)
+            partial_dy_xhat = torch.empty((C, K), device=input.device, dtype=acc_int_dtype)
 
             mean_dy = torch.empty((C,), device=input.device, dtype=dtype_cls.int_dtype)
             mean_dy_xhat = torch.empty((C,), device=input.device, dtype=dtype_cls.int_dtype)
