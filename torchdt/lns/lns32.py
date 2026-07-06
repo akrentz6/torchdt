@@ -202,17 +202,10 @@ def lns32_ge(ops, x, y):
     x_sign, y_sign = x & 1, y & 1
 
     both_pos = (x_sign == 0) & (y_sign == 0)
-    result_both_pos = torch.ge(x_log, y_log)
-
     x_pos_y_neg = (x_sign == 0) & (y_sign == 1)
-    x_neg_y_pos = (x_sign == 1) & (y_sign == 0)
+    both_neg = (x_sign == 1) & (y_sign == 1)
 
-    # no need to check explicitly for both negative case, as it's the final case
-    result_both_neg = torch.ge(y_log, x_log)
-
-    return torch.where(both_pos, result_both_pos,
-        torch.where(x_pos_y_neg, True,
-        torch.where(x_neg_y_pos, False, result_both_neg)))
+    return x_pos_y_neg | (both_pos & (x_log >= y_log)) | (both_neg & (y_log >= x_log))
 
 @LNS32.register_op("gt")
 def lns32_gt(ops, x, y):
@@ -220,17 +213,10 @@ def lns32_gt(ops, x, y):
     x_sign, y_sign = x & 1, y & 1
 
     both_pos = (x_sign == 0) & (y_sign == 0)
-    result_both_pos = torch.gt(x_log, y_log)
-
     x_pos_y_neg = (x_sign == 0) & (y_sign == 1)
-    x_neg_y_pos = (x_sign == 1) & (y_sign == 0)
+    both_neg = (x_sign == 1) & (y_sign == 1)
 
-    # no need to check explicitly for both negative case, as it's the final case
-    result_both_neg = torch.gt(y_log, x_log)
-
-    return torch.where(both_pos, result_both_pos,
-        torch.where(x_pos_y_neg, True,
-        torch.where(x_neg_y_pos, False, result_both_neg)))
+    return x_pos_y_neg | (both_pos & (x_log > y_log)) | (both_neg & (y_log > x_log))
 
 @LNS32.register_op("le")
 def lns32_le(ops, x, y):
@@ -238,17 +224,10 @@ def lns32_le(ops, x, y):
     x_sign, y_sign = x & 1, y & 1
 
     both_pos = (x_sign == 0) & (y_sign == 0)
-    result_both_pos = torch.le(x_log, y_log)
-
-    x_pos_y_neg = (x_sign == 0) & (y_sign == 1)
     x_neg_y_pos = (x_sign == 1) & (y_sign == 0)
+    both_neg = (x_sign == 1) & (y_sign == 1)
 
-    # no need to check explicitly for both negative case, as it's the final case
-    result_both_neg = torch.le(y_log, x_log)
-
-    return torch.where(both_pos, result_both_pos,
-        torch.where(x_pos_y_neg, False,
-        torch.where(x_neg_y_pos, True, result_both_neg)))
+    return x_neg_y_pos | (both_pos & (x_log <= y_log)) | (both_neg & (y_log <= x_log))
 
 @LNS32.register_op("lt")
 def lns32_lt(ops, x, y):
@@ -256,14 +235,7 @@ def lns32_lt(ops, x, y):
     x_sign, y_sign = x & 1, y & 1
 
     both_pos = (x_sign == 0) & (y_sign == 0)
-    result_both_pos = torch.lt(x_log, y_log)
-
-    x_pos_y_neg = (x_sign == 0) & (y_sign == 1)
     x_neg_y_pos = (x_sign == 1) & (y_sign == 0)
+    both_neg = (x_sign == 1) & (y_sign == 1)
 
-    # no need to check explicitly for both negative case, as it's the final case
-    result_both_neg = torch.lt(y_log, x_log)
-
-    return torch.where(both_pos, result_both_pos,
-        torch.where(x_pos_y_neg, False,
-        torch.where(x_neg_y_pos, True, result_both_neg)))
+    return x_neg_y_pos | (both_pos & (x_log < y_log)) | (both_neg & (y_log < x_log))
