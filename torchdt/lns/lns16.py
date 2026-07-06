@@ -14,16 +14,18 @@ precision = 7
 base = lns_base(precision)
 tab_sbdb = None
 tab_ez = None
+tab_exp = None
 
 class LNS16(DType, bitwidth=16, cpp_backend="lns"):
 
     @staticmethod
     def set_prec(prec: int, table: bool = False, table_device: str = None, filestem: str = "tab"):
-        global base, precision, tab_sbdb, tab_ez
+        global base, precision, tab_sbdb, tab_ez, tab_exp
 
         validate_precision(prec, table)
         precision = prec
         base = lns_base(precision)
+        tab_exp = None
 
         if table:
             tab_sbdb, tab_ez = load_or_create_table(
@@ -34,13 +36,21 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
                 table_device=table_device,
                 filestem=filestem,
             )
+            tab_exp = _make_lns16_exp_lookup_table(device=table_device)
             register_table_add(LNS16, zero=ZERO, tab_sbdb=tab_sbdb, tab_ez=tab_ez)
+
+            @LNS16.register_op("exp")
+            def lns16_exp(ops, x):
+                idx = (x.to(torch.int32) - torch.iinfo(torch.int16).min).to(torch.long)
+                return tab_exp[idx]
 
     @classmethod
     def enable_triton(cls):
-        from torchdt.ops import TritonAccumulatorOps, require_triton
+        from dataclasses import replace
+
+        from torchdt.ops import TritonAccumulatorOps, register_triton_ops, require_triton
         from . import lns32
-        from ._triton import _bump_triton_jit_hash, enable_lns_triton_backend, make_lns_triton_scalar_ops
+        from ._triton import _bump_triton_jit_hash, _lns_triton_bit_config, make_lns_triton_scalar_ops
 
         triton, tl = require_triton()
 
@@ -162,16 +172,59 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
             from_accumulator=from_lns32,
         )
 
-        enable_lns_triton_backend(
-            cls,
+        scalar_ops = make_lns_triton_scalar_ops(
+            bitwidth=16,
             base=base,
             zero_value=ZERO.item(),
             pos_inf_value=POS_INF.item(),
             neg_inf_value=NEG_INF.item(),
             tab_sbdb=tab_sbdb,
             tab_ez=tab_ez,
+        )
+
+        if tab_exp is not None:
+
+            tl_int_dtype, asm_output_constraint, asm_load, bytes_per_value = _lns_triton_bit_config(16, tl)
+            EXP_TABLE_DATA_PTR = tl.constexpr(tab_exp.data_ptr())
+
+            @triton.jit
+            def exp(x):
+                idx = tl.cast(x, tl.int64) - tl.cast(VALUE_ZERO, tl.int64)
+                abs_ptr = EXP_TABLE_DATA_PTR + idx * bytes_per_value
+                return tl.inline_asm_elementwise(
+                    "{{\n   " + asm_load + "\n}}",
+                    asm_output_constraint,
+                    [abs_ptr],
+                    dtype=tl_int_dtype,
+                    is_pure=True,
+                    pack=1,
+                )
+
+            _bump_triton_jit_hash(
+                exp,
+                VALUE_PRECISION=VALUE_PRECISION,
+                VALUE_ZERO=VALUE_ZERO,
+                VALUE_POS_INF=VALUE_POS_INF,
+                VALUE_NEG_INF=VALUE_NEG_INF,
+                exp_table=tab_exp.data_ptr(),
+            )
+
+            scalar_ops = replace(scalar_ops, exp=exp)
+
+        register_triton_ops(
+            cls,
+            scalar_ops,
             accumulator_ops=accumulator_ops,
         )
+
+def _make_lns16_exp_lookup_table(device=None) -> Tensor:
+    info = torch.iinfo(torch.int16)
+    codes = torch.arange(info.min, info.max + 1, dtype=torch.int32).to(torch.int16)
+    exp_values = torch.exp(lns16_to_float(None, codes))
+    table = lns16_from_float(None, exp_values).contiguous()
+    if device is not None:
+        table = table.to(device=device)
+    return table
 
 def _checked_add(x: Tensor, y: Tensor, overflow_sign: Tensor) -> Tensor:
     result = (x + y).to(torch.int16)
