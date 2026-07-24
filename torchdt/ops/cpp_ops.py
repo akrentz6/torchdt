@@ -11,37 +11,45 @@ def register_cpp_ops(dtype_cls: type, backend: str) -> None:
 
     bitwidth = dtype_cls.bitwidth
 
-    dtype_cls.register_op("from_float")(lambda ops, x: from_float(backend, bitwidth, ops, x))
-    dtype_cls.register_op("to_float")(lambda ops, x: to_float(backend, bitwidth, ops, x))
-    dtype_cls.register_op("add")(lambda ops, x, y: add_op(backend, bitwidth, ops, x, y))
-    dtype_cls.register_op("sub")(lambda ops, x, y: sub_op(backend, bitwidth, ops, x, y))
-    dtype_cls.register_op("mul")(lambda ops, x, y: mul_op(backend, bitwidth, ops, x, y))
-    dtype_cls.register_op("div")(lambda ops, x, y: div_op(backend, bitwidth, ops, x, y))
-    dtype_cls.register_op("ge")(lambda ops, x, y: ge_op(backend, bitwidth, ops, x, y))
-    dtype_cls.register_op("gt")(lambda ops, x, y: gt_op(backend, bitwidth, ops, x, y))
-    dtype_cls.register_op("le")(lambda ops, x, y: le_op(backend, bitwidth, ops, x, y))
-    dtype_cls.register_op("lt")(lambda ops, x, y: lt_op(backend, bitwidth, ops, x, y))
-    dtype_cls.register_op("sum")(lambda ops, x, dim=None, keepdim=False: sum_op(backend, bitwidth, ops, x, dim, keepdim))
-    dtype_cls.register_op("matmul")(
+    dtype_cls.register_op("from_float", backend="cpp")(lambda ops, x: from_float(backend, bitwidth, ops, x))
+    dtype_cls.register_op("to_float", backend="cpp")(lambda ops, x: to_float(backend, bitwidth, ops, x))
+    dtype_cls.register_op("add", backend="cpp")(lambda ops, x, y: add_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("sub", backend="cpp")(lambda ops, x, y: sub_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("mul", backend="cpp")(lambda ops, x, y: mul_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("div", backend="cpp")(lambda ops, x, y: div_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("ge", backend="cpp")(lambda ops, x, y: ge_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("gt", backend="cpp")(lambda ops, x, y: gt_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("le", backend="cpp")(lambda ops, x, y: le_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("lt", backend="cpp")(lambda ops, x, y: lt_op(backend, bitwidth, ops, x, y))
+    dtype_cls.register_op("sum", backend="cpp")(lambda ops, x, dim=None, keepdim=False: sum_op(backend, bitwidth, ops, x, dim, keepdim))
+    dtype_cls.register_op("matmul", backend="cpp")(
         lambda ops, A, B: matmul_op(backend, bitwidth, ops, A, B)
     )
-    dtype_cls.register_op("matmul_backward")(
+    dtype_cls.register_op("matmul_backward", backend="cpp")(
         lambda ops, grad_output, A, B: matmul_backward_op(backend, bitwidth, ops, grad_output, A, B)
     )
-    dtype_cls.register_op("conv2d")(
+    dtype_cls.register_op("conv2d", backend="cpp")(
         lambda ops, input, weight, bias, stride, padding, dilation, groups: conv2d_op(
             backend, bitwidth, ops, input, weight, bias, stride, padding, dilation, groups
         )
     )
-    dtype_cls.register_op("conv2d_backward")(
+    dtype_cls.register_op("conv2d_backward", backend="cpp")(
         lambda ops, grad_output, input, weight, stride, padding, dilation, has_bias, groups: conv2d_backward_op(
             backend, bitwidth, ops, grad_output, input, weight, stride, padding, dilation, has_bias, groups
         )
     )
 
     # also register new torch. funcs to call ops that call into c++ for backward
-    dtype_cls.register_func(torch.matmul, torch.Tensor.matmul, cast=("input", "other"))(matmul_func)
-    dtype_cls.register_func(torch.nn.functional.conv2d, cast=("input", "weight", "bias"))(conv2d_func)
+    dtype_cls.register_func(
+        torch.matmul, torch.Tensor.matmul,
+        cast=("input", "other"), backend="cpp"
+    )(matmul_func)
+    dtype_cls.register_func(
+        torch.nn.functional.conv2d,
+        cast=("input", "weight", "bias"), backend="cpp"
+    )(conv2d_func)
+
+    dtype_cls.ops.enable_backend("cpp", "cpu")
 
 def from_float(backend, bitwidth, _, x):
     return C.from_float(backend, bitwidth, x)

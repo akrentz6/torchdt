@@ -5,8 +5,8 @@ from torchdt.ops import register_base_op
 @register_base_op("relu")
 def dt_relu(ops, x):
     return torch.where(
-        ops.lt(x, ops.scalar_from_float(0.0)),
-        ops.scalar_from_float(0.0), x
+        ops.lt(x, ops.scalar_from_float(0.0, device=x.device)),
+        ops.scalar_from_float(0.0, device=x.device), x
     )
 
 class DTReLUFunction(DTFunction):
@@ -22,13 +22,16 @@ class DTReLUFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         output, = ctx.saved_tensors
-        grad_x = torch.where(ops.eq(output, ops.scalar_from_float(0.0)), ops.scalar_from_float(0.0), grad_output)
+        grad_x = torch.where(
+            ops.eq(output, ops.scalar_from_float(0.0, device=output.device)),
+            ops.scalar_from_float(0.0, device=output.device), grad_output
+        )
         return grad_x
 
 @register_base_op("leaky_relu")
 def dt_leaky_relu(ops, x, negative_slope):
     return torch.where(
-        ops.lt(x, ops.scalar_from_float(0.0)),
+        ops.lt(x, ops.scalar_from_float(0.0, device=x.device)),
         ops.mul(x, negative_slope), x
     )
 
@@ -46,7 +49,10 @@ class DTLeakyReLUFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, negative_slope = ctx.saved_tensors
-        grad_x = torch.where(ops.lt(x, ops.scalar_from_float(0.0)), ops.mul(grad_output, negative_slope), grad_output)
+        grad_x = torch.where(
+            ops.lt(x, ops.scalar_from_float(0.0, device=x.device)),
+            ops.mul(grad_output, negative_slope), grad_output
+        )
         return grad_x, None
 
 @register_base_op("threshold")
@@ -70,7 +76,10 @@ class DTThresholdFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, threshold = ctx.saved_tensors
-        grad_x = torch.where(ops.gt(x, threshold), grad_output, ops.scalar_from_float(0.0))
+        grad_x = torch.where(
+            ops.gt(x, threshold), grad_output,
+            ops.scalar_from_float(0.0, device=x.device)
+        )
         return grad_x, None, None
 
 @register_base_op("tanh")
@@ -92,13 +101,17 @@ class DTTanhFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         output, = ctx.saved_tensors
-        grad_x = ops.mul(grad_output, ops.sub(ops.scalar_from_float(1.0), ops.square(output)))
+        grad_x = ops.mul(
+            grad_output,
+            ops.sub(ops.scalar_from_float(1.0, device=output.device), ops.square(output))
+        )
         return grad_x
 
 @register_base_op("sigmoid")
 def dt_sigmoid(ops, x):
     exp_neg_x = ops.exp(ops.neg(x))
-    return ops.div(ops.scalar_from_float(1.0), ops.add(ops.scalar_from_float(1.0), exp_neg_x))
+    one = ops.scalar_from_float(1.0, device=x.device)
+    return ops.div(one, ops.add(one, exp_neg_x))
 
 class DTSigmoidFunction(DTFunction):
 
@@ -113,7 +126,10 @@ class DTSigmoidFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         output, = ctx.saved_tensors
-        grad_x = ops.mul(grad_output, ops.mul(output, ops.sub(ops.scalar_from_float(1.0), output)))
+        grad_x = ops.mul(
+            grad_output,
+            ops.mul(output, ops.sub(ops.scalar_from_float(1.0, device=output.device), output))
+        )
         return grad_x
 
 @register_base_op("logsigmoid")
@@ -134,7 +150,10 @@ class DTLogSigmoidFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, = ctx.saved_tensors
-        grad_x = ops.mul(grad_output, ops.sub(ops.scalar_from_float(1.0), ops.sigmoid(x)))
+        grad_x = ops.mul(
+            grad_output,
+            ops.sub(ops.scalar_from_float(1.0, device=x.device), ops.sigmoid(x))
+        )
         return grad_x
 
 @register_base_op("softmin")
@@ -240,7 +259,7 @@ class DTHardtanhFunction(DTFunction):
         x, min_val, max_val = ctx.saved_tensors
         grad_x = torch.where(
             ops.le(x, min_val) | ops.ge(x, max_val),
-            ops.scalar_from_float(0.0), grad_output)
+            ops.scalar_from_float(0.0, device=grad_output.device), grad_output)
         return grad_x, None, None
 
 @register_base_op("glu")
@@ -271,7 +290,7 @@ class DTGluFunction(DTFunction):
 
         sigmoid_b = ops.sigmoid(b)
         grad_a = ops.mul(grad_output, sigmoid_b)
-        grad_b = ops.sub(ops.scalar_from_float(1.0), sigmoid_b)
+        grad_b = ops.sub(ops.scalar_from_float(1.0, device=sigmoid_b.device), sigmoid_b)
         grad_b = ops.mul(grad_output, ops.mul(a, ops.mul(sigmoid_b, grad_b)))
 
         grad_x = torch.cat([grad_a, grad_b], dim=ctx.dim)

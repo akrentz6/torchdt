@@ -62,30 +62,6 @@ def register_triton_ops(
     acc_add = accumulator_scalar_ops.add
     acc_div = accumulator_scalar_ops.div
 
-    cpu_from_float = dtype_cls.ops.from_float
-    cpu_to_float = dtype_cls.ops.to_float
-
-    def scalar_from_float_cpu(cls, x):
-        if isinstance(x, torch.Tensor):
-            if x.numel() != 1:
-                raise ValueError("scalar_from_float expects a scalar value")
-            x_tensor = x.detach().to(device="cpu", dtype=torch.float32).reshape(())
-        else:
-            x_tensor = torch.tensor(x, dtype=torch.float32)
-        return cpu_from_float(x_tensor)
-
-    def scalar_to_float_cpu(cls, x):
-        if isinstance(x, torch.Tensor):
-            if x.numel() != 1:
-                raise ValueError("scalar_to_float expects a scalar tensor")
-            x_tensor = x.detach().to(device="cpu", dtype=dtype_cls.int_dtype).reshape(())
-        else:
-            x_tensor = torch.tensor(x, dtype=dtype_cls.int_dtype)
-        return cpu_to_float(x_tensor).item()
-
-    dtype_cls.ops.scalar_from_float = classmethod(scalar_from_float_cpu)
-    dtype_cls.ops.scalar_to_float = classmethod(scalar_to_float_cpu)
-
     if dtype_cls.bitwidth == 8:
         tl_int_dtype = tl.constexpr(tl.int8)
     elif dtype_cls.bitwidth == 16:
@@ -203,11 +179,8 @@ def register_triton_ops(
         out = from_float(x)
         tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("from_float")
+    @dtype_cls.register_op("from_float", backend="triton")
     def dt_from_float(ops, x):
-        if x.device.type != "cuda":
-            return cpu_from_float(x)
-
         out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
         if out.numel() == 0:
             return out
@@ -228,11 +201,8 @@ def register_triton_ops(
         out = to_float(x)
         tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("to_float")
+    @dtype_cls.register_op("to_float", backend="triton")
     def dt_to_float(ops, x):
-        if x.device.type != "cuda":
-            return cpu_to_float(x)
-
         out = torch.empty(x.shape, dtype=torch.float32, device=x.device)
         if out.numel() == 0:
             return out
@@ -243,19 +213,7 @@ def register_triton_ops(
         to_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), out.ndim, BLOCK_SIZE=1024)
         return out
 
-    def _normalize_binary_devices(x, y):
-        if x.device == y.device:
-            return x, y
-
-        if x.dim() == 0 and x.device.type == "cpu":
-            return x.to(device=y.device), y
-        if y.dim() == 0 and y.device.type == "cpu":
-            return x, y.to(device=x.device)
-
-        raise RuntimeError(f"Expected tensors to be on the same device, got {x.device} and {y.device}.")
-
     def _prepare_binary(x, y, out_dtype):
-        x, y = _normalize_binary_devices(x, y)
         out_shape = torch.broadcast_shapes(x.shape, y.shape)
         x = x.expand(out_shape)
         y = y.expand(out_shape)
@@ -283,7 +241,7 @@ def register_triton_ops(
         out = add(x, y)
         tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("add")
+    @dtype_cls.register_op("add", backend="triton")
     def dt_add(ops, x, y):
         out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
         if out.numel() == 0:
@@ -307,7 +265,7 @@ def register_triton_ops(
             out = sub(x, y)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("sub")
+        @dtype_cls.register_op("sub", backend="triton")
         def dt_sub(ops, x, y):
             out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
             if out.numel() == 0:
@@ -331,7 +289,7 @@ def register_triton_ops(
             out = mul(x, y)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("mul")
+        @dtype_cls.register_op("mul", backend="triton")
         def dt_mul(ops, x, y):
             out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
             if out.numel() == 0:
@@ -355,7 +313,7 @@ def register_triton_ops(
             out = div(x, y)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("div")
+        @dtype_cls.register_op("div", backend="triton")
         def dt_div(ops, x, y):
             out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
             if out.numel() == 0:
@@ -378,7 +336,7 @@ def register_triton_ops(
             out = sqrt(x)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("sqrt")
+        @dtype_cls.register_op("sqrt", backend="triton")
         def dt_sqrt(ops, x):
             out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
             if out.numel() == 0:
@@ -401,7 +359,7 @@ def register_triton_ops(
             out = neg(x)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("neg")
+        @dtype_cls.register_op("neg", backend="triton")
         def dt_neg(ops, x):
             out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
             if out.numel() == 0:
@@ -423,7 +381,7 @@ def register_triton_ops(
         out = exp(x)
         tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("exp")
+    @dtype_cls.register_op("exp", backend="triton")
     def dt_exp(ops, x):
         out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
         if out.numel() == 0:
@@ -445,7 +403,7 @@ def register_triton_ops(
         out = log(x)
         tl.store(out_ptr + offs, out, mask=mask)
 
-    @dtype_cls.register_op("log")
+    @dtype_cls.register_op("log", backend="triton")
     def dt_log(ops, x):
         out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
         if out.numel() == 0:
@@ -468,7 +426,7 @@ def register_triton_ops(
             out = sign(x)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("sign")
+        @dtype_cls.register_op("sign", backend="triton")
         def dt_sign(ops, x):
             out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
             if out.numel() == 0:
@@ -492,7 +450,7 @@ def register_triton_ops(
             out = tl.where(lt(x, zero), neg(x), x)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("abs")
+        @dtype_cls.register_op("abs", backend="triton")
         def dt_abs(ops, x):
             out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
             if out.numel() == 0:
@@ -516,7 +474,7 @@ def register_triton_ops(
             out = gt(x, y)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("gt")
+        @dtype_cls.register_op("gt", backend="triton")
         def dt_gt(ops, x, y):
             out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
             if out.numel() == 0:
@@ -540,7 +498,7 @@ def register_triton_ops(
             out = ge(x, y)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("ge")
+        @dtype_cls.register_op("ge", backend="triton")
         def dt_ge(ops, x, y):
             out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
             if out.numel() == 0:
@@ -564,7 +522,7 @@ def register_triton_ops(
             out = lt(x, y)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("lt")
+        @dtype_cls.register_op("lt", backend="triton")
         def dt_lt(ops, x, y):
             out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
             if out.numel() == 0:
@@ -588,7 +546,7 @@ def register_triton_ops(
             out = le(x, y)
             tl.store(out_ptr + offs, out, mask=mask)
 
-        @dtype_cls.register_op("le")
+        @dtype_cls.register_op("le", backend="triton")
         def dt_le(ops, x, y):
             out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
             if out.numel() == 0:
@@ -793,7 +751,7 @@ def register_triton_ops(
 
         tl.store(y_ptr + pid * s_y_r, from_accumulator(acc))
 
-    @dtype_cls.register_op("sum")
+    @dtype_cls.register_op("sum", backend="triton")
     def dt_sum(ops, x, dim=None, keepdim=False):
         orig_shape = x.shape
         ndim = x.dim()
@@ -916,7 +874,7 @@ def register_triton_ops(
         c_ptrs = base_c + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
         tl.store(c_ptrs, from_accumulator(acc), mask=mask_m[:, None] & mask_n[None, :] & (pid_b < BATCH))
 
-    @dtype_cls.register_op("matmul")
+    @dtype_cls.register_op("matmul", backend="triton")
     def dt_matmul(ops, A, B):
         a_was_1d = (A.ndim == 1)
         b_was_1d = (B.ndim == 1)
@@ -1079,7 +1037,7 @@ def register_triton_ops(
         out_ptrs = Yb + oc_offsets[:, None] * s_y_c + h[None, :] * s_y_h + w[None, :] * s_y_w
         tl.store(out_ptrs, from_accumulator(acc), mask=mask_oc[:, None] & mask_hw & mask_n & mask_group)
 
-    @dtype_cls.register_op("conv2d")
+    @dtype_cls.register_op("conv2d", backend="triton")
     def dt_conv2d(ops, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         if bias is None:
             bias = torch.full((weight.shape[0],), _ZERO.value, device=x.device, dtype=x.dtype)
@@ -1520,7 +1478,7 @@ def register_triton_ops(
             return grad_input, grad_weight, grad_bias, None, None, None, None
 
     @dtype_cls.register_func(torch.nn.functional.conv2d,
-                             cast=("input", "weight", "bias"))
+                             cast=("input", "weight", "bias"), backend="triton")
     def dt_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         return DTConv2dFunction.apply(input, weight, bias, stride, padding, dilation, groups)
 
@@ -1598,7 +1556,7 @@ def register_triton_ops(
             out = (in_size + 2 * padding - eff_k) // stride + 1
         return max(out, 0)
 
-    @dtype_cls.register_op("max_pool2d")
+    @dtype_cls.register_op("max_pool2d", backend="triton")
     def dt_max_pool2d(ops, x, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
@@ -1734,7 +1692,7 @@ def register_triton_ops(
             return max_pool2d_dinput(grad_output, indices, input_shape), None, None, None, None, None, None
 
     @dtype_cls.register_func(torch.nn.functional.max_pool2d,
-                             cast=("input",))
+                             cast=("input",), backend="triton")
     def dt_max_pool2d(input, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
         return DTMaxPool2dFunction.apply(input, kernel_size, stride, padding, dilation, ceil_mode, return_indices)
 
@@ -1826,7 +1784,7 @@ def register_triton_ops(
             m = max(m, end - start)
         return m
 
-    @dtype_cls.register_op("adaptive_avg_pool2d")
+    @dtype_cls.register_op("adaptive_avg_pool2d", backend="triton")
     def dt_adaptive_avg_pool2d(ops, x, output_size):
         N, C, H, W = x.shape
         Hout, Wout = output_size
@@ -2000,7 +1958,7 @@ def register_triton_ops(
             return adaptive_avg_pool2d_dinput(grad_output, input_shape), None
 
     @dtype_cls.register_func(torch.nn.functional.adaptive_avg_pool2d,
-                             cast=("input",))
+                             cast=("input",), backend="triton")
     def dt_adaptive_avg_pool2d(input, output_size):
         return DTAdaptiveAvgPool2dFunction.apply(input, output_size)
 
@@ -2261,7 +2219,7 @@ def register_triton_ops(
         y_ptrs = Y_ptr + n * s_y_n + pid0 * s_y_c + h * s_y_h + w * s_y_w
         tl.store(y_ptrs, y, mask=mask)
 
-    @dtype_cls.register_op("batch_norm")
+    @dtype_cls.register_op("batch_norm", backend="triton")
     def dt_batch_norm(ops, x, running_mean, running_var, momentum, eps, weight=None, bias=None, training=False):
         PARTIAL_BLOCK = 128
 
@@ -2699,7 +2657,8 @@ def register_triton_ops(
             return grad_input, None, None, grad_weight, grad_bias, None, None, None
 
     @dtype_cls.register_func(torch.nn.functional.batch_norm,
-                             cast=("input", "running_mean", "running_var", "weight", "bias"))
+                             cast=("input", "running_mean", "running_var", "weight", "bias"),
+                             backend="triton")
     def dt_batch_norm(input, running_mean, running_var, weight=None, bias=None, training=False, momentum=0.1, eps=1e-5):
         assert input.dim() == 4, "torchdt only supports 2D batch norm for now"
         return DTBatchNormFunction.apply(input, running_mean, running_var, weight, bias, training, momentum, eps)
@@ -2932,7 +2891,7 @@ def register_triton_ops(
         )
         return ops.sum(denom_values)
 
-    @dtype_cls.register_op("nll_loss")
+    @dtype_cls.register_op("nll_loss", backend="triton")
     def dt_nll_loss(ops, x, target, weight=None, reduction='mean', ignore_index=-100):
         if reduction not in ("none", "sum", "mean"):
             raise ValueError(f"Invalid reduction: {reduction}")
@@ -3018,7 +2977,7 @@ def register_triton_ops(
             return grad_input, None, None, None, None
 
     @dtype_cls.register_func(torch.nn.functional.nll_loss,
-                             cast=("input", "weight"))
+                             cast=("input", "weight"), backend="triton")
     def nll_loss(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean'):
         if size_average is not None or reduce is not None:
             reduction = _Reduction.legacy_get_string(size_average, reduce)
@@ -3067,7 +3026,7 @@ def register_triton_ops(
         p_new = sub(p, mul(g, tl.cast(lr, tl_int_dtype)))
         tl.store(p_ptr + offs, p_new, mask=mask)
 
-    @dtype_cls.register_op("triton_sgd_step")
+    @dtype_cls.register_op("triton_sgd_step", backend="triton")
     def triton_sgd_step(ops, p, grad, buf, lr, momentum, dampening, weight_decay, nesterov, maximize):
         N = p.numel()
         BLOCK = 1024
@@ -3137,7 +3096,7 @@ def register_triton_ops(
         p_new = clamp(mul_update, neg(tl.cast(max, tl_int_dtype)), tl.cast(max, tl_int_dtype))
         tl.store(p_ptr + offs, p_new, mask=mask)
 
-    @dtype_cls.register_op("triton_madam_step")
+    @dtype_cls.register_op("triton_madam_step", backend="triton")
     def triton_madam_step(ops, p, grad, exp_avg_sq, lr, beta, eps, g_bound, max, bias_corr, use_pow, maximize):
         N = p.numel()
         BLOCK = 1024
@@ -3220,7 +3179,7 @@ def register_triton_ops(
         tl.store(m_ptr + offs, m_new, mask=mask)
         tl.store(v_ptr + offs, v_new, mask=mask)
 
-    @dtype_cls.register_op("triton_adam_step")
+    @dtype_cls.register_op("triton_adam_step", backend="triton")
     def triton_adam_step(ops,
                         p, grad, exp_avg, exp_avg_sq, max_exp_avg_sq,
                         lr, beta1, beta2, eps, weight_decay,
@@ -3240,3 +3199,5 @@ def register_triton_ops(
         )
 
         return exp_avg, exp_avg_sq, max_exp_avg_sq
+
+    dtype_cls.ops.enable_backend("triton", "cuda")

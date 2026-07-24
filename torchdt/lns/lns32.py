@@ -181,11 +181,11 @@ def lns32_pow(ops, x, y):
 
 @LNS32.register_op("neg")
 def lns32_neg(ops, x):
-    return torch.where(x == ops.scalar_from_float(0.0), x, x ^ 1)
+    return torch.where(x == ops.scalar_from_float(0.0, device=x.device), x, x ^ 1)
 
 @LNS32.register_op("abs")
 def lns32_abs(ops, x):
-    return torch.where(x == ops.scalar_from_float(0.0), x, x & (-2)) # -2 is ~1
+    return torch.where(x == ops.scalar_from_float(0.0, device=x.device), x, x & (-2)) # -2 is ~1
 
 @LNS32.register_op("sign")
 def lns32_sign(ops, x):
@@ -193,8 +193,8 @@ def lns32_sign(ops, x):
         x == ZERO, ZERO,
         torch.where(
             (x & 1) == 1,
-            ops.scalar_from_float(-1.0),
-            ops.scalar_from_float(1.0)))
+            ops.scalar_from_float(-1.0, device=x.device),
+            ops.scalar_from_float(1.0, device=x.device)))
 
 @LNS32.register_op("ge")
 def lns32_ge(ops, x, y):

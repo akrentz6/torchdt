@@ -357,11 +357,11 @@ def lns16_pow(ops, x, y):
 
 @LNS16.register_op("neg")
 def lns16_neg(ops, x):
-    return torch.where(x == ops.scalar_from_float(0.0), x, x ^ 1)
+    return torch.where(x == ops.scalar_from_float(0.0, device=x.device), x, x ^ 1)
 
 @LNS16.register_op("abs")
 def lns16_abs(ops, x):
-    return torch.where(x == ops.scalar_from_float(0.0), x, x & (-2)) # -2 is ~1
+    return torch.where(x == ops.scalar_from_float(0.0, device=x.device), x, x & (-2)) # -2 is ~1
 
 @LNS16.register_op("sign")
 def lns16_sign(ops, x):
@@ -369,8 +369,8 @@ def lns16_sign(ops, x):
         x == ZERO, ZERO,
         torch.where(
             (x & 1) == 1,
-            ops.scalar_from_float(-1.0),
-            ops.scalar_from_float(1.0)))
+            ops.scalar_from_float(-1.0, device=x.device),
+            ops.scalar_from_float(1.0, device=x.device)))
 
 @LNS16.register_op("ge")
 def lns16_ge(ops, x, y):

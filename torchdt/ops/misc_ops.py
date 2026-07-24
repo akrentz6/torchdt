@@ -159,9 +159,10 @@ class DTChunkFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, *grad_outputs):
         parts = []
+        device = next((g.device for g in grad_outputs if g is not None), None)
         for g, shape in zip(grad_outputs, ctx.out_shapes):
             if g is None:
-                g = ops.zeros(*shape)
+                g = ops.zeros(shape, device=device)
             parts.append(g)
 
         return torch.cat(parts, dim=ctx.dim), None, None
@@ -184,8 +185,9 @@ class DTWhereFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         condition, x, y = ctx.saved_tensors
-        grad_x = ops.sum_to_size(torch.where(condition, grad_output, ops.scalar_from_float(0.0)), x.shape)
-        grad_y = ops.sum_to_size(torch.where(condition, ops.scalar_from_float(0.0), grad_output), y.shape)
+        zero = ops.scalar_from_float(0.0, device=grad_output.device)
+        grad_x = ops.sum_to_size(torch.where(condition, grad_output, zero), x.shape)
+        grad_y = ops.sum_to_size(torch.where(condition, zero, grad_output), y.shape)
         return None, grad_x, grad_y
 
 def _unpad_along_dim(ops, g, left, right, dim, mode):
@@ -296,7 +298,9 @@ class DTGetItemFunction(DTFunction):
             x, = ctx.saved_tensors
             idx = ctx.idx
 
-        grad_x = torch.full_like(x, ops.scalar_from_float(0.0))
+        grad_x = torch.full_like(
+            x, ops.scalar_from_float(0.0, device=x.device)
+        )
         grad_x[idx] = grad_output
         return grad_x, None
 
@@ -329,7 +333,7 @@ class DTSetItemFunction(DTFunction):
             idx = ctx.idx
 
         grad_x = grad_output.clone()
-        grad_x[idx] = ops.scalar_from_float(0.0)
+        grad_x[idx] = ops.scalar_from_float(0.0, device=grad_x.device)
         grad_value = grad_output.clone()[idx]
 
         if grad_value.shape != value.shape:

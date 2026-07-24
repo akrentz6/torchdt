@@ -82,7 +82,10 @@ class DType(Tensor):
     but expose their own semantics.
     """
     bitwidth: int = 32 # subclasses override
-    torch_funcs: Dict[Callable, Callable] = {} # mapping from 'torch.' function to custom implementation
+    # Python implementations shared by every dtype. Backend-specific and
+    # dtype-specific implementations live on each concrete subclass.
+    torch_funcs: Dict[Callable, Callable] = {}
+    _torch_func_implementations: Dict[str, Dict[Callable, Callable]] = {}
 
     def __new__(
             cls,
@@ -152,9 +155,16 @@ class DType(Tensor):
         namespace = {
             '__module__': OpsBase.__module__,
             'dtype': cls,
+            '_implementations': {},
+            '_enabled_backends': {},
         }
+        namespace.update({
+            method: OpsBase.dispatch_method(method)
+            for method in OpsBase._op_names
+        })
         ops_cls = type(ops_name, (OpsBase,), namespace)
         cls.ops = ops_cls
+        cls._torch_func_implementations = {}
 
         # allow normal imports to see it
         # module = sys.modules[cls.__module__]
@@ -229,7 +239,8 @@ class DType(Tensor):
     def register_func(
         cls,
         *torch_funcs: Callable,
-        cast: Tuple[Union[str, int]] = ()):
+        cast: Tuple[Union[str, int]] = (),
+        backend: str = "python"):
         """Decorator to register a custom implementation for a torch.* function."""
 
         def decorator(func: Callable) -> Callable:
@@ -252,21 +263,40 @@ class DType(Tensor):
                     raise ValueError("_dtype_cls must be provided when calling registered torch function.")
 
                 bound = sig.bind_partial(*args, **kwargs)
+                dtype_devices = {
+                    _dtype_cls.ops.tensor_device(tensor)
+                    for value in bound.arguments.values()
+                    for tensor in _dtype_cls.ops._iter_tensors(value)
+                    if isinstance(tensor, DType)
+                }
+                if len(dtype_devices) > 1:
+                    device_list = ", ".join(str(device) for device in sorted(dtype_devices, key=str))
+                    raise RuntimeError(
+                        f"Expected all {DType.__name__} arguments to use one device, got {device_list}."
+                    )
+                cast_device = next(iter(dtype_devices), None)
+
                 for pname in cast_names:
                     if pname in bound.arguments:
                         if bound.arguments[pname] is not None:
                             # convert argument to the correct DType subclass - can also handle lists, tuples, etc?
                             if isinstance(bound.arguments[pname], (list, tuple)):
                                 bound.arguments[pname] = type(bound.arguments[pname])(
-                                    _dtype_cls(x) if type(x) != _dtype_cls else x for x in bound.arguments[pname]
+                                    _dtype_cls(x, device=cast_device) if type(x) != _dtype_cls else x
+                                    for x in bound.arguments[pname]
                                 )
                             elif type(bound.arguments[pname]) != _dtype_cls:
-                                bound.arguments[pname] = _dtype_cls(bound.arguments[pname])
+                                bound.arguments[pname] = _dtype_cls(
+                                    bound.arguments[pname], device=cast_device
+                                )
 
                 return func(*bound.args, **bound.kwargs)
 
             for torch_func in torch_funcs:
-                cls.torch_funcs[torch_func] = wrapped_func
+                if cls is DType and backend == "python":
+                    cls.torch_funcs[torch_func] = wrapped_func
+                else:
+                    cls._torch_func_implementations.setdefault(backend, {})[torch_func] = wrapped_func
 
             return wrapped_func
 
@@ -279,18 +309,37 @@ class DType(Tensor):
         if kwargs is None:
             kwargs = {}
 
-        if func not in cls.torch_funcs:
+        dtype_devices = {
+            cls.ops.tensor_device(tensor)
+            for value in (*args, *kwargs.values())
+            for tensor in cls.ops._iter_tensors(value)
+            if isinstance(tensor, DType)
+        }
+        if len(dtype_devices) > 1:
+            device_list = ", ".join(str(device) for device in sorted(dtype_devices, key=str))
+            raise RuntimeError(
+                f"Expected all DType arguments to use one device, got {device_list}."
+            )
+        device = next(iter(dtype_devices), None)
+        backend = cls.ops.backend_for_device(device)
+        implementation = cls._torch_func_implementations.get(backend, {}).get(func)
+        if implementation is None:
+            implementation = cls._torch_func_implementations.get("python", {}).get(func)
+        if implementation is None:
+            implementation = DType.torch_funcs.get(func)
+
+        if implementation is None:
             if func in no_override_funcs or func.__name__ in no_override_func_names:
                 return super().__torch_function__(func, types, args, kwargs)
             raise NotImplementedError(f"{cls.__name__} has no implementation for torch function '{func.__name__}'.")
 
         # pass cls to cast any floating point or number arguments to tensors of this DType
-        return cls.torch_funcs[func](*args, _dtype_cls=cls, **kwargs)
+        return implementation(*args, _dtype_cls=cls, **kwargs)
 
     @classmethod
-    def register_op(cls, method: str):
+    def register_op(cls, method: str, backend: str = "python"):
         """Decorator to register an operation for this DType subclass."""
-        return register_op(cls, method)
+        return register_op(cls, method, backend=backend)
 
     @property
     def _float(self) -> Tensor:

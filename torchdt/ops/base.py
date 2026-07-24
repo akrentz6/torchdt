@@ -1,35 +1,123 @@
 import torch
 from torch import Tensor, CharTensor, ShortTensor, IntTensor, LongTensor
 from typing import Union, Callable
+import functools
 
 InternalTensor = Union[CharTensor, ShortTensor, IntTensor, LongTensor]
 
-def register_op(dtype_cls: type, method: str) -> Callable:
+def register_op(dtype_cls: type, method: str, backend: str = "python") -> Callable:
     """Decorator to register an operation for a given DType subclass."""
     def decorator(func: Callable) -> Callable:
         ops_cls = dtype_cls.ops
-        if not hasattr(ops_cls, method):
+        if method not in OpsBase._op_names:
             raise ValueError(f"{ops_cls.__name__} has no method '{method}' to register.")
-        setattr(ops_cls, method, classmethod(func))
+        ops_cls._implementations.setdefault(backend, {})[method] = func
         return func
     return decorator
 
 def register_base_op(method: str) -> Callable:
     """Decorator to register a base operation."""
     def decorator(func: Callable) -> Callable:
-        if not hasattr(OpsBase, method):
+        if method not in OpsBase._op_names:
             raise ValueError(f"OpsBase has no method '{method}' to register.")
-        setattr(OpsBase, method, classmethod(func))
+        OpsBase._base_implementations[method] = func
         return func
     return decorator
 
 class OpsBase:
 
+    _base_implementations = {}
+    _op_names = set()
+
+    @classmethod
+    def _iter_tensors(cls, value):
+        if isinstance(value, Tensor):
+            yield value
+        elif isinstance(value, dict):
+            for item in value.values():
+                yield from cls._iter_tensors(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from cls._iter_tensors(item)
+
+    @staticmethod
+    def tensor_device(tensor: Tensor):
+        with torch._C.DisableTorchFunctionSubclass():
+            return tensor.device
+
+    @classmethod
+    def resolve_device(cls, args, kwargs=None):
+        """Return the common tensor device used by an operation."""
+        kwargs = kwargs or {}
+        devices = {
+            cls.tensor_device(tensor)
+            for value in (*args, *kwargs.values())
+            for tensor in cls._iter_tensors(value)
+        }
+        if len(devices) > 1:
+            device_list = ", ".join(str(device) for device in sorted(devices, key=str))
+            raise RuntimeError(f"Expected all tensor arguments to use one device, got {device_list}.")
+        return next(iter(devices), None)
+
+    @classmethod
+    def backend_for_device(cls, device):
+        if device is None:
+            return "python"
+        return cls._enabled_backends.get(device.type, "python")
+
+    @classmethod
+    def enable_backend(cls, backend: str, device_type: str) -> None:
+        current = cls._enabled_backends.get(device_type)
+        if current is not None and current != backend:
+            raise RuntimeError(
+                f"{cls.__name__} already uses backend '{current}' for {device_type}."
+            )
+        cls._enabled_backends[device_type] = backend
+
+    @classmethod
+    def _get_implementation(cls, method: str, backend: str):
+        implementation = cls._implementations.get(backend, {}).get(method)
+        if implementation is None and backend == "python":
+            implementation = OpsBase._base_implementations.get(method)
+        return implementation
+
+    @classmethod
+    def _dispatch(cls, method: str, *args, **kwargs):
+        device = cls.resolve_device(args, kwargs)
+        backend = cls.backend_for_device(device)
+        implementation = cls._get_implementation(method, backend)
+
+        if implementation is None and backend != "python":
+            implementation = cls._get_implementation(method, "python")
+
+        if implementation is None:
+            device_name = str(device) if device is not None else "no tensor device"
+            raise NotImplementedError(
+                f"{cls.dtype.__name__} has no implementation for operation '{method}' "
+                f"on {device_name}."
+            )
+
+        return implementation(cls, *args, **kwargs)
+
+    @staticmethod
+    def dispatch_method(method: str):
+        @functools.wraps(getattr(OpsBase, method))
+        def dispatched(cls, *args, **kwargs):
+            return cls._dispatch(method, *args, **kwargs)
+        return classmethod(dispatched)
+
     # ========== Useful helper functions ==========
 
     @classmethod
-    def scalar_from_float(cls, x: Union[float, int]) -> InternalTensor:
-        x_tensor = torch.tensor(x, dtype=torch.float32)
+    def scalar_from_float(cls, x: Union[float, int, Tensor], *, device=None) -> InternalTensor:
+        if isinstance(x, Tensor):
+            if x.numel() != 1:
+                raise ValueError("scalar_from_float expects a scalar value")
+            if device is None:
+                device = x.device
+            x_tensor = x.detach().to(dtype=torch.float32, device=device).reshape(())
+        else:
+            x_tensor = torch.tensor(x, dtype=torch.float32, device=device)
         return cls.from_float(x_tensor)
 
     @classmethod
@@ -38,27 +126,27 @@ class OpsBase:
 
     @classmethod
     def zeros(cls, size, device=None):
-        return torch.full(size, cls.scalar_from_float(0.0), dtype=cls.dtype.int_dtype, device=device)
+        return torch.full(size, cls.scalar_from_float(0.0, device=device), dtype=cls.dtype.int_dtype, device=device)
 
     @classmethod
     def zeros_like(cls, x):
-        return torch.full_like(x, cls.scalar_from_float(0.0), dtype=cls.dtype.int_dtype, device=x.device)
+        return torch.full_like(x, cls.scalar_from_float(0.0, device=x.device), dtype=cls.dtype.int_dtype, device=x.device)
 
     @classmethod
     def ones(cls, size, device=None):
-        return torch.full(size, cls.scalar_from_float(1.0), dtype=cls.dtype.int_dtype, device=device)
+        return torch.full(size, cls.scalar_from_float(1.0, device=device), dtype=cls.dtype.int_dtype, device=device)
 
     @classmethod
     def ones_like(cls, x):
-        return torch.full_like(x, cls.scalar_from_float(1.0), dtype=cls.dtype.int_dtype, device=x.device)
+        return torch.full_like(x, cls.scalar_from_float(1.0, device=x.device), dtype=cls.dtype.int_dtype, device=x.device)
 
     @classmethod
     def full(cls, size, fill_value, device=None):
-        return torch.full(size, cls.scalar_from_float(fill_value), dtype=cls.dtype.int_dtype, device=device)
+        return torch.full(size, cls.scalar_from_float(fill_value, device=device), dtype=cls.dtype.int_dtype, device=device)
 
     @classmethod
     def full_like(cls, x, fill_value):
-        return torch.full_like(x, cls.scalar_from_float(fill_value), dtype=cls.dtype.int_dtype)
+        return torch.full_like(x, cls.scalar_from_float(fill_value, device=x.device), dtype=cls.dtype.int_dtype)
 
     @classmethod
     def sum_to_size(cls, x: InternalTensor, target_size: torch.Size) -> InternalTensor:
@@ -133,7 +221,7 @@ class OpsBase:
     def lt(cls, x: InternalTensor, y: InternalTensor) -> Tensor:
         raise NotImplementedError
 
-    # ========== Backward operations for c++ ops ==========
+    # ========== Backend-specific backward operations ==========
 
     @classmethod
     def matmul_backward(cls, grad_output: InternalTensor, A: InternalTensor,
@@ -527,3 +615,24 @@ class OpsBase:
                         bias_corr1: InternalTensor, bias_corr2: InternalTensor,
                         amsgrad: bool, maximize: bool) -> tuple[InternalTensor, InternalTensor, InternalTensor]:
         raise NotImplementedError
+
+
+_HELPER_METHODS = {
+    "backend_for_device",
+    "enable_backend",
+    "full",
+    "full_like",
+    "ones",
+    "ones_like",
+    "resolve_device",
+    "scalar_from_float",
+    "scalar_to_float",
+    "sum_to_size",
+    "zeros",
+    "zeros_like",
+}
+OpsBase._op_names = {
+    name
+    for name, value in OpsBase.__dict__.items()
+    if isinstance(value, classmethod) and not name.startswith("_") and name not in _HELPER_METHODS
+}

@@ -46,7 +46,7 @@ class DTLinearFunction(DTFunction):
 
 @register_base_op("dropout")
 def dt_dropout(ops, x, p=0.5):
-    mask = ops.from_float(torch.bernoulli(torch.full(x.shape, 1 - p)))
+    mask = ops.from_float(torch.bernoulli(torch.full(x.shape, 1 - p, device=x.device)))
     return ops.mul(x, mask)
 
 class DTDropoutFunction(DTFunction):
@@ -65,9 +65,12 @@ class DTDropoutFunction(DTFunction):
     def backward(ctx, ops, grad_output):
         output, = ctx.saved_tensors
         grad_x = torch.where(
-            output == ops.scalar_from_float(0.0),
-            ops.scalar_from_float(0.0),
-            ops.mul(grad_output, ops.scalar_from_float(1 / (1 - ctx.p))))
+            output == ops.scalar_from_float(0.0, device=output.device),
+            ops.scalar_from_float(0.0, device=output.device),
+            ops.mul(
+                grad_output,
+                ops.scalar_from_float(1 / (1 - ctx.p), device=grad_output.device)
+            ))
         return grad_x, None
 
 @register_base_op("conv2d")
@@ -100,7 +103,8 @@ def dt_conv2d(ops, x, weight, bias=None, stride=1, padding=0, dilation=1, groups
     # Pad input
     if pad_h > 0 or pad_w > 0:
         x_padded = torch.nn.functional.pad(
-            x, (pad_w, pad_w, pad_h, pad_h), value=ops.scalar_from_float(0.0).item()
+            x, (pad_w, pad_w, pad_h, pad_h),
+            value=ops.scalar_from_float(0.0, device=x.device).item()
         )
     else:
         x_padded = x
@@ -109,7 +113,7 @@ def dt_conv2d(ops, x, weight, bias=None, stride=1, padding=0, dilation=1, groups
     # Output shape calculation as per PyTorch
     H_out = (H_in + 2 * pad_h - dil_h * (K_H - 1) - 1) // stride_h + 1
     W_out = (W_in + 2 * pad_w - dil_w * (K_W - 1) - 1) // stride_w + 1
-    out = ops.zeros(N, C_out, H_out, W_out)
+    out = ops.zeros((N, C_out, H_out, W_out), device=x.device)
 
     for n in range(N):
         for g in range(groups):
@@ -172,14 +176,17 @@ class DTConv2dFunction(DTFunction):
 
         # Pad input for correct alignment
         if pad_h > 0 or pad_w > 0:
-            x_padded = torch.nn.functional.pad(x, (pad_w, pad_w, pad_h, pad_h), value=ops.scalar_from_float(0.0).item())
+            x_padded = torch.nn.functional.pad(
+                x, (pad_w, pad_w, pad_h, pad_h),
+                value=ops.scalar_from_float(0.0, device=x.device).item()
+            )
         else:
             x_padded = x
 
         H_pad = x_padded.shape[2]
         W_pad = x_padded.shape[3]
 
-        grad_x_padded = ops.zeros(N, C_in, H_pad, W_pad)
+        grad_x_padded = ops.zeros((N, C_in, H_pad, W_pad), device=x.device)
         grad_weight = ops.zeros_like(weight)
 
         # Input gradient: for each pixel in input, sum all contributions from grad_output via the receptive field
@@ -192,7 +199,7 @@ class DTConv2dFunction(DTFunction):
                 for c_in in range(g_Cin):
                     for h_in in range(H_pad):
                         for w_in in range(W_pad):
-                            grad = ops.scalar_from_float(0.0)
+                            grad = ops.scalar_from_float(0.0, device=grad_output.device)
                             for c_out in range(out_start, out_end):
                                 w = weight[c_out, c_in, :, :]
                                 for k_h in range(K_H):
@@ -226,7 +233,7 @@ class DTConv2dFunction(DTFunction):
                 for c_in in range(g_Cin):
                     for k_h in range(K_H):
                         for k_w in range(K_W):
-                            grad = ops.scalar_from_float(0.0)
+                            grad = ops.scalar_from_float(0.0, device=grad_output.device)
                             for n in range(N):
                                 for h_out in range(H_out):
                                     for w_out in range(W_out):
@@ -274,7 +281,10 @@ def dt_avg_pool2d(ops, x, kernel_size, stride=None, padding=0, ceil_mode=False, 
 
     N, C, H_in, W_in = x.shape
     if pad_h > 0 or pad_w > 0:
-        x_padded = torch.nn.functional.pad(x, (pad_w, pad_w, pad_h, pad_h), value=ops.scalar_from_float(0.0).item())
+        x_padded = torch.nn.functional.pad(
+            x, (pad_w, pad_w, pad_h, pad_h),
+            value=ops.scalar_from_float(0.0, device=x.device).item()
+        )
     else:
         x_padded = x
 
@@ -285,8 +295,8 @@ def dt_avg_pool2d(ops, x, kernel_size, stride=None, padding=0, ceil_mode=False, 
         H_out = (H_in + 2 * pad_h - kernel_h) // stride_h + 1
         W_out = (W_in + 2 * pad_w - kernel_w) // stride_w + 1
 
-    out = ops.zeros(N, C, H_out, W_out)
-    kernel_area_dt = ops.scalar_from_float(kernel_h * kernel_w)
+    out = ops.zeros((N, C, H_out, W_out), device=x.device)
+    kernel_area_dt = ops.scalar_from_float(kernel_h * kernel_w, device=x.device)
 
     for n in range(N):
         for c in range(C):
@@ -314,7 +324,7 @@ def dt_avg_pool2d(ops, x, kernel_size, stride=None, padding=0, ceil_mode=False, 
                         valid_h = kernel_h - (top_pad + bot_pad)
                         valid_w = kernel_w - (left_pad + right_pad)
                         valid_count = max(valid_h, 0) * max(valid_w, 0)
-                        divisor = ops.scalar_from_float(max(valid_count, 1))
+                        divisor = ops.scalar_from_float(max(valid_count, 1), device=x.device)
 
                     out[n, c, h_out, w_out] = ops.div(sm, divisor)
 
@@ -373,7 +383,7 @@ class DTAvgPool2dFunction(DTFunction):
         H_out, W_out = grad_output.shape[-2:]
 
         grad_x = ops.zeros_like(x)
-        kernel_area_dt = ops.scalar_from_float(kernel_h * kernel_w)
+        kernel_area_dt = ops.scalar_from_float(kernel_h * kernel_w, device=x.device)
 
         for n in range(N):
             for c in range(C):
@@ -396,7 +406,7 @@ class DTAvgPool2dFunction(DTFunction):
                             valid_h = kernel_h - (top_pad + bot_pad)
                             valid_w = kernel_w - (left_pad + right_pad)
                             valid_count = max(valid_h, 0) * max(valid_w, 0)
-                            divisor = ops.scalar_from_float(max(valid_count, 1))
+                            divisor = ops.scalar_from_float(max(valid_count, 1), device=x.device)
 
                         grad = grad_output[n, c, h_out, w_out]
                         for i in range(kernel_h):
@@ -428,7 +438,7 @@ def dt_adaptive_avg_pool2d(ops, x, output_size):
         squeeze_batch = False
 
     N, C, H_in, W_in = x.shape
-    out = ops.zeros(N, C, H_out, W_out)
+    out = ops.zeros((N, C, H_out, W_out), device=x.device)
 
     for n in range(N):
         for c in range(C):
@@ -441,7 +451,9 @@ def dt_adaptive_avg_pool2d(ops, x, output_size):
 
                     window = x[n, c, h_start:h_end, w_start:w_end]
                     sm = ops.sum(window)
-                    divisor = ops.scalar_from_float(max((h_end - h_start) * (w_end - w_start), 1))
+                    divisor = ops.scalar_from_float(
+                        max((h_end - h_start) * (w_end - w_start), 1), device=x.device
+                    )
                     out[n, c, h_out, w_out] = ops.div(sm, divisor)
 
     if squeeze_batch:
@@ -488,7 +500,9 @@ class DTAdaptiveAvgPool2dFunction(DTFunction):
                         w_start = int(math.floor(w_out * W_in / W_out))
                         w_end = int(math.ceil((w_out + 1) * W_in / W_out))
 
-                        divisor = ops.scalar_from_float(max((h_end - h_start) * (w_end - w_start), 1))
+                        divisor = ops.scalar_from_float(
+                            max((h_end - h_start) * (w_end - w_start), 1), device=x.device
+                        )
                         grad = ops.div(grad_output[n, c, h_out, w_out], divisor)
 
                         for i in range(h_start, h_end):
@@ -527,7 +541,9 @@ def dt_max_pool2d(ops, x, kernel_size, stride=None, padding=0, dilation=1, ceil_
     N, C, H_in, W_in = x.shape
     if pad_h > 0 or pad_w > 0:
         x_padded = torch.nn.functional.pad(x, (pad_w, pad_w, pad_h, pad_h),
-                                           value=ops.scalar_from_float(float("-inf")).item())
+                                           value=ops.scalar_from_float(
+                                               float("-inf"), device=x.device
+                                           ).item())
     else:
         x_padded = x
 
@@ -540,7 +556,7 @@ def dt_max_pool2d(ops, x, kernel_size, stride=None, padding=0, dilation=1, ceil_
         H_out = (H_in + 2 * pad_h - eff_kh) // stride_h + 1
         W_out = (W_in + 2 * pad_w - eff_kw) // stride_w + 1
 
-    out_vals = ops.zeros(N, C, H_out, W_out)
+    out_vals = ops.zeros((N, C, H_out, W_out), device=x.device)
     if return_indices:
         out_idx = torch.empty((N, C, H_out, W_out), dtype=torch.int64, device=x.device)
 
@@ -645,7 +661,9 @@ class DTMaxPool2dFunction(DTFunction):
 
         if pad_h > 0 or pad_w > 0:
             x_padded = torch.nn.functional.pad(x, (pad_w, pad_w, pad_h, pad_h),
-                                               value=ops.scalar_from_float(float("-inf")).item())
+                                               value=ops.scalar_from_float(
+                                                   float("-inf"), device=x.device
+                                               ).item())
         else:
             x_padded = x
 
@@ -711,11 +729,17 @@ def dt_batch_norm(ops, x, running_mean, running_var, momentum, eps, weight=None,
 
     if training:
         batch_mean = ops.mean(x, dim=red_dims, keepdim=True)
-        batch_var = ops.var(x, ops.scalar_from_float(0.0), dim=red_dims, keepdim=True)
-        batch_var_corrected = ops.var(x, ops.scalar_from_float(1.0), dim=red_dims, keepdim=True)
+        batch_var = ops.var(
+            x, ops.scalar_from_float(0.0, device=x.device), dim=red_dims, keepdim=True
+        )
+        batch_var_corrected = ops.var(
+            x, ops.scalar_from_float(1.0, device=x.device), dim=red_dims, keepdim=True
+        )
 
         with torch.no_grad():
-            one_minus_momentum = ops.sub(ops.scalar_from_float(1.0), momentum)
+            one_minus_momentum = ops.sub(
+                ops.scalar_from_float(1.0, device=x.device), momentum
+            )
             new_running_mean = ops.add(
                 ops.mul(one_minus_momentum, running_mean),
                 ops.mul(momentum, batch_mean.squeeze()))
@@ -733,7 +757,9 @@ def dt_batch_norm(ops, x, running_mean, running_var, momentum, eps, weight=None,
         var = running_var.view(1, -1, *([1] * (x.dim() - 2)))
 
     var_eps = ops.add(var, eps)
-    inv_std = ops.div(ops.scalar_from_float(1.0), ops.sqrt(var_eps))
+    inv_std = ops.div(
+        ops.scalar_from_float(1.0, device=x.device), ops.sqrt(var_eps)
+    )
     x_centered = ops.sub(x, mean)
     x_hat = ops.mul(x_centered, inv_std)
 
@@ -760,7 +786,10 @@ class DTBatchNormFunction(DTFunction):
 
         if training:
             mean = ops.mean(x, dim=ctx.red_dims, keepdim=True)
-            var = ops.var(x, ops.scalar_from_float(1.0), dim=ctx.red_dims, keepdim=True)
+            var = ops.var(
+                x, ops.scalar_from_float(1.0, device=x.device),
+                dim=ctx.red_dims, keepdim=True
+            )
         else:
             mean = running_mean.reshape(1, -1, *([1] * (x.dim() - 2)))
             var = running_var.reshape(1, -1, *([1] * (x.dim() - 2)))
@@ -771,7 +800,9 @@ class DTBatchNormFunction(DTFunction):
         x, weight, bias, mean, var, eps = ctx.saved_tensors
 
         var_eps = ops.add(var, eps)
-        inv_std = ops.div(ops.scalar_from_float(1.0), ops.sqrt(var_eps))
+        inv_std = ops.div(
+            ops.scalar_from_float(1.0, device=x.device), ops.sqrt(var_eps)
+        )
         x_centered = ops.sub(x, mean)
         x_hat = ops.mul(x_centered, inv_std)
 
@@ -789,11 +820,11 @@ class DTBatchNormFunction(DTFunction):
             N = 1
             for dim in ctx.red_dims:
                 N *= x.shape[dim]
-            n_elems = ops.scalar_from_float(N)
+            n_elems = ops.scalar_from_float(N, device=x.device)
 
             var_eps = ops.add(var, eps)
             inv_std_cubed = ops.mul(inv_std, ops.mul(inv_std, inv_std))
-            neg_half = ops.scalar_from_float(-0.5)
+            neg_half = ops.scalar_from_float(-0.5, device=x.device)
 
             grad_var = ops.sum(ops.mul(
                 ops.mul(grad_y_wrt_x_hat, x_centered),
@@ -804,16 +835,18 @@ class DTBatchNormFunction(DTFunction):
             grad_mean_term1 = ops.sum(ops.mul(grad_y_wrt_x_hat, neg_inv_std),
                                       dim=ctx.red_dims, keepdim=True)
 
-            neg_two = ops.scalar_from_float(-2.0)
+            neg_two = ops.scalar_from_float(-2.0, device=x.device)
             neg_two_over_N = ops.div(neg_two, n_elems)
             sum_x_centered = ops.sum(x_centered, dim=ctx.red_dims, keepdim=True)
             grad_mean_term2 = ops.mul(ops.mul(grad_var, neg_two_over_N), sum_x_centered)
 
             grad_mean = ops.add(grad_mean_term1, grad_mean_term2)
 
-            two = ops.scalar_from_float(2.0)
+            two = ops.scalar_from_float(2.0, device=x.device)
             two_over_N = ops.div(two, n_elems)
-            one_over_N = ops.div(ops.scalar_from_float(1.0), n_elems)
+            one_over_N = ops.div(
+                ops.scalar_from_float(1.0, device=x.device), n_elems
+            )
 
             grad_x_term1 = ops.mul(grad_y_wrt_x_hat, inv_std)
             grad_x_term2 = ops.mul(ops.mul(grad_var, two_over_N), x_centered)
@@ -829,10 +862,15 @@ class DTBatchNormFunction(DTFunction):
 def dt_layer_norm(ops, x, eps, normalized_shape, weight=None, bias=None):
     reduce_dims = tuple(range(x.dim() - len(normalized_shape), x.dim()))
     mean = ops.mean(x, dim=reduce_dims, keepdim=True)
-    var = ops.var(x, ops.scalar_from_float(0.0), dim=reduce_dims, keepdim=True)
+    var = ops.var(
+        x, ops.scalar_from_float(0.0, device=x.device),
+        dim=reduce_dims, keepdim=True
+    )
 
     var_eps = ops.add(var, eps)
-    inv_std = ops.div(ops.scalar_from_float(1.0), ops.sqrt(var_eps))
+    inv_std = ops.div(
+        ops.scalar_from_float(1.0, device=x.device), ops.sqrt(var_eps)
+    )
     x_hat = ops.mul(ops.sub(x, mean), inv_std)
 
     if weight is not None:
@@ -855,7 +893,10 @@ class DTLayerNormFunction(DTFunction):
         x, eps, normalized_shape, weight, bias = inputs
         ctx.red_dims = tuple(range(x.dim() - len(normalized_shape), x.dim()))
         mean = ops.mean(x, dim=ctx.red_dims, keepdim=True)
-        var = ops.var(x, ops.scalar_from_float(0.0), dim=ctx.red_dims, keepdim=True)
+        var = ops.var(
+            x, ops.scalar_from_float(0.0, device=x.device),
+            dim=ctx.red_dims, keepdim=True
+        )
         ctx.save_for_backward(x, weight, bias, mean, var, eps)
 
     @staticmethod
@@ -863,7 +904,9 @@ class DTLayerNormFunction(DTFunction):
         x, weight, bias, mean, var, eps = ctx.saved_tensors
         red_dims = ctx.red_dims
         var_eps = ops.add(var, eps)
-        inv_std = ops.div(ops.scalar_from_float(1.0), ops.sqrt(var_eps))
+        inv_std = ops.div(
+            ops.scalar_from_float(1.0, device=x.device), ops.sqrt(var_eps)
+        )
         x_centered = ops.sub(x, mean)
         x_hat = ops.mul(x_centered, inv_std)
 
@@ -889,7 +932,7 @@ class DTLayerNormFunction(DTFunction):
         N = 1
         for d in red_dims:
             N *= x.shape[d]
-        n_elems = ops.scalar_from_float(N)
+        n_elems = ops.scalar_from_float(N, device=x.device)
 
         sum_grad = ops.sum(grad_y_wrt_x_hat, dim=red_dims, keepdim=True)
         sum_grad_xhat = ops.sum(
@@ -902,7 +945,7 @@ class DTLayerNormFunction(DTFunction):
             ops.sub(Ng, sum_grad),
             ops.mul(x_hat, sum_grad_xhat)
         )
-        inv_N = ops.div(ops.scalar_from_float(1.0), n_elems)
+        inv_N = ops.div(ops.scalar_from_float(1.0, device=x.device), n_elems)
         grad_x = ops.mul(ops.mul(inv_std, inv_N), term_inner)
 
         return grad_x, None, None, grad_weight, grad_bias

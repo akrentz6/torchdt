@@ -19,7 +19,7 @@ class DTSignFunction(DTFunction):
 
 @register_base_op("neg")
 def dt_neg(ops, x):
-    return ops.mul(ops.scalar_from_float(-1.0), x)
+    return ops.mul(ops.scalar_from_float(-1.0, device=x.device), x)
 
 class DTNegFunction(DTFunction):
 
@@ -55,7 +55,7 @@ class DTAbsFunction(DTFunction):
     def backward(ctx, ops, grad_output):
         x, = ctx.saved_tensors
 
-        x_less_than_zero = ops.lt(x, ops.scalar_from_float(0.0))
+        x_less_than_zero = ops.lt(x, ops.scalar_from_float(0.0, device=x.device))
         grad_x = torch.where(x_less_than_zero, ops.neg(grad_output), grad_output)
 
         return grad_x

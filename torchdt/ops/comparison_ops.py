@@ -99,7 +99,10 @@ class DTAllcloseFunction(DTNonDifferentiableFunction):
 
 @register_base_op("any")
 def dt_any(ops, x, dim=None, keepdim=False):
-    return torch.any(ops.ne(x, ops.scalar_from_float(0.0)), dim=dim, keepdim=keepdim)
+    return torch.any(
+        ops.ne(x, ops.scalar_from_float(0.0, device=x.device)),
+        dim=dim, keepdim=keepdim
+    )
 
 class DTAnyFunction(DTNonDifferentiableFunction):
 
@@ -111,7 +114,10 @@ class DTAnyFunction(DTNonDifferentiableFunction):
 
 @register_base_op("all")
 def dt_all(ops, x, dim=None, keepdim=False):
-    return torch.all(ops.ne(x, ops.scalar_from_float(0.0)), dim=dim, keepdim=keepdim)
+    return torch.all(
+        ops.ne(x, ops.scalar_from_float(0.0, device=x.device)),
+        dim=dim, keepdim=keepdim
+    )
 
 class DTAllFunction(DTNonDifferentiableFunction):
 
@@ -154,13 +160,17 @@ class DTMaximumFunction(DTFunction):
         x, y = ctx.saved_tensors
 
         x_y_equal = ops.eq(x, y)
-        half_grad_output = ops.mul(grad_output, ops.scalar_from_float(0.5))
+        half_grad_output = ops.mul(
+            grad_output, ops.scalar_from_float(0.5, device=grad_output.device)
+        )
 
         grad_x = torch.where(x_y_equal, half_grad_output, torch.where(
-            ops.gt(x, y), grad_output, ops.scalar_from_float(0.0)
+            ops.gt(x, y), grad_output,
+            ops.scalar_from_float(0.0, device=grad_output.device)
         ))
         grad_y = torch.where(x_y_equal, half_grad_output, torch.where(
-            ops.gt(y, x), grad_output, ops.scalar_from_float(0.0)
+            ops.gt(y, x), grad_output,
+            ops.scalar_from_float(0.0, device=grad_output.device)
         ))
 
         grad_x = ops.sum_to_size(grad_x, x.shape)
@@ -189,13 +199,17 @@ class DTMinimumFunction(DTFunction):
         x, y = ctx.saved_tensors
 
         x_y_equal = ops.eq(x, y)
-        half_grad_output = ops.mul(grad_output, ops.scalar_from_float(0.5))
+        half_grad_output = ops.mul(
+            grad_output, ops.scalar_from_float(0.5, device=grad_output.device)
+        )
 
         grad_x = torch.where(x_y_equal, half_grad_output, torch.where(
-            ops.lt(x, y), grad_output, ops.scalar_from_float(0.0)
+            ops.lt(x, y), grad_output,
+            ops.scalar_from_float(0.0, device=grad_output.device)
         ))
         grad_y = torch.where(x_y_equal, half_grad_output, torch.where(
-            ops.lt(y, x), grad_output, ops.scalar_from_float(0.0)
+            ops.lt(y, x), grad_output,
+            ops.scalar_from_float(0.0, device=grad_output.device)
         ))
 
         grad_x = ops.sum_to_size(grad_x, x.shape)
@@ -261,9 +275,15 @@ class DTMaxFunction(DTFunction):
             x, result = ctx.saved_tensors
 
             max_values = torch.eq(x, result)
-            grad_x = ops.div(grad_output, ops.scalar_from_float(max_values.sum()))
+            grad_x = ops.div(
+                grad_output,
+                ops.scalar_from_float(max_values.sum(), device=grad_output.device)
+            )
 
-            return torch.where(max_values, grad_x, ops.scalar_from_float(0.0)), None, None, None
+            return torch.where(
+                max_values, grad_x,
+                ops.scalar_from_float(0.0, device=grad_output.device)
+            ), None, None, None
 
         x, indices = ctx.saved_tensors
 
@@ -339,9 +359,15 @@ class DTMinFunction(DTFunction):
             x, result = ctx.saved_tensors
 
             min_values = torch.eq(x, result)
-            grad_x = ops.div(grad_output, ops.scalar_from_float(min_values.sum()))
+            grad_x = ops.div(
+                grad_output,
+                ops.scalar_from_float(min_values.sum(), device=grad_output.device)
+            )
 
-            return torch.where(min_values, grad_x, ops.scalar_from_float(0.0)), None, None, None
+            return torch.where(
+                min_values, grad_x,
+                ops.scalar_from_float(0.0, device=grad_output.device)
+            ), None, None, None
 
         x, indices = ctx.saved_tensors
 
@@ -453,10 +479,14 @@ class DTClampFunction(DTFunction):
         grad_x = grad_output.clone()
         if min is not None:
             lt_mask = ops.lt(x, min)
-            grad_x = torch.where(lt_mask, ops.scalar_from_float(0.0), grad_x)
+            grad_x = torch.where(
+                lt_mask, ops.scalar_from_float(0.0, device=x.device), grad_x
+            )
 
         if max is not None:
             gt_mask = ops.gt(x, max)
-            grad_x = torch.where(gt_mask, ops.scalar_from_float(0.0), grad_x)
+            grad_x = torch.where(
+                gt_mask, ops.scalar_from_float(0.0, device=x.device), grad_x
+            )
 
         return grad_x, None, None

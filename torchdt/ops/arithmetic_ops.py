@@ -186,12 +186,14 @@ class DTSquareFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, = ctx.saved_tensors
-        grad_x = ops.mul(grad_output, ops.mul(ops.scalar_from_float(2), x))
+        grad_x = ops.mul(
+            grad_output, ops.mul(ops.scalar_from_float(2, device=x.device), x)
+        )
         return grad_x
 
 @register_base_op("sqrt")
 def dt_sqrt(ops, x):
-    return ops.pow(x, ops.scalar_from_float(0.5))
+    return ops.pow(x, ops.scalar_from_float(0.5, device=x.device))
 
 class DTSqrtFunction(DTFunction):
 
@@ -206,12 +208,14 @@ class DTSqrtFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         output, = ctx.saved_tensors
-        grad_x = ops.div(grad_output, ops.mul(ops.scalar_from_float(2), output))
+        grad_x = ops.div(
+            grad_output, ops.mul(ops.scalar_from_float(2, device=output.device), output)
+        )
         return grad_x
 
 @register_base_op("reciprocal")
 def dt_reciprocal(ops, x):
-    return ops.div(ops.scalar_from_float(1), x)
+    return ops.div(ops.scalar_from_float(1, device=x.device), x)
 
 class DTReciprocalFunction(DTFunction):
 
@@ -231,7 +235,7 @@ class DTReciprocalFunction(DTFunction):
 
 @register_base_op("exp")
 def dt_exp(ops, x):
-    return ops.pow(ops.scalar_from_float(torch.e), x)
+    return ops.pow(ops.scalar_from_float(torch.e, device=x.device), x)
 
 class DTExpFunction(DTFunction):
 
@@ -364,7 +368,7 @@ def dt_mean(ops, x, dim=None, keepdim=False):
             n_elem *= x.shape[d]
 
     total = ops.sum(x, dims, keepdim)
-    return ops.div(total, ops.scalar_from_float(n_elem))
+    return ops.div(total, ops.scalar_from_float(n_elem, device=x.device))
 
 class DTMeanFunction(DTFunction):
 
@@ -400,7 +404,9 @@ class DTMeanFunction(DTFunction):
             for d in dims:
                 n_elem *= x.shape[d]
 
-        grad_x = ops.div(grad_output, ops.scalar_from_float(n_elem))
+        grad_x = ops.div(
+            grad_output, ops.scalar_from_float(n_elem, device=grad_output.device)
+        )
         if dims is None:
             grad_x = grad_x.expand(x.shape)
 
@@ -425,7 +431,7 @@ def dt_var(ops, x, correction, dim=None, keepdim=False):
         for d in red_dims:
             N *= x.shape[d]
 
-    n_elems = ops.scalar_from_float(N)
+    n_elems = ops.scalar_from_float(N, device=x.device)
 
     denom = ops.sub(n_elems, correction)
     if denom <= 0:
@@ -471,12 +477,12 @@ class DTVarFunction(DTFunction):
                 N *= x.shape[d]
 
         total_x = ops.sum(x, dim=red_dims, keepdim=True)
-        n_elems = ops.scalar_from_float(N)
+        n_elems = ops.scalar_from_float(N, device=x.device)
         denom = ops.sub(n_elems, correction)
         mean = ops.div(total_x, n_elems)
 
         diff = ops.sub(x, mean)
-        scale = ops.div(ops.scalar_from_float(2.0), denom)
+        scale = ops.div(ops.scalar_from_float(2.0, device=x.device), denom)
 
         grad_x = grad_output
         if red_dims is None:
