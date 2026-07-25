@@ -24,6 +24,7 @@ class LNS32(DType, bitwidth=32):
         validate_precision(prec, table)
         precision = prec
         base = lns_base(precision)
+        LNS32.ops.clear_scalar_cache()
 
         if table:
             tab_sbdb, tab_ez = load_or_create_table(

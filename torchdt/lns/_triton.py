@@ -46,6 +46,19 @@ def enable_lns_triton_backend(
     tab_ez=None,
     accumulator_ops: TritonAccumulatorOps = None,
 ) -> None:
+    fingerprint = (
+        dtype_cls.bitwidth,
+        float(base),
+        zero_value,
+        pos_inf_value,
+        neg_inf_value,
+        tab_sbdb.data_ptr() if tab_sbdb is not None else None,
+        tab_ez.data_ptr() if tab_ez is not None else None,
+        id(accumulator_ops) if accumulator_ops is not None else None,
+    )
+    if getattr(dtype_cls.ops, "_triton_fingerprint", None) == fingerprint:
+        return
+
     scalar_ops = make_lns_triton_scalar_ops(
         bitwidth=dtype_cls.bitwidth,
         base=base,
@@ -56,6 +69,7 @@ def enable_lns_triton_backend(
         tab_ez=tab_ez,
     )
     register_triton_ops(dtype_cls, scalar_ops, accumulator_ops)
+    dtype_cls.ops._triton_fingerprint = fingerprint
 
 
 def make_lns_triton_scalar_ops(

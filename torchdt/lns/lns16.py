@@ -26,6 +26,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
         precision = prec
         base = lns_base(precision)
         tab_exp = None
+        LNS16.ops.clear_scalar_cache()
 
         if table:
             tab_sbdb, tab_ez = load_or_create_table(
@@ -51,6 +52,18 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
         from torchdt.ops import TritonAccumulatorOps, register_triton_ops, require_triton
         from . import lns32
         from ._triton import _bump_triton_jit_hash, _lns_triton_bit_config, make_lns_triton_scalar_ops
+
+        fingerprint = (
+            precision,
+            lns32.precision,
+            tab_sbdb.data_ptr() if tab_sbdb is not None else None,
+            tab_ez.data_ptr() if tab_ez is not None else None,
+            tab_exp.data_ptr() if tab_exp is not None else None,
+            lns32.tab_sbdb.data_ptr() if lns32.tab_sbdb is not None else None,
+            lns32.tab_ez.data_ptr() if lns32.tab_ez is not None else None,
+        )
+        if getattr(cls.ops, "_triton_fingerprint", None) == fingerprint:
+            return
 
         triton, tl = require_triton()
 
@@ -216,6 +229,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
             scalar_ops,
             accumulator_ops=accumulator_ops,
         )
+        cls.ops._triton_fingerprint = fingerprint
 
 def _make_lns16_exp_lookup_table(device=None) -> Tensor:
     info = torch.iinfo(torch.int16)
