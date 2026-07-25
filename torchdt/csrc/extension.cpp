@@ -4,6 +4,69 @@
 #include "dispatcher.h"
 #include "lns16.h"
 
+class BackendHandle {
+public:
+    BackendHandle(const std::string& name, size_t bitwidth)
+        : ops_(get_ops_impl(name, bitwidth)) {
+        if (!ops_) {
+            throw std::runtime_error(
+                "No ops registered for dtype " + name + " with bitwidth " +
+                std::to_string(bitwidth)
+            );
+        }
+    }
+
+    torch::Tensor from_float(const torch::Tensor& x) const { return ops_->from_float(x); }
+    torch::Tensor to_float(const torch::Tensor& x) const { return ops_->to_float(x); }
+    torch::Tensor add(const torch::Tensor& x, const torch::Tensor& y) const { return ops_->add(x, y); }
+    torch::Tensor sub(const torch::Tensor& x, const torch::Tensor& y) const { return ops_->sub(x, y); }
+    torch::Tensor mul(const torch::Tensor& x, const torch::Tensor& y) const { return ops_->mul(x, y); }
+    torch::Tensor div(const torch::Tensor& x, const torch::Tensor& y) const { return ops_->div(x, y); }
+    torch::Tensor ge(const torch::Tensor& x, const torch::Tensor& y) const { return ops_->ge(x, y); }
+    torch::Tensor gt(const torch::Tensor& x, const torch::Tensor& y) const { return ops_->gt(x, y); }
+    torch::Tensor le(const torch::Tensor& x, const torch::Tensor& y) const { return ops_->le(x, y); }
+    torch::Tensor lt(const torch::Tensor& x, const torch::Tensor& y) const { return ops_->lt(x, y); }
+    torch::Tensor sum(
+        const torch::Tensor& x,
+        c10::optional<std::vector<int64_t>> dim,
+        bool keepdim
+    ) const { return ops_->sum(x, std::move(dim), keepdim); }
+    torch::Tensor matmul(const torch::Tensor& a, const torch::Tensor& b) const {
+        return ops_->matmul(a, b);
+    }
+    std::vector<torch::Tensor> matmul_backward(
+        const torch::Tensor& grad_out,
+        const torch::Tensor& a,
+        const torch::Tensor& b
+    ) const { return ops_->matmul_backward(grad_out, a, b); }
+    torch::Tensor conv2d(
+        const torch::Tensor& input,
+        const torch::Tensor& weight,
+        const c10::optional<torch::Tensor>& bias,
+        const std::vector<int64_t>& stride,
+        const std::vector<int64_t>& padding,
+        const std::vector<int64_t>& dilation,
+        int64_t groups
+    ) const { return ops_->conv2d(input, weight, bias, stride, padding, dilation, groups); }
+    std::vector<torch::Tensor> conv2d_backward(
+        const torch::Tensor& grad_out,
+        const torch::Tensor& input,
+        const torch::Tensor& weight,
+        const std::vector<int64_t>& stride,
+        const std::vector<int64_t>& padding,
+        const std::vector<int64_t>& dilation,
+        bool has_bias,
+        int64_t groups
+    ) const {
+        return ops_->conv2d_backward(
+            grad_out, input, weight, stride, padding, dilation, has_bias, groups
+        );
+    }
+
+private:
+    OpsBase* ops_;
+};
+
 torch::Tensor dispatch_from_float(
     const std::string& dtype_name,
     size_t bitwidth,
@@ -185,6 +248,28 @@ std::vector<torch::Tensor> dispatch_conv2d_backward(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    py::class_<BackendHandle>(m, "BackendHandle")
+        .def("from_float", &BackendHandle::from_float, py::call_guard<py::gil_scoped_release>())
+        .def("to_float", &BackendHandle::to_float, py::call_guard<py::gil_scoped_release>())
+        .def("add", &BackendHandle::add, py::call_guard<py::gil_scoped_release>())
+        .def("sub", &BackendHandle::sub, py::call_guard<py::gil_scoped_release>())
+        .def("mul", &BackendHandle::mul, py::call_guard<py::gil_scoped_release>())
+        .def("div", &BackendHandle::div, py::call_guard<py::gil_scoped_release>())
+        .def("ge", &BackendHandle::ge, py::call_guard<py::gil_scoped_release>())
+        .def("gt", &BackendHandle::gt, py::call_guard<py::gil_scoped_release>())
+        .def("le", &BackendHandle::le, py::call_guard<py::gil_scoped_release>())
+        .def("lt", &BackendHandle::lt, py::call_guard<py::gil_scoped_release>())
+        .def("sum", &BackendHandle::sum, py::arg("x"), py::arg("dim") = c10::nullopt,
+             py::arg("keepdim") = false, py::call_guard<py::gil_scoped_release>())
+        .def("matmul", &BackendHandle::matmul, py::call_guard<py::gil_scoped_release>())
+        .def("matmul_backward", &BackendHandle::matmul_backward,
+             py::call_guard<py::gil_scoped_release>())
+        .def("conv2d", &BackendHandle::conv2d, py::call_guard<py::gil_scoped_release>())
+        .def("conv2d_backward", &BackendHandle::conv2d_backward,
+             py::call_guard<py::gil_scoped_release>());
+    m.def("get_backend", [](const std::string& name, size_t bitwidth) {
+        return BackendHandle(name, bitwidth);
+    });
     m.def(
         "from_float", &dispatch_from_float,
         py::arg("dtype_name"), py::arg("bitwidth"), py::arg("x"),
