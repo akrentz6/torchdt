@@ -1,4 +1,3 @@
-import math
 import torch
 from torchdt import DType
 from torchdt.ops.misc_ops import (
@@ -21,7 +20,7 @@ from torchdt.ops.misc_ops import (
     DTReshapeFunction,
 )
 
-@DType.register_func(torch.broadcast_to, torch.Tensor.expand,
+@DType.register_func(torch.broadcast_to, torch.Tensor.broadcast_to, torch.Tensor.expand,
                      cast=("input",))
 def dt_broadcast_to(input, shape):
     return DTBroadcastToFunction.apply(input, shape)
@@ -83,18 +82,12 @@ def dt_pad(input, pad, mode="constant", value=0):
 def dt_getitem(input, index):
     return DTGetItemFunction.apply(input, index)
 
-# turns an index into a set of index tensors for each dimension
-def _make_index_tensors(index, shape):
-    flat_count = math.prod(shape)
-    labels = torch.arange(flat_count).reshape(shape)
-    flat_idx = labels[index].reshape(-1)
-    return torch.unravel_index(flat_idx, shape)
-
 @DType.register_func(torch.Tensor.__setitem__,
                      cast=("input", "value"))
 def dt_setitem(input, index, value):
-    index = _make_index_tensors(index, input.shape)
-    return DTSetItemFunction.apply(input, index, value)
+    result = DTSetItemFunction.apply(input, index, value)
+    input.copy_(result)
+    return None
 
 @DType.register_func(torch.Tensor.to,
                      cast=("input",))
@@ -123,8 +116,10 @@ def dt_flatten(input, start_dim=0, end_dim=-1):
 
 @DType.register_func(torch.reshape, torch.Tensor.reshape,
                      cast=("input",))
-def dt_reshape(input, shape):
-    return DTReshapeFunction.apply(input, shape)
+def dt_reshape(input, *shape):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list, torch.Size)):
+        shape = tuple(shape[0])
+    return DTReshapeFunction.apply(input, tuple(shape))
 
 @DType.register_func(torch.Tensor.item,
                      cast=("input",))
