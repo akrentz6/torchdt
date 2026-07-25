@@ -15,22 +15,20 @@ class DTBroadcastToFunction(DTFunction):
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
         x, shape = inputs
-        ctx.save_for_backward(x)
+        ctx.x_shape = x.shape
         ctx.shape = shape
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        x, = ctx.saved_tensors
-
         # Sum over the broadcasted dimensions
         # First, handle prepended dimensions (when original tensor had fewer dims)
-        ndims_added = grad_output.ndim - len(x.shape)
+        ndims_added = grad_output.ndim - len(ctx.x_shape)
         grad_x = grad_output
         for i in range(ndims_added):
             grad_x = ops.sum(grad_x, dim=0, keepdim=False)
 
         # Then, handle expanded dimensions (where original dim was 1)
-        for i, (orig_size, grad_size) in enumerate(zip(x.shape, grad_x.shape)):
+        for i, (orig_size, grad_size) in enumerate(zip(ctx.x_shape, grad_x.shape)):
             if orig_size == 1 and grad_size > 1:
                 grad_x = ops.sum(grad_x, dim=i, keepdim=True)
 
@@ -67,13 +65,11 @@ class DTSqueezeFunction(DTFunction):
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
         x, dim = inputs
-        ctx.save_for_backward(x)
-        ctx.dim = dim
+        ctx.x_shape = x.shape
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        x, = ctx.saved_tensors
-        grad_x = grad_output.view(x.shape)
+        grad_x = grad_output.view(ctx.x_shape)
         return grad_x, None
 
 @register_base_op("unsqueeze")
@@ -88,13 +84,11 @@ class DTUnsqueezeFunction(DTFunction):
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
-        x, dim = inputs
-        ctx.save_for_backward(x)
+        _, dim = inputs
         ctx.dim = dim
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        x, = ctx.saved_tensors
         grad_x = grad_output.squeeze(dim=ctx.dim)
         return grad_x, None
 
@@ -111,7 +105,6 @@ class DTStackFunction(DTFunction):
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
         dim, *tensors = inputs
-        ctx.save_for_backward(*tensors)
         ctx.dim = dim
 
     @staticmethod
@@ -120,7 +113,7 @@ class DTStackFunction(DTFunction):
 
 @register_base_op("cat")
 def dt_cat(ops, tensors, dim=0):
-    return torch.cat(tensors, dim=dim).clone()
+    return torch.cat(tensors, dim=dim)
 
 class DTCatFunction(DTFunction):
 
@@ -141,7 +134,7 @@ class DTCatFunction(DTFunction):
 
 @register_base_op("chunk")
 def dt_chunk(ops, x, chunks, dim=0):
-    return tuple(y.clone() for y in torch.chunk(x, chunks, dim=dim))
+    return torch.chunk(x, chunks, dim=dim)
 
 class DTChunkFunction(DTFunction):
 
@@ -283,30 +276,30 @@ class DTGetItemFunction(DTFunction):
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
         x, idx = inputs
+        ctx.x_shape = x.shape
+        ctx.x_device = x.device
         ctx.is_idx_tensor = torch.is_tensor(idx)
         if ctx.is_idx_tensor:
-            ctx.save_for_backward(x, idx)
+            ctx.save_for_backward(idx)
         else:
-            ctx.save_for_backward(x)
             ctx.idx = idx
 
     @staticmethod
     def backward(ctx, ops, grad_output):
         if ctx.is_idx_tensor:
-            x, idx = ctx.saved_tensors
+            idx, = ctx.saved_tensors
         else:
-            x, = ctx.saved_tensors
             idx = ctx.idx
 
-        grad_x = torch.full_like(
-            x, ops.scalar_from_float(0.0, device=x.device)
-        )
+        grad_x = ops.zeros(ctx.x_shape, device=ctx.x_device)
         grad_x[idx] = grad_output
         return grad_x, None
 
 @register_base_op("setitem")
 def dt_setitem(ops, x, index, value):
-    return torch.index_put(x, index, value)
+    result = x.clone()
+    result[index] = value
+    return result
 
 class DTSetItemFunction(DTFunction):
 
@@ -316,35 +309,34 @@ class DTSetItemFunction(DTFunction):
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
-        _, idx, value, _ = inputs
+        _, idx, value = inputs
+        ctx.value_shape = value.shape
         ctx.is_idx_tensor = torch.is_tensor(idx)
         if ctx.is_idx_tensor:
-            ctx.save_for_backward(idx, value)
+            ctx.save_for_backward(idx)
         else:
-            ctx.save_for_backward(value)
             ctx.idx = idx
 
     @staticmethod
     def backward(ctx, ops, grad_output):
         if ctx.is_idx_tensor:
-            idx, value = ctx.saved_tensors
+            idx, = ctx.saved_tensors
         else:
-            value, = ctx.saved_tensors
             idx = ctx.idx
 
         grad_x = grad_output.clone()
         grad_x[idx] = ops.scalar_from_float(0.0, device=grad_x.device)
-        grad_value = grad_output.clone()[idx]
+        grad_value = grad_output[idx]
 
-        if grad_value.shape != value.shape:
+        if grad_value.shape != ctx.value_shape:
             # Find the dims that were broadcast (= size 1 in value but >1 in grad_value)
             extra_dims = (
-                [i for i, (gv, v) in enumerate(zip(grad_value.shape[-len(value.shape):],
-                                                   value.shape)) if v == 1 and gv != 1]
-                + list(range(len(grad_value.shape) - len(value.shape)))  # leading dims
+                [i for i, (gv, v) in enumerate(zip(grad_value.shape[-len(ctx.value_shape):],
+                                                   ctx.value_shape)) if v == 1 and gv != 1]
+                + list(range(len(grad_value.shape) - len(ctx.value_shape)))  # leading dims
             )
             grad_value = ops.sum(grad_value, dim=extra_dims, keepdim=True)
-            grad_value = grad_value.reshape(value.shape)
+            grad_value = grad_value.reshape(ctx.value_shape)
 
         return grad_x, None, grad_value, None
 
@@ -440,7 +432,7 @@ class DTRepeatFunction(DTFunction):
 
 @register_base_op("flatten")
 def dt_flatten(ops, x, start_dim=0, end_dim=-1):
-    return torch.flatten(x, start_dim=start_dim, end_dim=end_dim).clone()
+    return torch.flatten(x, start_dim=start_dim, end_dim=end_dim)
 
 class DTFlattenFunction(DTFunction):
 
@@ -460,7 +452,7 @@ class DTFlattenFunction(DTFunction):
 
 @register_base_op("reshape")
 def dt_reshape(ops, x, shape):
-    return torch.reshape(x, shape).clone()
+    return torch.reshape(x, shape)
 
 class DTReshapeFunction(DTFunction):
 

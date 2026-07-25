@@ -11,14 +11,15 @@ class DTAddFunction(DTFunction):
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
         x, y = inputs
-        ctx.save_for_backward(x, y)
+        ctx.x_shape = x.shape
+        ctx.y_shape = y.shape
+        ctx.need_x = ctx.needs_input_grad[1]
+        ctx.need_y = ctx.needs_input_grad[2]
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        x, y = ctx.saved_tensors
-
-        grad_x = ops.sum_to_size(grad_output, x.shape)
-        grad_y = ops.sum_to_size(grad_output, y.shape)
+        grad_x = ops.sum_to_size(grad_output, ctx.x_shape) if ctx.need_x else None
+        grad_y = ops.sum_to_size(grad_output, ctx.y_shape) if ctx.need_y else None
 
         return grad_x, grad_y
 
@@ -31,14 +32,18 @@ class DTSubFunction(DTFunction):
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
         x, y = inputs
-        ctx.save_for_backward(x, y)
+        ctx.x_shape = x.shape
+        ctx.y_shape = y.shape
+        ctx.need_x = ctx.needs_input_grad[1]
+        ctx.need_y = ctx.needs_input_grad[2]
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        x, y = ctx.saved_tensors
-
-        grad_x = ops.sum_to_size(grad_output, x.shape)
-        grad_y = ops.sum_to_size(ops.neg(grad_output), y.shape)
+        grad_x = ops.sum_to_size(grad_output, ctx.x_shape) if ctx.need_x else None
+        grad_y = (
+            ops.sum_to_size(ops.neg(grad_output), ctx.y_shape)
+            if ctx.need_y else None
+        )
 
         return grad_x, grad_y
 
@@ -84,27 +89,26 @@ class DTSumFunction(DTFunction):
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
         x, dim, keepdim = inputs
-        ctx.save_for_backward(x)
+        ctx.x_shape = x.shape
+        ctx.x_dim = x.dim()
         ctx.dim = dim
         ctx.keepdim = keepdim
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        x, = ctx.saved_tensors
-
         grad_x = grad_output
         if ctx.dim is None:
-            grad_x = grad_x.expand(x.shape)
+            grad_x = grad_x.expand(ctx.x_shape)
 
         else:
             red_dims = (ctx.dim,) if isinstance(ctx.dim, int) else tuple(ctx.dim)
-            red_dims = tuple(d % x.dim() for d in red_dims)
+            red_dims = tuple(d % ctx.x_dim for d in red_dims)
 
             if not ctx.keepdim:
                 for d in sorted(red_dims):
                     grad_x = grad_x.unsqueeze(d)
 
-            grad_x = grad_x.expand(x.shape)
+            grad_x = grad_x.expand(ctx.x_shape)
 
         return grad_x, None, None
 
@@ -118,13 +122,21 @@ class DTMulFunction(DTFunction):
     def setup_context(ctx, ops, inputs, output):
         x, y = inputs
         ctx.save_for_backward(x, y)
+        ctx.need_x = ctx.needs_input_grad[1]
+        ctx.need_y = ctx.needs_input_grad[2]
 
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, y = ctx.saved_tensors
 
-        grad_x = ops.sum_to_size(ops.mul(grad_output, y), x.shape)
-        grad_y = ops.sum_to_size(ops.mul(grad_output, x), y.shape)
+        grad_x = (
+            ops.sum_to_size(ops.mul(grad_output, y), x.shape)
+            if ctx.need_x else None
+        )
+        grad_y = (
+            ops.sum_to_size(ops.mul(grad_output, x), y.shape)
+            if ctx.need_y else None
+        )
 
         return grad_x, grad_y
 
@@ -138,13 +150,23 @@ class DTDivFunction(DTFunction):
     def setup_context(ctx, ops, inputs, output):
         x, y = inputs
         ctx.save_for_backward(x, y)
+        ctx.need_x = ctx.needs_input_grad[1]
+        ctx.need_y = ctx.needs_input_grad[2]
 
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, y = ctx.saved_tensors
 
-        grad_x = ops.sum_to_size(ops.div(grad_output, y), x.shape)
-        grad_y = ops.sum_to_size(ops.neg(ops.div(ops.mul(grad_output, x), ops.mul(y, y))), y.shape)
+        grad_x = (
+            ops.sum_to_size(ops.div(grad_output, y), x.shape)
+            if ctx.need_x else None
+        )
+        grad_y = (
+            ops.sum_to_size(
+                ops.neg(ops.div(ops.mul(grad_output, x), ops.mul(y, y))), y.shape
+            )
+            if ctx.need_y else None
+        )
 
         return grad_x, grad_y
 
@@ -641,7 +663,7 @@ class DTMatmulFunction(DTFunction):
 
 @register_base_op("transpose")
 def dt_transpose(ops, x, dim0, dim1):
-    return x.transpose(dim0, dim1).clone()
+    return x.transpose(dim0, dim1)
 
 class DTTransposeFunction(DTFunction):
 
