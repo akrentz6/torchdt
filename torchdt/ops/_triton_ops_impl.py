@@ -161,19 +161,29 @@ def register_triton_ops(
     def _prepare_unary(x, out_dtype):
         out = torch.empty(x.shape, dtype=out_dtype, device=x.device)
         if out.numel() == 0:
-            return out, None, None, 0
+            return out, None, None, 0, True
+
+        contiguous = x.is_contiguous()
+        if contiguous:
+            return out, x, x, out.ndim, True
 
         shape_meta = _metadata_tensor(tuple(x.shape), x.device)
         stride_meta = _metadata_tensor(tuple(x.stride()), x.device)
-        return out, shape_meta, stride_meta, out.ndim
+        return out, shape_meta, stride_meta, out.ndim, False
 
     @triton.jit
-    def from_float_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    def prepared_unary_offsets(offs, shape_ptr, stride_ptr, NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr):
+        if CONTIGUOUS:
+            return offs
+        return elementwise_unary_offsets(offs, shape_ptr, stride_ptr, NDIM)
+
+    @triton.jit
+    def from_float_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < N
 
-        x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+        x_offsets = prepared_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM, CONTIGUOUS)
         x = tl.load(x_ptr + x_offsets, mask=mask, other=0.0)
 
         out = from_float(x)
@@ -181,21 +191,21 @@ def register_triton_ops(
 
     @dtype_cls.register_op("from_float", backend="triton")
     def dt_from_float(ops, x):
-        out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+        out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(x, dtype_cls.int_dtype)
         if out.numel() == 0:
             return out
 
         grid = (triton.cdiv(out.numel(), 1024),)
-        from_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+        from_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
         return out
 
     @triton.jit
-    def to_float_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    def to_float_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < N
 
-        x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+        x_offsets = prepared_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM, CONTIGUOUS)
         x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
         out = to_float(x)
@@ -203,38 +213,64 @@ def register_triton_ops(
 
     @dtype_cls.register_op("to_float", backend="triton")
     def dt_to_float(ops, x):
-        out = torch.empty(x.shape, dtype=torch.float32, device=x.device)
+        out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(x, torch.float32)
         if out.numel() == 0:
             return out
 
-        shape_meta = _metadata_tensor(tuple(x.shape), x.device)
-        stride_meta = _metadata_tensor(tuple(x.stride()), x.device)
         grid = (triton.cdiv(out.numel(), 1024),)
-        to_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), out.ndim, BLOCK_SIZE=1024)
+        to_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
         return out
 
     def _prepare_binary(x, y, out_dtype):
         out_shape = torch.broadcast_shapes(x.shape, y.shape)
+        x_scalar = x.numel() == 1
+        y_scalar = y.numel() == 1
         x = x.expand(out_shape)
         y = y.expand(out_shape)
         out = torch.empty(out_shape, dtype=out_dtype, device=x.device)
 
         if out.numel() == 0:
-            return out, x, y, None, None, None, 0
+            return out, x, y, None, None, None, 0, 1
+
+        if x_scalar and y_scalar:
+            mode = 4
+        elif x_scalar and y.is_contiguous():
+            mode = 2
+        elif y_scalar and x.is_contiguous():
+            mode = 3
+        elif x.is_contiguous() and y.is_contiguous():
+            mode = 1
+        else:
+            mode = 0
+
+        if mode:
+            return out, x, y, x, x, y, out.ndim, mode
 
         shape_meta = _metadata_tensor(tuple(out_shape), x.device)
         x_stride_meta = _metadata_tensor(tuple(x.stride()), x.device)
         y_stride_meta = _metadata_tensor(tuple(y.stride()), x.device)
 
-        return out, x, y, shape_meta, x_stride_meta, y_stride_meta, out.ndim
+        return out, x, y, shape_meta, x_stride_meta, y_stride_meta, out.ndim, mode
 
     @triton.jit
-    def add_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    def prepared_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM: tl.constexpr, MODE: tl.constexpr):
+        if MODE == 1:
+            return offs, offs
+        if MODE == 2:
+            return offs * 0, offs
+        if MODE == 3:
+            return offs, offs * 0
+        if MODE == 4:
+            return offs * 0, offs * 0
+        return elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+
+    @triton.jit
+    def add_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, MODE: tl.constexpr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < N
 
-        x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+        x_offsets, y_offsets = prepared_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM, MODE)
         x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
         y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
@@ -243,22 +279,22 @@ def register_triton_ops(
 
     @dtype_cls.register_op("add", backend="triton")
     def dt_add(ops, x, y):
-        out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
+        out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim, mode = _prepare_binary(x, y, dtype_cls.int_dtype)
         if out.numel() == 0:
             return out
 
         grid = (triton.cdiv(out.numel(), 1024),)
-        add_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+        add_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
         return out
 
     if sub is not None:
         @triton.jit
-        def sub_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def sub_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, MODE: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x_offsets, y_offsets = prepared_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM, MODE)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
             y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
@@ -267,22 +303,22 @@ def register_triton_ops(
 
         @dtype_cls.register_op("sub", backend="triton")
         def dt_sub(ops, x, y):
-            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim, mode = _prepare_binary(x, y, dtype_cls.int_dtype)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            sub_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            sub_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
             return out
 
     if mul is not None:
         @triton.jit
-        def mul_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def mul_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, MODE: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x_offsets, y_offsets = prepared_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM, MODE)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
             y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
@@ -291,22 +327,22 @@ def register_triton_ops(
 
         @dtype_cls.register_op("mul", backend="triton")
         def dt_mul(ops, x, y):
-            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim, mode = _prepare_binary(x, y, dtype_cls.int_dtype)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            mul_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            mul_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
             return out
 
     if div is not None:
         @triton.jit
-        def div_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def div_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, MODE: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x_offsets, y_offsets = prepared_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM, MODE)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
             y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
@@ -315,22 +351,22 @@ def register_triton_ops(
 
         @dtype_cls.register_op("div", backend="triton")
         def dt_div(ops, x, y):
-            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, dtype_cls.int_dtype)
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim, mode = _prepare_binary(x, y, dtype_cls.int_dtype)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            div_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            div_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
             return out
 
     if sqrt is not None:
         @triton.jit
-        def sqrt_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def sqrt_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+            x_offsets = prepared_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM, CONTIGUOUS)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
             out = sqrt(x)
@@ -338,22 +374,22 @@ def register_triton_ops(
 
         @dtype_cls.register_op("sqrt", backend="triton")
         def dt_sqrt(ops, x):
-            out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+            out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(x, dtype_cls.int_dtype)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            sqrt_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            sqrt_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
             return out
 
     if neg is not None:
         @triton.jit
-        def neg_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def neg_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+            x_offsets = prepared_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM, CONTIGUOUS)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
             out = neg(x)
@@ -361,21 +397,21 @@ def register_triton_ops(
 
         @dtype_cls.register_op("neg", backend="triton")
         def dt_neg(ops, x):
-            out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+            out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(x, dtype_cls.int_dtype)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            neg_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            neg_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
             return out
 
     @triton.jit
-    def exp_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    def exp_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < N
 
-        x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+        x_offsets = prepared_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM, CONTIGUOUS)
         x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
         out = exp(x)
@@ -383,21 +419,21 @@ def register_triton_ops(
 
     @dtype_cls.register_op("exp", backend="triton")
     def dt_exp(ops, x):
-        out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+        out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(x, dtype_cls.int_dtype)
         if out.numel() == 0:
             return out
 
         grid = (triton.cdiv(out.numel(), 1024),)
-        exp_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+        exp_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
         return out
 
     @triton.jit
-    def log_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    def log_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
         offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < N
 
-        x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+        x_offsets = prepared_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM, CONTIGUOUS)
         x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
         out = log(x)
@@ -405,22 +441,22 @@ def register_triton_ops(
 
     @dtype_cls.register_op("log", backend="triton")
     def dt_log(ops, x):
-        out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+        out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(x, dtype_cls.int_dtype)
         if out.numel() == 0:
             return out
 
         grid = (triton.cdiv(out.numel(), 1024),)
-        log_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+        log_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
         return out
 
     if can_register_sign:
         @triton.jit
-        def sign_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def sign_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+            x_offsets = prepared_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM, CONTIGUOUS)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
             out = sign(x)
@@ -428,22 +464,22 @@ def register_triton_ops(
 
         @dtype_cls.register_op("sign", backend="triton")
         def dt_sign(ops, x):
-            out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+            out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(x, dtype_cls.int_dtype)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            sign_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            sign_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
             return out
 
     if lt is not None and neg is not None:
         @triton.jit
-        def abs_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def abs_kernel(x_ptr, out_ptr, shape_ptr, x_stride_ptr, N, NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets = elementwise_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM)
+            x_offsets = prepared_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM, CONTIGUOUS)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
             zero = tl.cast(_ZERO, tl_int_dtype)
@@ -452,22 +488,22 @@ def register_triton_ops(
 
         @dtype_cls.register_op("abs", backend="triton")
         def dt_abs(ops, x):
-            out, shape_meta, stride_meta, ndim = _prepare_unary(x, dtype_cls.int_dtype)
+            out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(x, dtype_cls.int_dtype)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            abs_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            abs_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
             return out
 
     if gt is not None:
         @triton.jit
-        def gt_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def gt_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, MODE: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x_offsets, y_offsets = prepared_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM, MODE)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
             y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
@@ -476,22 +512,22 @@ def register_triton_ops(
 
         @dtype_cls.register_op("gt", backend="triton")
         def dt_gt(ops, x, y):
-            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim, mode = _prepare_binary(x, y, torch.bool)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            gt_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            gt_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
             return out
 
     if ge is not None:
         @triton.jit
-        def ge_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def ge_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, MODE: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x_offsets, y_offsets = prepared_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM, MODE)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
             y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
@@ -500,22 +536,22 @@ def register_triton_ops(
 
         @dtype_cls.register_op("ge", backend="triton")
         def dt_ge(ops, x, y):
-            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim, mode = _prepare_binary(x, y, torch.bool)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            ge_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            ge_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
             return out
 
     if lt is not None:
         @triton.jit
-        def lt_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def lt_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, MODE: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x_offsets, y_offsets = prepared_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM, MODE)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
             y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
@@ -524,22 +560,22 @@ def register_triton_ops(
 
         @dtype_cls.register_op("lt", backend="triton")
         def dt_lt(ops, x, y):
-            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim, mode = _prepare_binary(x, y, torch.bool)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            lt_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            lt_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
             return out
 
     if le is not None:
         @triton.jit
-        def le_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+        def le_kernel(x_ptr, y_ptr, out_ptr, shape_ptr, x_stride_ptr, y_stride_ptr, N, NDIM: tl.constexpr, MODE: tl.constexpr, BLOCK_SIZE: tl.constexpr):
             pid = tl.program_id(0)
             offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offs < N
 
-            x_offsets, y_offsets = elementwise_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM)
+            x_offsets, y_offsets = prepared_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM, MODE)
             x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
             y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
@@ -548,12 +584,12 @@ def register_triton_ops(
 
         @dtype_cls.register_op("le", backend="triton")
         def dt_le(ops, x, y):
-            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim = _prepare_binary(x, y, torch.bool)
+            out, x, y, shape_meta, x_stride_meta, y_stride_meta, ndim, mode = _prepare_binary(x, y, torch.bool)
             if out.numel() == 0:
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            le_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, BLOCK_SIZE=1024)
+            le_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
             return out
 
 
@@ -776,8 +812,8 @@ def register_triton_ops(
         kept_shape = [orig_shape[d] for d in kept_dims]
         reduced_shape = [orig_shape[d] for d in reduce_dims]
 
-        M = int(torch.prod(torch.tensor(kept_shape))) if kept_shape else 1
-        N = int(torch.prod(torch.tensor(reduced_shape)))
+        M = math.prod(kept_shape) if kept_shape else 1
+        N = math.prod(reduced_shape)
 
         y = x_perm.reshape(M, N)
         stride_row, stride_col = y.stride()
@@ -976,6 +1012,7 @@ def register_triton_ops(
         s_x_n, s_x_c, s_x_h, s_x_w,
         s_w_co, s_w_cinperg, s_w_kh, s_w_kw,
         s_y_n, s_y_c, s_y_h, s_y_w,
+        HAS_BIAS: tl.constexpr,
         BLOCK_OC: tl.constexpr,
         BLOCK_HW: tl.constexpr,
     ):
@@ -1031,16 +1068,18 @@ def register_triton_ops(
                     prod = mul(x[None, :], w_val)
                     acc = acc_add(acc, to_accumulator(prod))
 
-        bias = to_accumulator(tl.load(B_ptr + oc_offsets, mask=mask_oc, other=_ZERO))
-        acc = acc_add(acc, bias[:, None])
+        if HAS_BIAS:
+            bias = to_accumulator(tl.load(B_ptr + oc_offsets, mask=mask_oc, other=_ZERO))
+            acc = acc_add(acc, bias[:, None])
 
         out_ptrs = Yb + oc_offsets[:, None] * s_y_c + h[None, :] * s_y_h + w[None, :] * s_y_w
         tl.store(out_ptrs, from_accumulator(acc), mask=mask_oc[:, None] & mask_hw & mask_n & mask_group)
 
     @dtype_cls.register_op("conv2d", backend="triton")
     def dt_conv2d(ops, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+        has_bias = bias is not None
         if bias is None:
-            bias = torch.full((weight.shape[0],), _ZERO.value, device=x.device, dtype=x.dtype)
+            bias = weight
 
         if isinstance(stride, int):
             stride = (stride, stride)
@@ -1090,6 +1129,7 @@ def register_triton_ops(
             s_x_n, s_x_c, s_x_h, s_x_w,
             s_w_co, s_w_cinperg, s_w_kh, s_w_kw,
             s_y_n, s_y_c, s_y_h, s_y_w,
+            HAS_BIAS=has_bias,
         )
 
         return y
