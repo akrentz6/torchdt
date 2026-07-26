@@ -29,11 +29,11 @@ class Madam(DTOptimizer):
         super().__init__(dtype, device, params, defaults)
         self.convert_params("lr", "beta", "eps", "p_scale", "g_bound")
 
-        self.validate_param("lr", lambda lr: lr >= torch.tensor(0.0, device=device))
-        self.validate_param("eps", lambda eps: eps > torch.tensor(0.0, device=device))
-        self.validate_param("beta",lambda beta: torch.tensor(0.0, device=device) < beta < torch.tensor(1.0, device=device))
-        self.validate_param("p_scale", lambda p_scale: p_scale > torch.tensor(0.0, device=device))
-        self.validate_param("g_bound", lambda g_bound: g_bound > torch.tensor(0.0, device=device))
+        self.validate_param("lr", lambda lr: lr >= self._zero)
+        self.validate_param("eps", lambda eps: eps > self._zero)
+        self.validate_param("beta", lambda beta: self._zero < beta < self._one)
+        self.validate_param("p_scale", lambda p_scale: p_scale > self._zero)
+        self.validate_param("g_bound", lambda g_bound: g_bound > self._zero)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -44,6 +44,7 @@ class Madam(DTOptimizer):
             loss = closure()
 
         for group in self.param_groups:
+            step_cache = {}
             lr = group["lr"]
             beta = group["beta"]
             eps = group["eps"]
@@ -63,15 +64,16 @@ class Madam(DTOptimizer):
                     # First time we see this parameter
                     rms = torch.sqrt(torch.mean(p * p))
                     state["max"] = p_scale * rms
-                    state["step"] = self.dtype(0.0, device=self.device)
+                    state["step"] = 0
                     state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)
 
                 max = state["max"]
-                step = state["step"] + torch.tensor(1.0, device=self.device)
+                step = state["step"] + 1
+                step_value = self.encoded_step(step, step_cache)
                 exp_avg_sq = state["exp_avg_sq"]
 
-                exp_avg_sq = (beta * exp_avg_sq) + (grad * grad * (torch.tensor(1.0, device=self.device) - beta))
-                corr_exp_avg_sq = exp_avg_sq / (torch.tensor(1.0, device=self.device) - beta ** step) + eps
+                exp_avg_sq = (beta * exp_avg_sq) + (grad * grad * (self._one - beta))
+                corr_exp_avg_sq = exp_avg_sq / (self._one - beta ** step_value) + eps
 
                 g_normed = grad / torch.sqrt(corr_exp_avg_sq)
                 g_clipped = torch.clamp(g_normed, -g_bound, g_bound)
@@ -83,7 +85,7 @@ class Madam(DTOptimizer):
                 if use_pow:
                     mul_update = p * torch.exp(delta)
                 else:
-                    mul_update = p * (torch.tensor(1.0, device=self.device) + delta)
+                    mul_update = p * (self._one + delta)
 
                 p.data.copy_(torch.clamp(mul_update, -max, max))
 
@@ -121,11 +123,11 @@ class TritonMadam(DTOptimizer):
         super().__init__(dtype, device, params, defaults)
         self.convert_params("lr", "beta", "eps", "p_scale", "g_bound")
 
-        self.validate_param("lr", lambda lr: lr >= torch.tensor(0.0, device=device))
-        self.validate_param("eps", lambda eps: eps > torch.tensor(0.0, device=device))
-        self.validate_param("beta",lambda beta: torch.tensor(0.0, device=device) < beta < torch.tensor(1.0, device=device))
-        self.validate_param("p_scale", lambda p_scale: p_scale > torch.tensor(0.0, device=device))
-        self.validate_param("g_bound", lambda g_bound: g_bound > torch.tensor(0.0, device=device))
+        self.validate_param("lr", lambda lr: lr >= self._zero)
+        self.validate_param("eps", lambda eps: eps > self._zero)
+        self.validate_param("beta", lambda beta: self._zero < beta < self._one)
+        self.validate_param("p_scale", lambda p_scale: p_scale > self._zero)
+        self.validate_param("g_bound", lambda g_bound: g_bound > self._zero)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -136,6 +138,7 @@ class TritonMadam(DTOptimizer):
             loss = closure()
 
         for group in self.param_groups:
+            step_cache = {}
             lr = group["lr"]
             beta = group["beta"]
             eps = group["eps"]
@@ -154,14 +157,15 @@ class TritonMadam(DTOptimizer):
                 if len(state) == 0:
                     rms = torch.sqrt(torch.mean(p * p))
                     state["max"] = p_scale * rms
-                    state["step"] = self.dtype(0.0, device=self.device)
+                    state["step"] = 0
                     state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)._int
 
                 max = state["max"]
-                step = state["step"] + torch.tensor(1.0, device=self.device)
+                step = state["step"] + 1
+                step_value = self.encoded_step(step, step_cache)
                 exp_avg_sq = state["exp_avg_sq"]
 
-                bias_corr = torch.tensor(1.0, device=self.device) - beta ** step
+                bias_corr = self._one - beta ** step_value
                 new_exp_avg_sq = self.dtype.ops.triton_madam_step(
                     p._int, grad._int, exp_avg_sq,
                     lr._int, beta._int, eps._int,

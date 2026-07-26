@@ -27,10 +27,10 @@ class SGD(DTOptimizer):
         super().__init__(dtype, device, params, defaults)
         self.convert_params("lr", "momentum", "dampening", "weight_decay")
 
-        self.validate_param("lr", lambda lr: lr >= torch.tensor(0.0, device=device))
-        self.validate_param("momentum", lambda momentum: momentum >= torch.tensor(0.0, device=device))
-        self.validate_param("dampening", lambda dampening: dampening >= torch.tensor(0.0, device=device))
-        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= torch.tensor(0.0, device=device))
+        self.validate_param("lr", lambda lr: lr >= self._zero)
+        self.validate_param("momentum", lambda momentum: momentum >= self._zero)
+        self.validate_param("dampening", lambda dampening: dampening >= self._zero)
+        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= self._zero)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -58,15 +58,15 @@ class SGD(DTOptimizer):
                 if maximize:
                     grad = -grad
 
-                if weight_decay != torch.tensor(0.0, device=self.device):
+                if weight_decay != self._zero:
                     grad = grad + p * weight_decay
 
-                if momentum != torch.tensor(0.0, device=self.device):
+                if momentum != self._zero:
                     buf = state.get("momentum_buffer")
                     if buf is None:
                         buf = state["momentum_buffer"] = grad.clone()
                     else:
-                        buf = (buf * momentum) + (grad * (torch.tensor(1.0, device=self.device) - dampening))
+                        buf = (buf * momentum) + (grad * (self._one - dampening))
 
                     if nesterov:
                         grad = grad + buf * momentum
@@ -103,10 +103,10 @@ class TritonSGD(DTOptimizer):
         super().__init__(dtype, device, params, defaults)
         self.convert_params("lr", "momentum", "dampening", "weight_decay")
 
-        self.validate_param("lr", lambda lr: lr >= torch.tensor(0.0, device=device))
-        self.validate_param("momentum", lambda momentum: momentum >= torch.tensor(0.0, device=device))
-        self.validate_param("dampening", lambda dampening: dampening >= torch.tensor(0.0, device=device))
-        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= torch.tensor(0.0, device=device))
+        self.validate_param("lr", lambda lr: lr >= self._zero)
+        self.validate_param("momentum", lambda momentum: momentum >= self._zero)
+        self.validate_param("dampening", lambda dampening: dampening >= self._zero)
+        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= self._zero)
 
     @torch.no_grad()
     def step(self, closure=None):

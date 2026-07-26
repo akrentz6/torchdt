@@ -12,10 +12,7 @@ __all__ = [
 ]
 
 def _param_groups_val_list(optimizer, key):
-    return [
-        group[key].clone() if isinstance(group[key], torch.Tensor) else group[key]
-        for group in optimizer.param_groups
-    ]
+    return [group[key] for group in optimizer.param_groups]
 
 def _update_param_group_val(param_group, key, val):
     if isinstance(param_group[key], torch.Tensor):
@@ -52,13 +49,13 @@ class StepLR(lr_sched.LRScheduler):
         if (self.last_epoch == 0) or (self.last_epoch % self.step_size != 0):
             return _param_groups_val_list(self.optimizer, "lr")
         return [
-            group["lr"] * torch.tensor(self.gamma, device=group["lr"].device)
+            group["lr"] * self.optimizer.dtype(self.gamma, device=group["lr"].device)
             for group in self.optimizer.param_groups
         ]
 
     def _get_closed_form_lr(self):
         return [
-            base_lr * torch.tensor(
+            base_lr * self.optimizer.dtype(
                 self.gamma ** (self.last_epoch // self.step_size),
                 device=base_lr.device
             )
@@ -84,7 +81,7 @@ class MultiStepLR(lr_sched.LRScheduler):
         if self.last_epoch not in self.milestones:
             return _param_groups_val_list(self.optimizer, "lr")
         return [
-            group["lr"] * torch.tensor(
+            group["lr"] * self.optimizer.dtype(
                 self.gamma ** self.milestones[self.last_epoch],
                 device=group["lr"].device,
             )
@@ -94,7 +91,7 @@ class MultiStepLR(lr_sched.LRScheduler):
     def _get_closed_form_lr(self):
         milestones = sorted(self.milestones.elements())
         return [
-            base_lr * torch.tensor(
+            base_lr * self.optimizer.dtype(
                 self.gamma ** bisect_right(milestones, self.last_epoch),
                 device=base_lr.device,
             )
@@ -188,9 +185,9 @@ class ReduceLROnPlateau(lr_sched.LRScheduler):
 
         for i, param_group in enumerate(self.optimizer.param_groups):
             old_lr = param_group["lr"]
-            factor = torch.tensor(self.factor, device=old_lr.device)
-            min_lr = torch.tensor(self.min_lrs[i], device=old_lr.device)
-            eps = torch.tensor(self.eps, device=old_lr.device)
+            factor = self.optimizer.dtype(self.factor, device=old_lr.device)
+            min_lr = self.optimizer.dtype(self.min_lrs[i], device=old_lr.device)
+            eps = self.optimizer.dtype(self.eps, device=old_lr.device)
             new_lr = torch.maximum(old_lr * factor, min_lr)
             if old_lr - new_lr > eps:
                 _update_param_group_val(param_group, "lr", new_lr)

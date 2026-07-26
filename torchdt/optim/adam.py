@@ -28,11 +28,11 @@ class Adam(DTOptimizer):
         super().__init__(dtype, device, params, defaults)
         self.convert_params("lr", "beta1", "beta2", "eps", "weight_decay")
 
-        self.validate_param("lr", lambda lr: lr >= torch.tensor(0.0, device=device))
-        self.validate_param("eps", lambda eps: eps > torch.tensor(0.0, device=device))
-        self.validate_param("beta1",lambda beta1: torch.tensor(0.0, device=device) <= beta1 < torch.tensor(1.0, device=device))
-        self.validate_param("beta2",lambda beta2: torch.tensor(0.0, device=device) <= beta2 < torch.tensor(1.0, device=device))
-        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= torch.tensor(0.0, device=device))
+        self.validate_param("lr", lambda lr: lr >= self._zero)
+        self.validate_param("eps", lambda eps: eps > self._zero)
+        self.validate_param("beta1", lambda beta1: self._zero <= beta1 < self._one)
+        self.validate_param("beta2", lambda beta2: self._zero <= beta2 < self._one)
+        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= self._zero)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -43,6 +43,7 @@ class Adam(DTOptimizer):
             loss = closure()
 
         for group in self.param_groups:
+            step_cache = {}
             lr = group["lr"]
             beta1 = group["beta1"]
             beta2 = group["beta2"]
@@ -61,12 +62,12 @@ class Adam(DTOptimizer):
                 if maximize:
                     grad = -grad
 
-                if weight_decay != torch.tensor(0.0, device=self.device):
+                if weight_decay != self._zero:
                     grad = grad + p * weight_decay
 
                 if len(state) == 0:
                     # First time we see this parameter
-                    state["step"] = self.dtype(0, device=self.device)
+                    state["step"] = 0
                     state["exp_avg"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)
                     state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)
                     if amsgrad:
@@ -74,13 +75,14 @@ class Adam(DTOptimizer):
 
                 exp_avg = state["exp_avg"]
                 exp_avg_sq = state["exp_avg_sq"]
-                step = state["step"] + torch.tensor(1.0, device=self.device)
+                step = state["step"] + 1
+                step_value = self.encoded_step(step, step_cache)
 
-                exp_avg = (exp_avg * beta1) + (grad * (torch.tensor(1.0, device=self.device) - beta1))
-                exp_avg_sq = (exp_avg_sq * beta2) + (grad * grad * (torch.tensor(1.0, device=self.device) - beta2))
+                exp_avg = (exp_avg * beta1) + (grad * (self._one - beta1))
+                exp_avg_sq = (exp_avg_sq * beta2) + (grad * grad * (self._one - beta2))
 
-                bias_corr1 = torch.tensor(1.0, device=self.device) - beta1 ** step
-                bias_corr2 = torch.tensor(1.0, device=self.device) - beta2 ** step
+                bias_corr1 = self._one - beta1 ** step_value
+                bias_corr2 = self._one - beta2 ** step_value
 
                 if amsgrad:
                     max_exp_avg_sq = torch.maximum(state["max_exp_avg_sq"], exp_avg_sq)
@@ -126,11 +128,11 @@ class TritonAdam(DTOptimizer):
         super().__init__(dtype, device, params, defaults)
         self.convert_params("lr", "beta1", "beta2", "eps", "weight_decay")
 
-        self.validate_param("lr", lambda lr: lr >= torch.tensor(0.0, device=device))
-        self.validate_param("eps", lambda eps: eps > torch.tensor(0.0, device=device))
-        self.validate_param("beta1",lambda beta1: torch.tensor(0.0, device=device) <= beta1 < torch.tensor(1.0, device=device))
-        self.validate_param("beta2",lambda beta2: torch.tensor(0.0, device=device) <= beta2 < torch.tensor(1.0, device=device))
-        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= torch.tensor(0.0, device=device))
+        self.validate_param("lr", lambda lr: lr >= self._zero)
+        self.validate_param("eps", lambda eps: eps > self._zero)
+        self.validate_param("beta1", lambda beta1: self._zero <= beta1 < self._one)
+        self.validate_param("beta2", lambda beta2: self._zero <= beta2 < self._one)
+        self.validate_param("weight_decay", lambda weight_decay: weight_decay >= self._zero)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -141,6 +143,7 @@ class TritonAdam(DTOptimizer):
             loss = closure()
 
         for group in self.param_groups:
+            step_cache = {}
             lr = group["lr"]
             beta1 = group["beta1"]
             beta2 = group["beta2"]
@@ -158,19 +161,20 @@ class TritonAdam(DTOptimizer):
 
                 if len(state) == 0:
                     # First time we see this parameter
-                    state["step"] = self.dtype(0, device=self.device)
+                    state["step"] = 0
                     state["exp_avg"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)._int
                     state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)._int
                     if amsgrad:
                         state["max_exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)._int
 
-                step = state["step"] + torch.tensor(1.0, device=self.device)
+                step = state["step"] + 1
+                step_value = self.encoded_step(step, step_cache)
                 exp_avg = state["exp_avg"]
                 exp_avg_sq = state["exp_avg_sq"]
                 max_exp_avg_sq = state.get("max_exp_avg_sq", None)
 
-                bias_corr1 = torch.tensor(1.0, device=self.device) - (beta1 ** step)
-                bias_corr2 = torch.tensor(1.0, device=self.device) - (beta2 ** step)
+                bias_corr1 = self._one - (beta1 ** step_value)
+                bias_corr2 = self._one - (beta2 ** step_value)
 
                 exp_avg, exp_avg_sq, max_exp_avg_sq = self.dtype.ops.triton_adam_step(
                     p._int, grad._int,
