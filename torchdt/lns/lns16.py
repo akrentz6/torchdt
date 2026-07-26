@@ -46,21 +46,24 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
                 return tab_exp[idx]
 
     @classmethod
-    def enable_triton(cls):
+    def enable_triton(cls, accumulator: bool = False):
         from dataclasses import replace
 
         from torchdt.ops import TritonAccumulatorOps, register_triton_ops, require_triton
-        from . import lns32
         from ._triton import _bump_triton_jit_hash, _lns_triton_bit_config, make_lns_triton_scalar_ops
+
+        if accumulator:
+            from . import lns32
 
         fingerprint = (
             precision,
-            lns32.precision,
+            accumulator,
             tab_sbdb.data_ptr() if tab_sbdb is not None else None,
             tab_ez.data_ptr() if tab_ez is not None else None,
             tab_exp.data_ptr() if tab_exp is not None else None,
-            lns32.tab_sbdb.data_ptr() if lns32.tab_sbdb is not None else None,
-            lns32.tab_ez.data_ptr() if lns32.tab_ez is not None else None,
+            lns32.precision if accumulator else None,
+            lns32.tab_sbdb.data_ptr() if accumulator and lns32.tab_sbdb is not None else None,
+            lns32.tab_ez.data_ptr() if accumulator and lns32.tab_ez is not None else None,
         )
         if getattr(cls.ops, "_triton_fingerprint", None) == fingerprint:
             return
@@ -76,114 +79,116 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
         VALUE_MIN_FINITE_LOG = tl.constexpr(MIN_FINITE_LOG)
         VALUE_MAX_FINITE_LOG = tl.constexpr(MAX_FINITE_LOG)
 
-        ACC_PRECISION = tl.constexpr(lns32.precision)
-        ACC_ZERO = tl.constexpr(lns32.ZERO.item())
-        ACC_POS_INF = tl.constexpr(lns32.POS_INF.item())
-        ACC_NEG_INF = tl.constexpr(lns32.NEG_INF.item())
-        ACC_MIN_LOG = tl.constexpr(lns32.MIN_LOG)
-        ACC_MAX_LOG = tl.constexpr(lns32.MAX_LOG)
-        ACC_MIN_FINITE_LOG = tl.constexpr(lns32.MIN_FINITE_LOG)
-        ACC_MAX_FINITE_LOG = tl.constexpr(lns32.MAX_FINITE_LOG)
-        TO_ACC_SHIFT = tl.constexpr(lns32.precision - precision)
-        FROM_ACC_SHIFT = tl.constexpr(precision - lns32.precision)
+        accumulator_ops = None
+        if accumulator:
+            ACC_PRECISION = tl.constexpr(lns32.precision)
+            ACC_ZERO = tl.constexpr(lns32.ZERO.item())
+            ACC_POS_INF = tl.constexpr(lns32.POS_INF.item())
+            ACC_NEG_INF = tl.constexpr(lns32.NEG_INF.item())
+            ACC_MIN_LOG = tl.constexpr(lns32.MIN_LOG)
+            ACC_MAX_LOG = tl.constexpr(lns32.MAX_LOG)
+            ACC_MIN_FINITE_LOG = tl.constexpr(lns32.MIN_FINITE_LOG)
+            ACC_MAX_FINITE_LOG = tl.constexpr(lns32.MAX_FINITE_LOG)
+            TO_ACC_SHIFT = tl.constexpr(lns32.precision - precision)
+            FROM_ACC_SHIFT = tl.constexpr(precision - lns32.precision)
 
-        @triton.jit
-        def to_lns32(x):
-            log_x = tl.cast(x >> 1, tl.int32)
-            sign_bit = tl.cast(x & 1, tl.int32)
-            if TO_ACC_SHIFT > 0:
-                rounded = log_x << TO_ACC_SHIFT
-            elif TO_ACC_SHIFT < 0:
-                downshift = -TO_ACC_SHIFT
-                half = 1 << (downshift - 1)
-                magnitude = tl.abs(log_x)
-                rounded_magnitude = (magnitude + half) >> downshift
-                rounded = tl.where(log_x < 0, -rounded_magnitude, rounded_magnitude)
-            else:
-                rounded = log_x
-            finite_rounded = tl.minimum(
-                tl.maximum(rounded, tl.cast(ACC_MIN_FINITE_LOG, tl.int32)),
-                tl.cast(ACC_MAX_FINITE_LOG, tl.int32),
+            @triton.jit
+            def to_lns32(x):
+                log_x = tl.cast(x >> 1, tl.int32)
+                sign_bit = tl.cast(x & 1, tl.int32)
+                if TO_ACC_SHIFT > 0:
+                    rounded = log_x << TO_ACC_SHIFT
+                elif TO_ACC_SHIFT < 0:
+                    downshift = -TO_ACC_SHIFT
+                    half = 1 << (downshift - 1)
+                    magnitude = tl.abs(log_x)
+                    rounded_magnitude = (magnitude + half) >> downshift
+                    rounded = tl.where(log_x < 0, -rounded_magnitude, rounded_magnitude)
+                else:
+                    rounded = log_x
+                finite_rounded = tl.minimum(
+                    tl.maximum(rounded, tl.cast(ACC_MIN_FINITE_LOG, tl.int32)),
+                    tl.cast(ACC_MAX_FINITE_LOG, tl.int32),
+                )
+                packed = (tl.cast(finite_rounded, tl.int32) << 1) | sign_bit
+                overflow = rounded >= tl.cast(ACC_MAX_LOG, tl.int32)
+                underflow = rounded <= tl.cast(ACC_MIN_LOG, tl.int32)
+                inf = tl.where(sign_bit == 0, tl.cast(ACC_POS_INF, tl.int32), tl.cast(ACC_NEG_INF, tl.int32))
+                converted = tl.where(overflow, inf, tl.where(underflow, tl.cast(ACC_ZERO, tl.int32), packed))
+                return tl.where(
+                    x == VALUE_ZERO,
+                    tl.cast(ACC_ZERO, tl.int32),
+                    tl.where(x == VALUE_POS_INF, tl.cast(ACC_POS_INF, tl.int32),
+                             tl.where(x == VALUE_NEG_INF, tl.cast(ACC_NEG_INF, tl.int32), converted)),
+                )
+
+            @triton.jit
+            def from_lns32(x):
+                log_x = x >> 1
+                sign_bit = tl.cast(x & 1, tl.int16)
+                if FROM_ACC_SHIFT > 0:
+                    rounded = log_x << FROM_ACC_SHIFT
+                elif FROM_ACC_SHIFT < 0:
+                    downshift = -FROM_ACC_SHIFT
+                    half = 1 << (downshift - 1)
+                    magnitude = tl.abs(log_x)
+                    rounded_magnitude = (magnitude + half) >> downshift
+                    rounded = tl.where(log_x < 0, -rounded_magnitude, rounded_magnitude)
+                else:
+                    rounded = log_x
+                finite_rounded = tl.minimum(
+                    tl.maximum(rounded, tl.cast(VALUE_MIN_FINITE_LOG, tl.int32)),
+                    tl.cast(VALUE_MAX_FINITE_LOG, tl.int32),
+                )
+                packed = (tl.cast(finite_rounded, tl.int16) << 1) | sign_bit
+                overflow = rounded >= tl.cast(VALUE_MAX_LOG, tl.int32)
+                underflow = rounded <= tl.cast(VALUE_MIN_LOG, tl.int32)
+                inf = tl.where(sign_bit == 0, tl.cast(VALUE_POS_INF, tl.int16), tl.cast(VALUE_NEG_INF, tl.int16))
+                converted = tl.where(overflow, inf, tl.where(underflow, tl.cast(VALUE_ZERO, tl.int16), packed))
+                return tl.where(
+                    x == ACC_ZERO,
+                    tl.cast(VALUE_ZERO, tl.int16),
+                    tl.where(x == ACC_POS_INF, tl.cast(VALUE_POS_INF, tl.int16),
+                             tl.where(x == ACC_NEG_INF, tl.cast(VALUE_NEG_INF, tl.int16), converted)),
+                )
+
+            _bump_triton_jit_hash(
+                to_lns32,
+                VALUE_PRECISION=VALUE_PRECISION,
+                VALUE_ZERO=VALUE_ZERO,
+                VALUE_POS_INF=VALUE_POS_INF,
+                VALUE_NEG_INF=VALUE_NEG_INF,
+                ACC_PRECISION=ACC_PRECISION,
+                ACC_ZERO=ACC_ZERO,
+                ACC_POS_INF=ACC_POS_INF,
+                ACC_NEG_INF=ACC_NEG_INF,
             )
-            packed = (tl.cast(finite_rounded, tl.int32) << 1) | sign_bit
-            overflow = rounded >= tl.cast(ACC_MAX_LOG, tl.int32)
-            underflow = rounded <= tl.cast(ACC_MIN_LOG, tl.int32)
-            inf = tl.where(sign_bit == 0, tl.cast(ACC_POS_INF, tl.int32), tl.cast(ACC_NEG_INF, tl.int32))
-            converted = tl.where(overflow, inf, tl.where(underflow, tl.cast(ACC_ZERO, tl.int32), packed))
-            return tl.where(
-                x == VALUE_ZERO,
-                tl.cast(ACC_ZERO, tl.int32),
-                tl.where(x == VALUE_POS_INF, tl.cast(ACC_POS_INF, tl.int32),
-                         tl.where(x == VALUE_NEG_INF, tl.cast(ACC_NEG_INF, tl.int32), converted)),
+            _bump_triton_jit_hash(
+                from_lns32,
+                VALUE_PRECISION=VALUE_PRECISION,
+                VALUE_ZERO=VALUE_ZERO,
+                VALUE_POS_INF=VALUE_POS_INF,
+                VALUE_NEG_INF=VALUE_NEG_INF,
+                ACC_PRECISION=ACC_PRECISION,
+                ACC_ZERO=ACC_ZERO,
+                ACC_POS_INF=ACC_POS_INF,
+                ACC_NEG_INF=ACC_NEG_INF,
             )
 
-        @triton.jit
-        def from_lns32(x):
-            log_x = x >> 1
-            sign_bit = tl.cast(x & 1, tl.int16)
-            if FROM_ACC_SHIFT > 0:
-                rounded = log_x << FROM_ACC_SHIFT
-            elif FROM_ACC_SHIFT < 0:
-                downshift = -FROM_ACC_SHIFT
-                half = 1 << (downshift - 1)
-                magnitude = tl.abs(log_x)
-                rounded_magnitude = (magnitude + half) >> downshift
-                rounded = tl.where(log_x < 0, -rounded_magnitude, rounded_magnitude)
-            else:
-                rounded = log_x
-            finite_rounded = tl.minimum(
-                tl.maximum(rounded, tl.cast(VALUE_MIN_FINITE_LOG, tl.int32)),
-                tl.cast(VALUE_MAX_FINITE_LOG, tl.int32),
+            accumulator_ops = TritonAccumulatorOps(
+                int_dtype=torch.int32,
+                scalar_ops=make_lns_triton_scalar_ops(
+                    bitwidth=32,
+                    base=lns32.base,
+                    zero_value=lns32.ZERO.item(),
+                    pos_inf_value=lns32.POS_INF.item(),
+                    neg_inf_value=lns32.NEG_INF.item(),
+                    tab_sbdb=lns32.tab_sbdb,
+                    tab_ez=lns32.tab_ez,
+                ),
+                to_accumulator=to_lns32,
+                from_accumulator=from_lns32,
             )
-            packed = (tl.cast(finite_rounded, tl.int16) << 1) | sign_bit
-            overflow = rounded >= tl.cast(VALUE_MAX_LOG, tl.int32)
-            underflow = rounded <= tl.cast(VALUE_MIN_LOG, tl.int32)
-            inf = tl.where(sign_bit == 0, tl.cast(VALUE_POS_INF, tl.int16), tl.cast(VALUE_NEG_INF, tl.int16))
-            converted = tl.where(overflow, inf, tl.where(underflow, tl.cast(VALUE_ZERO, tl.int16), packed))
-            return tl.where(
-                x == ACC_ZERO,
-                tl.cast(VALUE_ZERO, tl.int16),
-                tl.where(x == ACC_POS_INF, tl.cast(VALUE_POS_INF, tl.int16),
-                         tl.where(x == ACC_NEG_INF, tl.cast(VALUE_NEG_INF, tl.int16), converted)),
-            )
-
-        _bump_triton_jit_hash(
-            to_lns32,
-            VALUE_PRECISION=VALUE_PRECISION,
-            VALUE_ZERO=VALUE_ZERO,
-            VALUE_POS_INF=VALUE_POS_INF,
-            VALUE_NEG_INF=VALUE_NEG_INF,
-            ACC_PRECISION=ACC_PRECISION,
-            ACC_ZERO=ACC_ZERO,
-            ACC_POS_INF=ACC_POS_INF,
-            ACC_NEG_INF=ACC_NEG_INF,
-        )
-        _bump_triton_jit_hash(
-            from_lns32,
-            VALUE_PRECISION=VALUE_PRECISION,
-            VALUE_ZERO=VALUE_ZERO,
-            VALUE_POS_INF=VALUE_POS_INF,
-            VALUE_NEG_INF=VALUE_NEG_INF,
-            ACC_PRECISION=ACC_PRECISION,
-            ACC_ZERO=ACC_ZERO,
-            ACC_POS_INF=ACC_POS_INF,
-            ACC_NEG_INF=ACC_NEG_INF,
-        )
-
-        accumulator_ops = TritonAccumulatorOps(
-            int_dtype=torch.int32,
-            scalar_ops=make_lns_triton_scalar_ops(
-                bitwidth=32,
-                base=lns32.base,
-                zero_value=lns32.ZERO.item(),
-                pos_inf_value=lns32.POS_INF.item(),
-                neg_inf_value=lns32.NEG_INF.item(),
-                tab_sbdb=lns32.tab_sbdb,
-                tab_ez=lns32.tab_ez,
-            ),
-            to_accumulator=to_lns32,
-            from_accumulator=from_lns32,
-        )
 
         scalar_ops = make_lns_triton_scalar_ops(
             bitwidth=16,
