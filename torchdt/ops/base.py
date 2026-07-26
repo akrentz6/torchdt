@@ -137,11 +137,15 @@ class OpsBase:
     def encoded_scalar(cls, value):
         """Return a host integer encoding without a device scalar or sync."""
         owner = getattr(cls, "facade", cls)
+        if isinstance(value, Tensor):
+            if value.numel() != 1:
+                raise ValueError("encoded_scalar expects a scalar value")
+            value = value.detach().item()
         key = float(value)
         code = owner._scalar_codes.get(key)
         if code is None:
             python_ops = owner.direct_for_backend("python")
-            tensor = torch.tensor(value, dtype=torch.float32)
+            tensor = torch.tensor(key, dtype=torch.float32)
             code = int(python_ops.from_float(tensor).item())
             owner._scalar_codes[key] = code
         return code

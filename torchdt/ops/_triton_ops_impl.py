@@ -71,9 +71,9 @@ def register_triton_ops(
     elif dtype_cls.bitwidth == 64:
         tl_int_dtype = tl.constexpr(tl.int64)
 
-    _ZERO = tl.constexpr(dtype_cls.ops.scalar_from_float(0.0).item())
-    _NEG_INF = tl.constexpr(dtype_cls.ops.scalar_from_float(float("-inf")).item())
-    _ONE = tl.constexpr(dtype_cls.ops.scalar_from_float(1.0).item())
+    _ZERO = tl.constexpr(dtype_cls.ops.encoded_scalar(0.0))
+    _NEG_INF = tl.constexpr(dtype_cls.ops.encoded_scalar(float("-inf")))
+    _ONE = tl.constexpr(dtype_cls.ops.encoded_scalar(1.0))
 
     can_register_sign = sign is not None or (lt is not None and neg is not None)
 
@@ -125,11 +125,11 @@ def register_triton_ops(
 
         for rev_dim in tl.static_range(0, NDIM):
             dim = NDIM - 1 - rev_dim
-            dim_size = tl.load(shape_ptr + dim)
+            dim_size = tl.cast(tl.load(shape_ptr + dim), tl.int64)
             dim_index = remaining % dim_size
             remaining = remaining // dim_size
 
-            x_stride = tl.load(x_stride_ptr + dim)
+            x_stride = tl.cast(tl.load(x_stride_ptr + dim), tl.int64)
             x_offsets = x_offsets + dim_index * x_stride
 
         return x_offsets
@@ -142,12 +142,12 @@ def register_triton_ops(
 
         for rev_dim in tl.static_range(0, NDIM):
             dim = NDIM - 1 - rev_dim
-            dim_size = tl.load(shape_ptr + dim)
+            dim_size = tl.cast(tl.load(shape_ptr + dim), tl.int64)
             dim_index = remaining % dim_size
             remaining = remaining // dim_size
 
-            x_stride = tl.load(x_stride_ptr + dim)
-            y_stride = tl.load(y_stride_ptr + dim)
+            x_stride = tl.cast(tl.load(x_stride_ptr + dim), tl.int64)
+            y_stride = tl.cast(tl.load(y_stride_ptr + dim), tl.int64)
             x_offsets = x_offsets + dim_index * x_stride
             y_offsets = y_offsets + dim_index * y_stride
 
@@ -165,7 +165,10 @@ def register_triton_ops(
 
         contiguous = x.is_contiguous()
         if contiguous:
-            return out, x, x, out.ndim, True
+            # Triton may type-check the unreachable strided branch. Give it an
+            # integer pointer even though no metadata is loaded at runtime.
+            metadata_dummy = x if x.dtype == dtype_cls.int_dtype else out
+            return out, metadata_dummy, metadata_dummy, out.ndim, True
 
         shape_meta = _metadata_tensor(tuple(x.shape), x.device)
         stride_meta = _metadata_tensor(tuple(x.stride()), x.device)
@@ -173,6 +176,7 @@ def register_triton_ops(
 
     @triton.jit
     def prepared_unary_offsets(offs, shape_ptr, stride_ptr, NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr):
+        offs = tl.cast(offs, tl.int64)
         if CONTIGUOUS:
             return offs
         return elementwise_unary_offsets(offs, shape_ptr, stride_ptr, NDIM)
@@ -254,6 +258,7 @@ def register_triton_ops(
 
     @triton.jit
     def prepared_binary_offsets(offs, shape_ptr, x_stride_ptr, y_stride_ptr, NDIM: tl.constexpr, MODE: tl.constexpr):
+        offs = tl.cast(offs, tl.int64)
         if MODE == 1:
             return offs, offs
         if MODE == 2:
@@ -2276,9 +2281,9 @@ def register_triton_ops(
         if not has_bias:
             bias = torch.empty(0, device=x.device, dtype=dtype_cls.int_dtype)
 
-        count_dt = ops.scalar_from_float(count).item()
-        eps_dt = ops.scalar_from_float(eps).item()
-        momentum_dt = ops.scalar_from_float(momentum).item()
+        count_dt = ops.encoded_scalar(count)
+        eps_dt = ops.encoded_scalar(eps)
+        momentum_dt = ops.encoded_scalar(momentum)
 
         output = torch.empty((N, C, H, W), device=x.device, dtype=dtype_cls.int_dtype)
         save_mean = torch.empty((C,), device=x.device, dtype=dtype_cls.int_dtype)
@@ -2580,7 +2585,7 @@ def register_triton_ops(
         has_weight = weight is not None
         has_bias = bias is not None
 
-        count_dt = dtype_cls.ops.scalar_from_float(count).item()
+        count_dt = dtype_cls.ops.encoded_scalar(count)
 
         if not has_weight:
             weight = torch.empty(0, device=input.device, dtype=dtype_cls.int_dtype)

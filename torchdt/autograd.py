@@ -1,6 +1,7 @@
 import torch
 from torch.autograd.graph import get_gradient_edge
 from typing import Optional, Tuple
+import inspect
 from torchdt._dispatch import current_dispatch
 
 __all__ = [
@@ -69,8 +70,11 @@ def _combined_forward(ctx, call_spec, *inputs):
     ctx._input_indices = input_indices
 
     cast_inputs = _cast_values(inputs, input_indices, _cast_int, dtype)
-    output = dt_cls._dt_forward(ops, *cast_inputs)
-    if dt_cls._dt_setup_context is not None:
+    if dt_cls._dt_forward_uses_ctx:
+        output = dt_cls._dt_forward(ctx, ops, *cast_inputs)
+    else:
+        output = dt_cls._dt_forward(ops, *cast_inputs)
+    if not dt_cls._dt_forward_uses_ctx and dt_cls._dt_setup_context is not None:
         dt_cls._dt_setup_context(ctx, ops, cast_inputs, output)
     return _cast_values(output, dt_cls.output_indices, _cast_float, dtype)
 
@@ -115,6 +119,22 @@ def _common_dtype_and_device(args, dtype_base):
     return dtype, device
 
 
+class _NoGradContext:
+    """Discard autograd-only state while running a ctx-style forward directly."""
+
+    def save_for_backward(self, *tensors):
+        pass
+
+    def save_for_forward(self, *tensors):
+        pass
+
+    def mark_non_differentiable(self, *tensors):
+        pass
+
+    def set_materialize_grads(self, value):
+        pass
+
+
 class DTFunction(torch.autograd.Function):
     """Autograd Function base for operations on encoded DType tensors."""
 
@@ -125,9 +145,15 @@ class DTFunction(torch.autograd.Function):
 
         cls._dt_forward = getattr(cls, "forward")
         cls._dt_backward = getattr(cls, "backward")
+        forward_parameters = tuple(inspect.signature(cls._dt_forward).parameters)
+        cls._dt_forward_uses_ctx = bool(forward_parameters and forward_parameters[0] == "ctx")
         setup_context = getattr(cls, "setup_context")
         inherited_setup = torch.autograd.function._SingleLevelFunction.setup_context
         cls._dt_setup_context = None if setup_context is inherited_setup else setup_context
+        if cls._dt_forward_uses_ctx and cls._dt_setup_context is not None:
+            raise TypeError(
+                f"{cls.__name__} cannot define both forward(ctx, ...) and setup_context()."
+            )
 
         cls.forward = staticmethod(_combined_forward)
         cls.backward = staticmethod(_combined_backward)
@@ -158,7 +184,10 @@ class DTFunction(torch.autograd.Function):
             )
         if not needs_autograd:
             internal_inputs = tuple(arg._int if isinstance(arg, DType) else arg for arg in args)
-            result = cls._dt_forward(ops, *internal_inputs)
+            if cls._dt_forward_uses_ctx:
+                result = cls._dt_forward(_NoGradContext(), ops, *internal_inputs)
+            else:
+                result = cls._dt_forward(ops, *internal_inputs)
             return _wrap_outputs(result, dtype, cls.output_indices)
 
         prepped_inputs = tuple(arg._float if isinstance(arg, DType) else arg for arg in args)
