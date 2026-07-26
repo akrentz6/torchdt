@@ -5,13 +5,22 @@ import functools
 
 InternalTensor = Union[CharTensor, ShortTensor, IntTensor, LongTensor]
 
-def register_op(dtype_cls: type, method: str, backend: str = "python") -> Callable:
+def register_op(
+    dtype_cls: type,
+    method: str,
+    backend: str = "python",
+    *,
+    direct: bool = False,
+) -> Callable:
     """Decorator to register an operation for a given DType subclass."""
     def decorator(func: Callable) -> Callable:
         ops_cls = dtype_cls.ops
         if method not in OpsBase._op_names:
             raise ValueError(f"{ops_cls.__name__} has no method '{method}' to register.")
-        ops_cls._implementations.setdefault(backend, {})[method] = func
+        registry = ops_cls._direct_implementations if direct else ops_cls._implementations
+        registry.setdefault(backend, {})[method] = func
+        ops_cls._direct_ops.clear()
+        ops_cls._scalar_codes.clear()
         return func
     return decorator
 
@@ -28,6 +37,9 @@ class OpsBase:
 
     _base_implementations = {}
     _op_names = set()
+    _direct_ops = {}
+    _scalar_codes = {}
+    _direct_implementations = {}
 
     @classmethod
     def _iter_tensors(cls, value):
@@ -49,20 +61,27 @@ class OpsBase:
     def resolve_device(cls, args, kwargs=None):
         """Return the common tensor device used by an operation."""
         kwargs = kwargs or {}
-        devices = {
-            cls.tensor_device(tensor)
-            for value in (*args, *kwargs.values())
-            for tensor in cls._iter_tensors(value)
-        }
-        if len(devices) > 1:
-            device_list = ", ".join(str(device) for device in sorted(devices, key=str))
-            raise RuntimeError(f"Expected all tensor arguments to use one device, got {device_list}.")
-        return next(iter(devices), None)
+        device = None
+        with torch._C.DisableTorchFunctionSubclass():
+            for value in (*args, *kwargs.values()):
+                tensors = (value,) if isinstance(value, Tensor) else cls._iter_tensors(value)
+                for tensor in tensors:
+                    tensor_device = tensor.device
+                    if device is None:
+                        device = tensor_device
+                    elif tensor_device != device:
+                        raise RuntimeError(
+                            "Expected all tensor arguments to use one device, got "
+                            f"{device} and {tensor_device}."
+                        )
+        return device
 
     @classmethod
     def backend_for_device(cls, device):
         if device is None:
             return "python"
+        if not isinstance(device, torch.device):
+            device = torch.device(device)
         return cls._enabled_backends.get(device.type, "python")
 
     @classmethod
@@ -75,6 +94,59 @@ class OpsBase:
         cls._enabled_backends[device_type] = backend
 
     @classmethod
+    def direct_for_backend(cls, backend: str):
+        """Return an operation table with backend fallback resolved once."""
+        direct = cls._direct_ops.get(backend)
+        if direct is not None:
+            return direct
+
+        implementations = dict(OpsBase._base_implementations)
+        implementations.update(cls._implementations.get("python", {}))
+        if backend != "python":
+            implementations.update(cls._implementations.get(backend, {}))
+        direct_implementations = cls._direct_implementations.get(backend, {})
+
+        namespace = {
+            "__module__": cls.__module__,
+            "dtype": cls.dtype,
+            "backend": backend,
+            "facade": cls,
+        }
+        namespace.update({
+            method: classmethod(func)
+            for method, func in implementations.items()
+        })
+        namespace.update({
+            method: staticmethod(func)
+            for method, func in direct_implementations.items()
+        })
+        direct = type(f"{cls.__name__}_{backend}", (OpsBase,), namespace)
+        cls._direct_ops[backend] = direct
+        return direct
+
+    @classmethod
+    def direct_for_device(cls, device):
+        return cls.direct_for_backend(cls.backend_for_device(device))
+
+    @classmethod
+    def clear_scalar_cache(cls):
+        owner = getattr(cls, "facade", cls)
+        owner._scalar_codes.clear()
+
+    @classmethod
+    def encoded_scalar(cls, value):
+        """Return a host integer encoding without a device scalar or sync."""
+        owner = getattr(cls, "facade", cls)
+        key = float(value)
+        code = owner._scalar_codes.get(key)
+        if code is None:
+            python_ops = owner.direct_for_backend("python")
+            tensor = torch.tensor(value, dtype=torch.float32)
+            code = int(python_ops.from_float(tensor).item())
+            owner._scalar_codes[key] = code
+        return code
+
+    @classmethod
     def _get_implementation(cls, method: str, backend: str):
         implementation = cls._implementations.get(backend, {}).get(method)
         if implementation is None and backend == "python":
@@ -85,10 +157,8 @@ class OpsBase:
     def _dispatch(cls, method: str, *args, **kwargs):
         device = cls.resolve_device(args, kwargs)
         backend = cls.backend_for_device(device)
-        implementation = cls._get_implementation(method, backend)
-
-        if implementation is None and backend != "python":
-            implementation = cls._get_implementation(method, "python")
+        direct_ops = cls.direct_for_backend(backend)
+        implementation = direct_ops.__dict__.get(method)
 
         if implementation is None:
             device_name = str(device) if device is not None else "no tensor device"
@@ -96,8 +166,7 @@ class OpsBase:
                 f"{cls.dtype.__name__} has no implementation for operation '{method}' "
                 f"on {device_name}."
             )
-
-        return implementation(cls, *args, **kwargs)
+        return getattr(direct_ops, method)(*args, **kwargs)
 
     @staticmethod
     def dispatch_method(method: str):
@@ -126,27 +195,27 @@ class OpsBase:
 
     @classmethod
     def zeros(cls, size, device=None):
-        return torch.full(size, cls.scalar_from_float(0.0, device=device), dtype=cls.dtype.int_dtype, device=device)
+        return torch.full(size, cls.encoded_scalar(0.0), dtype=cls.dtype.int_dtype, device=device)
 
     @classmethod
     def zeros_like(cls, x):
-        return torch.full_like(x, cls.scalar_from_float(0.0, device=x.device), dtype=cls.dtype.int_dtype, device=x.device)
+        return torch.full_like(x, cls.encoded_scalar(0.0), dtype=cls.dtype.int_dtype, device=x.device)
 
     @classmethod
     def ones(cls, size, device=None):
-        return torch.full(size, cls.scalar_from_float(1.0, device=device), dtype=cls.dtype.int_dtype, device=device)
+        return torch.full(size, cls.encoded_scalar(1.0), dtype=cls.dtype.int_dtype, device=device)
 
     @classmethod
     def ones_like(cls, x):
-        return torch.full_like(x, cls.scalar_from_float(1.0, device=x.device), dtype=cls.dtype.int_dtype, device=x.device)
+        return torch.full_like(x, cls.encoded_scalar(1.0), dtype=cls.dtype.int_dtype, device=x.device)
 
     @classmethod
     def full(cls, size, fill_value, device=None):
-        return torch.full(size, cls.scalar_from_float(fill_value, device=device), dtype=cls.dtype.int_dtype, device=device)
+        return torch.full(size, cls.encoded_scalar(fill_value), dtype=cls.dtype.int_dtype, device=device)
 
     @classmethod
     def full_like(cls, x, fill_value):
-        return torch.full_like(x, cls.scalar_from_float(fill_value, device=x.device), dtype=cls.dtype.int_dtype)
+        return torch.full_like(x, cls.encoded_scalar(fill_value), dtype=cls.dtype.int_dtype)
 
     @classmethod
     def sum_to_size(cls, x: InternalTensor, target_size: torch.Size) -> InternalTensor:
@@ -619,6 +688,10 @@ class OpsBase:
 
 _HELPER_METHODS = {
     "backend_for_device",
+    "clear_scalar_cache",
+    "direct_for_backend",
+    "direct_for_device",
+    "encoded_scalar",
     "enable_backend",
     "full",
     "full_like",

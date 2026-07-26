@@ -1,152 +1,142 @@
 import torch
 from torch.autograd.graph import get_gradient_edge
-import functools
 from typing import Optional, Tuple
+from torchdt._dispatch import current_dispatch
 
 __all__ = [
     "DTFunction",
     "DTNonDifferentiableFunction",
 ]
 
-def _find_first_grad_tensor(args):
-    if not isinstance(args, (list, tuple)):
-        args = (args,)
-    for arg in args:
-        if isinstance(arg, torch.Tensor) and arg.requires_grad:
-            return arg
+
+def _find_first_grad_tensor(values):
+    if isinstance(values, torch.Tensor):
+        return values if values.requires_grad else None
+    if isinstance(values, (list, tuple)):
+        for value in values:
+            tensor = _find_first_grad_tensor(value)
+            if tensor is not None:
+                return tensor
     return None
+
 
 def _cast_int(x, dtype):
     return x.view(dtype.int_dtype) if isinstance(x, torch.Tensor) and x.dtype == dtype.float_dtype else x
 
+
 def _cast_float(x, dtype):
     return x.view(dtype.float_dtype) if isinstance(x, torch.Tensor) and x.dtype == dtype.int_dtype else x
+
 
 def _cast_values(values, indices, cast_fn, dtype):
     all_indices = indices is None
 
     if isinstance(values, tuple):
         return tuple(
-            cast_fn(values[i], dtype) if all_indices or i in indices else values[i]
-            for i in range(len(values))
+            cast_fn(value, dtype) if all_indices or i in indices else value
+            for i, value in enumerate(values)
         )
-
-    elif isinstance(values, list):
+    if isinstance(values, list):
         return [
-            cast_fn(values[i], dtype) if all_indices or i in indices else values[i]
-            for i in range(len(values))
+            cast_fn(value, dtype) if all_indices or i in indices else value
+            for i, value in enumerate(values)
         ]
+    return cast_fn(values, dtype) if all_indices or 0 in indices else values
 
-    else:
-        return cast_fn(values, dtype) if all_indices or 0 in indices else values
 
-# added to forward only if setup_context is not defined
-def forward_ctx_decorator(func, cls):
+def _wrap_outputs(result, dtype, output_indices):
+    def wrap(value, index):
+        if output_indices is None or index in output_indices:
+            return dtype(value, internal=True)
+        return value
 
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        ctx = args[0]
-        ops = args[1]
-        inputs = args[2:]
+    if isinstance(result, torch.Tensor):
+        return wrap(result, 0)
+    if isinstance(result, list):
+        return [wrap(value, i) for i, value in enumerate(result)]
+    if isinstance(result, tuple):
+        return tuple(wrap(value, i) for i, value in enumerate(result))
+    return result
 
-        ctx._dtype = cls.dtype
-        ctx._input_indices = cls.input_indices
 
-        cast_inputs = _cast_values(inputs, cls.input_indices, _cast_int, cls.dtype)
-        output = func(ctx, ops, *cast_inputs, **kwargs)
-        return _cast_values(output, cls.output_indices, _cast_float, cls.dtype)
+def _combined_forward(ctx, call_spec, *inputs):
+    dt_cls, ops, input_indices = call_spec
+    dtype = ops.dtype
 
-    return wrapper
+    ctx._dt_cls = dt_cls
+    ctx._dtype = dtype
+    ctx._ops = ops
+    ctx._input_indices = input_indices
 
-def forward_no_ctx_decorator(func, cls):
+    cast_inputs = _cast_values(inputs, input_indices, _cast_int, dtype)
+    output = dt_cls._dt_forward(ops, *cast_inputs)
+    if dt_cls._dt_setup_context is not None:
+        dt_cls._dt_setup_context(ctx, ops, cast_inputs, output)
+    return _cast_values(output, dt_cls.output_indices, _cast_float, dtype)
 
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        ops = args[0]
-        inputs = args[1:]
 
-        cast_inputs = _cast_values(inputs, cls.input_indices, _cast_int, cls.dtype)
-        output = func(ops, *cast_inputs, **kwargs)
-        return _cast_values(output, cls.output_indices, _cast_float, cls.dtype)
+def _combined_backward(ctx, *grads):
+    dt_cls = ctx._dt_cls
+    dtype = ctx._dtype
+    ops = ctx._ops
 
-    return wrapper
+    cast_grads = _cast_values(grads, dt_cls.output_indices, _cast_int, dtype)
+    output = dt_cls._dt_backward(ctx, ops, *cast_grads)
+    cast_output = _cast_values(output, ctx._input_indices, _cast_float, dtype)
 
-def setup_context_decorator(func, cls):
+    if isinstance(cast_output, tuple):
+        return (None,) + cast_output
+    return None, cast_output
 
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        ctx = args[0]
-        ops = args[1][0]
-        inputs = args[1][1:]
-        output = args[2]
 
-        ctx._dtype = cls.dtype
-        ctx._input_indices = cls.input_indices
+def _common_dtype_and_device(args, dtype_base):
+    dtype = None
+    device = None
+    tensor_devices = set()
 
-        cast_inputs = _cast_values(inputs, cls.input_indices, _cast_int, cls.dtype)
-        cast_output = _cast_values(output, cls.output_indices, _cast_int, cls.dtype)
-        return func(ctx, ops, cast_inputs, cast_output, **kwargs)
+    with torch._C.DisableTorchFunctionSubclass():
+        for arg in args:
+            if not isinstance(arg, torch.Tensor):
+                continue
+            arg_device = arg.device
+            tensor_devices.add(arg_device)
+            if isinstance(arg, dtype_base):
+                if dtype is None:
+                    dtype = arg.__class__
+                    device = arg_device
+                elif arg.__class__ is not dtype:
+                    raise ValueError("All DType arguments must be of the same type.")
 
-    return wrapper
+    if dtype is None:
+        raise ValueError("A DType tensor argument is required.")
+    if len(tensor_devices) > 1:
+        devices = ", ".join(str(value) for value in sorted(tensor_devices, key=str))
+        raise RuntimeError(f"Expected all tensor arguments to use one device, got {devices}.")
+    return dtype, device
 
-def backward_decorator(func, cls):
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        ctx = args[0]
-        grads = args[1:]
-
-        dtype = ctx._dtype
-        ops = ctx._dtype.ops
-        input_indices = ctx._input_indices
-
-        cast_grads = _cast_values(grads, cls.output_indices, _cast_int, dtype)
-        output = func(ctx, ops, *cast_grads, **kwargs)
-        cast_output = _cast_values(output, input_indices, _cast_float, dtype)
-
-        if isinstance(output, tuple):
-            return (None,) + cast_output
-        return None, cast_output
-
-    return wrapper
 
 class DTFunction(torch.autograd.Function):
-    """
-    Parent class for custom autograd Functions that work with DType tensors.
-    Subclasses should implement static methods `forward` and `backward` (and
-    optionally `setup_context`).
-    """
+    """Autograd Function base for operations on encoded DType tensors."""
 
     output_indices: Optional[Tuple[int, ...]] = None
-
-    @classmethod
-    def _register_ops_decorator(cls, func_name, decorator):
-        func = getattr(cls, func_name)
-
-        if not getattr(func, "_is_decorated", False):
-            decorated = decorator(func, cls)
-            decorated._is_lns_decorated = True
-            setattr(cls, func_name, decorated)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
 
-        # check if setup_context is defined in subclass or inherited
-        # from torch.autograd.function._SingleLevelFunction. If it is
-        # inherited, we only need to decorate forward and backward.
-        # If it is defined, we need to decorate setup_context instead
-        # of forward.
-        if cls.setup_context is torch.autograd.function._SingleLevelFunction.setup_context:
-            cls._register_ops_decorator("forward", forward_ctx_decorator)
-        else:
-            cls._register_ops_decorator("forward", forward_no_ctx_decorator)
-            cls._register_ops_decorator("setup_context", setup_context_decorator)
+        cls._dt_forward = getattr(cls, "forward")
+        cls._dt_backward = getattr(cls, "backward")
+        setup_context = getattr(cls, "setup_context")
+        inherited_setup = torch.autograd.function._SingleLevelFunction.setup_context
+        cls._dt_setup_context = None if setup_context is inherited_setup else setup_context
 
-        cls._register_ops_decorator("backward", backward_decorator)
+        cls.forward = staticmethod(_combined_forward)
+        cls.backward = staticmethod(_combined_backward)
+        if "setup_context" in cls.__dict__:
+            delattr(cls, "setup_context")
 
     @classmethod
     def apply(cls, *args, **kwargs):
-        from torchdt import DType # avoid circular import
+        from torchdt import DType  # avoid circular import
 
         if kwargs:
             raise ValueError(
@@ -154,84 +144,51 @@ class DTFunction(torch.autograd.Function):
                 "Please use positional arguments only."
             )
 
-        input_indices = []
-        subtypes = []
-        prepped_inputs = []
+        dispatch = current_dispatch.get()
+        if dispatch is None:
+            dtype, device = _common_dtype_and_device(args, DType)
+            ops = dtype.ops.direct_for_device(device)
+        else:
+            dtype, device, ops = dispatch
+        input_indices = tuple(i for i, arg in enumerate(args) if isinstance(arg, DType))
 
-        for i, arg in enumerate(args):
-            if isinstance(arg, DType):
-                subtypes.append(arg.__class__)
-                input_indices.append(i)
-                prepped_inputs.append(arg._float)
-            else:
-                prepped_inputs.append(arg)
+        with torch._C.DisableTorchFunctionSubclass():
+            needs_autograd = torch.is_grad_enabled() and any(
+                isinstance(arg, DType) and arg.requires_grad for arg in args
+            )
+        if not needs_autograd:
+            internal_inputs = tuple(arg._int if isinstance(arg, DType) else arg for arg in args)
+            result = cls._dt_forward(ops, *internal_inputs)
+            return _wrap_outputs(result, dtype, cls.output_indices)
 
-        if not subtypes:
-            raise ValueError("DTFunction.apply() requires at least one DType tensor argument.")
+        prepped_inputs = tuple(arg._float if isinstance(arg, DType) else arg for arg in args)
+        call_spec = (cls, ops, input_indices)
+        result = super().apply(call_spec, *prepped_inputs)
 
-        dtype = subtypes[0]
-        if any(st != dtype for st in subtypes):
-            raise ValueError("All DType arguments to DTFunction.apply() must be of the same type.")
-
-        # perform the operation using the Ops class for this DType
-        cls.dtype = dtype
-        cls.input_indices = input_indices
-        result = super().apply(dtype.ops, *prepped_inputs)
-        del cls.input_indices
-        del cls.dtype
-
-        # get gradient edge to correctly handle grads for DType tensors
         first_tensor = _find_first_grad_tensor(result)
         if first_tensor is not None:
             edge = get_gradient_edge(first_tensor)
-
-            j = 0
+            tensor_index = 0
             for arg in args:
-
-                # ignore non-tensor arguments
                 if not isinstance(arg, torch.Tensor):
                     continue
-                j += 1
+                if isinstance(arg, dtype) and arg.requires_grad:
+                    arg._track_operation(edge, tensor_index)
+                tensor_index += 1
 
-                # only register hooks for DType inputs with gradients
-                if not (isinstance(arg, dtype) and arg.requires_grad):
-                    continue
+        return _wrap_outputs(result, dtype, cls.output_indices)
 
-                arg._track_operation(edge, j - 1)
-
-        if isinstance(result, torch.Tensor):
-            return dtype(
-                result, internal=True
-            ) if cls.output_indices is None or 0 in cls.output_indices else result
-
-        elif isinstance(result, list):
-            return [
-                dtype(result[i], internal=True)
-                if cls.output_indices is None or i in cls.output_indices else result[i]
-                for i in range(len(result))
-            ]
-
-        elif isinstance(result, tuple):
-            return tuple(
-                dtype(result[i], internal=True)
-                if cls.output_indices is None or i in cls.output_indices else result[i]
-                for i in range(len(result))
-            )
-
-        return result
 
 class DTNonDifferentiableFunction:
-
     output_indices: Optional[Tuple[int, ...]] = None
 
     @staticmethod
     def forward(ops, *args, **kwargs):
-        """Forward pass for non-differentiable function."""
         raise NotImplementedError
 
     @classmethod
     def apply(cls, *args, **kwargs):
-        from torchdt import DType # avoid circular import
+        from torchdt import DType  # avoid circular import
 
         if kwargs:
             raise ValueError(
@@ -239,42 +196,12 @@ class DTNonDifferentiableFunction:
                 "Please use positional arguments only."
             )
 
-        subtypes = []
-        prepped_inputs = []
-
-        for i, arg in enumerate(args):
-            if isinstance(arg, DType):
-                subtypes.append(arg.__class__)
-                prepped_inputs.append(arg._int)
-            else:
-                prepped_inputs.append(arg)
-
-        if not subtypes:
-            raise ValueError("DTFunction.apply() requires at least one DType tensor argument.")
-
-        dtype = subtypes[0]
-        if any(st != dtype for st in subtypes):
-            raise ValueError("All DType arguments to DTFunction.apply() must be of the same type.")
-
-        result = cls.forward(dtype.ops, *prepped_inputs)
-
-        if isinstance(result, torch.Tensor):
-            return dtype(
-                result, internal=True
-            ) if cls.output_indices is None or 0 in cls.output_indices else result
-
-        elif isinstance(result, list):
-            return [
-                dtype(result[i], internal=True)
-                if cls.output_indices is None or i in cls.output_indices else result[i]
-                for i in range(len(result))
-            ]
-
-        elif isinstance(result, tuple):
-            return tuple(
-                dtype(result[i], internal=True)
-                if cls.output_indices is None or i in cls.output_indices else result[i]
-                for i in range(len(result))
-            )
-
-        return result
+        dispatch = current_dispatch.get()
+        if dispatch is None:
+            dtype, device = _common_dtype_and_device(args, DType)
+            ops = dtype.ops.direct_for_device(device)
+        else:
+            dtype, device, ops = dispatch
+        prepped_inputs = tuple(arg._int if isinstance(arg, DType) else arg for arg in args)
+        result = cls.forward(ops, *prepped_inputs)
+        return _wrap_outputs(result, dtype, cls.output_indices)

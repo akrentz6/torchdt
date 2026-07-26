@@ -6,6 +6,7 @@ import inspect
 
 from torchdt.transforms import register_collate_dtype_fn
 from torchdt.ops import OpsBase, register_op, register_cpp_ops
+from torchdt._dispatch import current_dispatch
 
 _float_dtype = {
     8: torch.float8_e5m2, # we have several variants to pick from
@@ -27,11 +28,17 @@ no_override_funcs = {
     Tensor.copy_,
     Tensor.detach,
     Tensor.dim,
+    Tensor.element_size,
+    Tensor.get_device,
+    Tensor.is_contiguous,
+    Tensor.is_pinned,
     Tensor.numel,
     Tensor.requires_grad_,
     Tensor.register_hook,
     Tensor.register_post_accumulate_grad_hook,
     Tensor.size,
+    Tensor.storage_offset,
+    Tensor.stride,
     Tensor.data_ptr,
     Tensor.__reduce_ex__
 }
@@ -44,7 +51,7 @@ no_override_func_names = {
 class GradAccumHook:
 
     def __init__(self, tensor, dtype):
-        self.value = dtype(torch.zeros(tensor.size(), device=tensor.device), requires_grad=False)
+        self.value = None
         self.dtype = dtype
 
         self.grad_hook_handle = tensor.register_hook(self.grad_hook)
@@ -54,10 +61,14 @@ class GradAccumHook:
     def grad_hook(self, grad):
         if grad is None:
             return None
-        return self.value
+        return self.value if self.value is not None else grad
 
     def accumulate_hook(self, tensor):
-        tensor.grad.copy_(self.value)
+        if self.value is not None:
+            tensor.grad.copy_(self.value)
+            # Keep the buffer PyTorch already owns and release the temporary
+            # first-contribution view after leaf accumulation.
+            self.value = tensor.grad.as_subclass(self.dtype)
 
     def register_edge_hook(self, edge, arg_index):
 
@@ -66,15 +77,27 @@ class GradAccumHook:
                 # __torch_function__ doesn't work inside hooks, so we must
                 # re-enable it manually with a context manager.
                 with torch._C._EnableTorchFunction():
-                    self.value = self.value + grad_inputs[arg_index].as_subclass(self.dtype)
+                    contribution = grad_inputs[arg_index].as_subclass(self.dtype)
+                    if self.value is None:
+                        self.value = contribution
+                    else:
+                        self.value = self.value + contribution
 
         edge.node.register_hook(edge_hook)
 
-    # def __del__(self):
-    #     if hasattr(self, "grad_hook_handle"):
-    #         self.grad_hook_handle.remove()
-    #     if hasattr(self, "grad_accum_hook_handle"):
-    #         self.grad_accum_hook_handle.remove()
+    def remove(self):
+        self.grad_hook_handle.remove()
+        if hasattr(self, "grad_accum_hook_handle"):
+            self.grad_accum_hook_handle.remove()
+
+    def reset(self, set_to_none=True):
+        if set_to_none:
+            self.value = None
+            return False
+        elif self.value is not None:
+            self.value.zero_()
+            return True
+        return False
 
 class DType(Tensor):
     """
@@ -86,6 +109,7 @@ class DType(Tensor):
     # dtype-specific implementations live on each concrete subclass.
     torch_funcs: Dict[Callable, Callable] = {}
     _torch_func_implementations: Dict[str, Dict[Callable, Callable]] = {}
+    _direct_torch_funcs: Dict[str, Dict[Callable, Callable]] = {}
 
     def __new__(
             cls,
@@ -98,7 +122,12 @@ class DType(Tensor):
     ):
         if isinstance(data, DType):
             if data.__class__ == cls:
-                payload = data
+                with torch._C.DisableTorchFunctionSubclass():
+                    same_device = device is None or data.device == torch.device(device)
+                    same_requires_grad = requires_grad is None or data.requires_grad == requires_grad
+                if same_device and same_requires_grad and memory_format is torch.preserve_format:
+                    return data
+                payload = data._float.to(device=device, memory_format=memory_format)
             else:
                 payload = data.to_float()
                 payload = ToDType.apply(payload, cls)
@@ -116,27 +145,29 @@ class DType(Tensor):
                 payload = torch.tensor(data, dtype=cls.int_dtype, device=device).view(cls.float_dtype)
             else:
                 payload = torch.tensor(data, dtype=torch.float32, device=device)
-            payload = ToDType.apply(payload, cls)
-            payload = payload.to(memory_format=memory_format)
+                payload = ToDType.apply(payload, cls)
+                payload = payload.to(memory_format=memory_format)
 
         obj = payload.as_subclass(cls)
         if requires_grad is None:
-            if isinstance(data, torch.Tensor) and data.requires_grad:
-                obj.requires_grad_(True)
+            if isinstance(data, torch.Tensor):
+                with torch._C.DisableTorchFunctionSubclass():
+                    data_requires_grad = data.requires_grad
+                if data_requires_grad:
+                    obj.requires_grad_(True)
         else:
             obj.requires_grad_(requires_grad)
         return obj
 
     def __init_subclass__(cls, bitwidth: int = 32, cpp_backend=None, **kwargs):
         super().__init_subclass__(**kwargs)
-        cls.float_dtype = _float_dtype[bitwidth]
-        cls.int_dtype = _int_dtype[bitwidth]
-
         if bitwidth not in _float_dtype:
             raise ValueError(
                 f"{cls.__name__} has invalid bitwidth {bitwidth}. "
                 f"Must be one of {tuple(_float_dtype.keys())}."
             )
+        cls.float_dtype = _float_dtype[bitwidth]
+        cls.int_dtype = _int_dtype[bitwidth]
         cls.bitwidth = bitwidth
         cls.cpp_backend = cpp_backend
 
@@ -157,6 +188,9 @@ class DType(Tensor):
             'dtype': cls,
             '_implementations': {},
             '_enabled_backends': {},
+            '_direct_ops': {},
+            '_scalar_codes': {},
+            '_direct_implementations': {},
         }
         namespace.update({
             method: OpsBase.dispatch_method(method)
@@ -165,6 +199,7 @@ class DType(Tensor):
         ops_cls = type(ops_name, (OpsBase,), namespace)
         cls.ops = ops_cls
         cls._torch_func_implementations = {}
+        cls._direct_torch_funcs = {}
 
         # allow normal imports to see it
         # module = sys.modules[cls.__module__]
@@ -174,7 +209,11 @@ class DType(Tensor):
     def enable_cpp_backend(cls, backend=None):
         if cls.cpp_backend is None and backend is None:
             raise ValueError(f"{cls.__name__} has no C++ backend to enable.")
-        register_cpp_ops(cls, backend or cls.cpp_backend)
+        backend_name = backend or cls.cpp_backend
+        if getattr(cls.ops, "_cpp_backend_name", None) == backend_name:
+            return
+        register_cpp_ops(cls, backend_name)
+        cls.ops._cpp_backend_name = backend_name
 
     def _track_operation(self, edge, arg_index):
         """
@@ -189,8 +228,12 @@ class DType(Tensor):
         """Sets the requires_grad flag for this DType tensor in-place."""
         super().requires_grad_(requires_grad)
 
-        if requires_grad:
+        hook = getattr(self, "_grad_accum_hook", None)
+        if requires_grad and hook is None:
             self._grad_accum_hook = GradAccumHook(self, self.__class__)
+        elif not requires_grad and hook is not None:
+            hook.remove()
+            del self._grad_accum_hook
 
         return self
 
@@ -212,14 +255,15 @@ class DType(Tensor):
                 raise RuntimeError("grad can be implicitly created only for scalar outputs")
 
             # create a tensor of ones in the same dtype as self
-            gradient = self.__class__(torch.ones(self.size()), device=self.device)
+            ops = self.ops.direct_for_device(self.device)
+            gradient = self.__class__(ops.ones(self.size(), device=self.device), internal=True)
 
         elif gradient.__class__ != self.__class__:
             gradient = self.__class__(gradient, device=self.device, requires_grad=False)
 
         # manually set the incoming gradients for the output
         # tensor since no hooks will be registered for it.
-        self._grad_accum_hook.value.copy_(gradient)
+        self._grad_accum_hook.value = gradient
 
         return super().backward(
             gradient=gradient,
@@ -235,6 +279,13 @@ class DType(Tensor):
             return None
         return super().grad.as_subclass(self.__class__)
 
+    @grad.setter
+    def grad(self, value):
+        if isinstance(value, DType):
+            value = value._float
+        with torch._C.DisableTorchFunctionSubclass():
+            Tensor.grad.__set__(self, value)
+
     @classmethod
     def register_func(
         cls,
@@ -243,9 +294,21 @@ class DType(Tensor):
         backend: str = "python"):
         """Decorator to register a custom implementation for a torch.* function."""
 
+        if isinstance(cast, (str, int)):
+            cast = (cast,)
+
         def decorator(func: Callable) -> Callable:
             sig = inspect.signature(func)
-            param_names = list(sig.parameters.keys())
+            parameters = tuple(sig.parameters.values())
+            param_names = [param.name for param in parameters]
+            param_positions = {
+                param.name: index
+                for index, param in enumerate(parameters)
+                if param.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            }
 
             def id_to_name(identifier: Union[str, int]):
                 if isinstance(identifier, int):
@@ -257,50 +320,66 @@ class DType(Tensor):
 
             cast_names = [id_to_name(x) for x in cast]
 
+            def cast_value(value, dtype_cls, device):
+                if isinstance(value, tuple):
+                    return tuple(cast_value(x, dtype_cls, device) for x in value)
+                if isinstance(value, list):
+                    return [cast_value(x, dtype_cls, device) for x in value]
+                if isinstance(value, dict):
+                    return {
+                        key: cast_value(item, dtype_cls, device)
+                        for key, item in value.items()
+                    }
+                if type(value) != dtype_cls:
+                    return dtype_cls(value, device=device)
+                return value
+
             @functools.wraps(func)
-            def wrapped_func(*args, _dtype_cls=None, **kwargs):
+            def wrapped_func(*args, _dtype_cls=None, _device=None, **kwargs):
                 if _dtype_cls is None:
                     raise ValueError("_dtype_cls must be provided when calling registered torch function.")
 
-                bound = sig.bind_partial(*args, **kwargs)
-                dtype_devices = {
-                    _dtype_cls.ops.tensor_device(tensor)
-                    for value in bound.arguments.values()
-                    for tensor in _dtype_cls.ops._iter_tensors(value)
-                    if isinstance(tensor, DType)
-                }
-                if len(dtype_devices) > 1:
-                    device_list = ", ".join(str(device) for device in sorted(dtype_devices, key=str))
-                    raise RuntimeError(
-                        f"Expected all {DType.__name__} arguments to use one device, got {device_list}."
-                    )
-                cast_device = next(iter(dtype_devices), None)
-
+                mutable_args = None
                 for pname in cast_names:
-                    if pname in bound.arguments:
-                        if bound.arguments[pname] is not None:
-                            # convert argument to the correct DType subclass - can also handle lists, tuples, etc?
-                            if isinstance(bound.arguments[pname], (list, tuple)):
-                                bound.arguments[pname] = type(bound.arguments[pname])(
-                                    _dtype_cls(x, device=cast_device) if type(x) != _dtype_cls else x
-                                    for x in bound.arguments[pname]
-                                )
-                            elif type(bound.arguments[pname]) != _dtype_cls:
-                                bound.arguments[pname] = _dtype_cls(
-                                    bound.arguments[pname], device=cast_device
-                                )
+                    position = param_positions.get(pname)
+                    if position is not None and position < len(args):
+                        value = args[position]
+                        if value is not None:
+                            if mutable_args is None:
+                                mutable_args = list(args)
+                            mutable_args[position] = cast_value(value, _dtype_cls, _device)
+                    elif pname in kwargs and kwargs[pname] is not None:
+                        kwargs[pname] = cast_value(kwargs[pname], _dtype_cls, _device)
 
-                return func(*bound.args, **bound.kwargs)
+                return func(*(mutable_args if mutable_args is not None else args), **kwargs)
 
             for torch_func in torch_funcs:
                 if cls is DType and backend == "python":
                     cls.torch_funcs[torch_func] = wrapped_func
                 else:
                     cls._torch_func_implementations.setdefault(backend, {})[torch_func] = wrapped_func
+            cls._direct_torch_funcs.clear()
+            if cls is DType:
+                pending = list(cls.__subclasses__())
+                while pending:
+                    subclass = pending.pop()
+                    subclass._direct_torch_funcs.clear()
+                    pending.extend(subclass.__subclasses__())
 
             return wrapped_func
 
         return decorator
+
+    @classmethod
+    def _torch_funcs_for_backend(cls, backend):
+        implementations = cls._direct_torch_funcs.get(backend)
+        if implementations is None:
+            implementations = dict(DType.torch_funcs)
+            implementations.update(cls._torch_func_implementations.get("python", {}))
+            if backend != "python":
+                implementations.update(cls._torch_func_implementations.get(backend, {}))
+            cls._direct_torch_funcs[backend] = implementations
+        return implementations
 
     @classmethod
     def __torch_function__(cls, func, types, args=..., kwargs=None):
@@ -309,37 +388,29 @@ class DType(Tensor):
         if kwargs is None:
             kwargs = {}
 
-        dtype_devices = {
-            cls.ops.tensor_device(tensor)
-            for value in (*args, *kwargs.values())
-            for tensor in cls.ops._iter_tensors(value)
-            if isinstance(tensor, DType)
-        }
-        if len(dtype_devices) > 1:
-            device_list = ", ".join(str(device) for device in sorted(dtype_devices, key=str))
-            raise RuntimeError(
-                f"Expected all DType arguments to use one device, got {device_list}."
-            )
-        device = next(iter(dtype_devices), None)
+        device = cls.ops.resolve_device(args, kwargs)
+        if device is None and kwargs.get("device") is not None:
+            device = torch.device(kwargs["device"])
         backend = cls.ops.backend_for_device(device)
-        implementation = cls._torch_func_implementations.get(backend, {}).get(func)
-        if implementation is None:
-            implementation = cls._torch_func_implementations.get("python", {}).get(func)
-        if implementation is None:
-            implementation = DType.torch_funcs.get(func)
+        implementation = cls._torch_funcs_for_backend(backend).get(func)
 
         if implementation is None:
             if func in no_override_funcs or func.__name__ in no_override_func_names:
                 return super().__torch_function__(func, types, args, kwargs)
             raise NotImplementedError(f"{cls.__name__} has no implementation for torch function '{func.__name__}'.")
 
-        # pass cls to cast any floating point or number arguments to tensors of this DType
-        return implementation(*args, _dtype_cls=cls, **kwargs)
+        # Share the already resolved table with nested operation/autograd calls.
+        dispatch = (cls, device, cls.ops.direct_for_backend(backend))
+        token = current_dispatch.set(dispatch)
+        try:
+            return implementation(*args, _dtype_cls=cls, _device=device, **kwargs)
+        finally:
+            current_dispatch.reset(token)
 
     @classmethod
-    def register_op(cls, method: str, backend: str = "python"):
+    def register_op(cls, method: str, backend: str = "python", *, direct: bool = False):
         """Decorator to register an operation for this DType subclass."""
-        return register_op(cls, method, backend=backend)
+        return register_op(cls, method, backend=backend, direct=direct)
 
     @property
     def _float(self) -> Tensor:
@@ -349,7 +420,8 @@ class DType(Tensor):
     @property
     def _int(self) -> Tensor:
         "Integer bit-view of the same storage (no copy)."
-        return self._float.view(_int_dtype[self.bitwidth])
+        with torch._C.DisableTorchFunctionSubclass():
+            return self.view(_int_dtype[self.bitwidth])
 
     def to_float(self):
         return self.ops.to_float(self._int)
@@ -367,8 +439,10 @@ class ToDType(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input: Tensor, dtype: Type[DType]) -> DType:
-        return dtype.ops.from_float(input).view(dtype.float_dtype)
+        ops = dtype.ops.direct_for_device(input.device)
+        return ops.from_float(input).view(dtype.float_dtype)
 
     @staticmethod
     def backward(ctx, grad_output: DType) -> Tensor:
-        return grad_output.to_float(), None
+        ops = grad_output.__class__.ops.direct_for_device(grad_output.device)
+        return ops.to_float(grad_output._int), None
