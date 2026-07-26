@@ -1,12 +1,6 @@
 import torch
 from typing import Any, Dict, Tuple, Type, Callable, Union, Optional
 
-try:
-    import torchvision.transforms.v2
-    _TV_AVAILABLE = True
-except ImportError:
-    _TV_AVAILABLE = False
-
 __all__ = [
     "register_collate_dtype_fn",
     "ToDType",
@@ -40,19 +34,21 @@ class ToDType:
             wrap_all: bool = False,
             device: Optional[Union[str, torch.device]] = None
     ):
-        if not _TV_AVAILABLE:
+        try:
+            import torchvision.transforms.v2 as transforms_v2
+        except ImportError:
             raise ImportError(
                 "torchvision is required for ToDType transform. "
                 "Install it with:  pip install torchvision."
-            )
+            ) from None
 
         self.dtype = dtype
         self.wrap_all = wrap_all
         self.device = torch.device(device) if device is not None else None
 
-        self.pipeline = torchvision.transforms.v2.Compose((
-            torchvision.transforms.v2.ToImage(),
-            torchvision.transforms.v2.ToDtype(dtype.float_dtype, scale=True),
+        self.pipeline = transforms_v2.Compose((
+            transforms_v2.ToImage(),
+            transforms_v2.ToDtype(torch.float32, scale=True),
         ))
 
     def __call__(self, img: Any):
