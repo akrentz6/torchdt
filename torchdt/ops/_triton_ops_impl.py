@@ -2,6 +2,7 @@ import torch
 from torch.nn import _reduction as _Reduction
 from torchdt.autograd import DTFunction
 import math
+from collections import OrderedDict
 
 from .triton_ops import TritonAccumulatorOps, TritonScalarOps
 
@@ -107,18 +108,6 @@ def register_triton_ops(
         return tl.where(gt(a, b), a, b)
 
     @triton.jit
-    def atomic_add(x_ptrs, val, mask):
-        active = mask
-
-        while tl.max(active) != 0:
-            old = tl.load(x_ptrs, mask=active, other=_ZERO)
-            new = add(old, tl.where(active, val, tl.cast(_ZERO, tl_int_dtype)))
-            prev = tl.atomic_cas(x_ptrs, old, new)
-
-            success = prev == old
-            active = active & (~success)
-
-    @triton.jit
     def elementwise_unary_offsets(linear_offsets, shape_ptr, x_stride_ptr, NDIM: tl.constexpr):
         remaining = linear_offsets
         x_offsets = tl.cast(linear_offsets * 0, tl.int64)
@@ -153,10 +142,28 @@ def register_triton_ops(
 
         return x_offsets, y_offsets
 
+    # Shape/stride metadata is immutable and many eager workloads repeat the
+    # same layouts thousands of times. Reusing these tiny device tensors
+    # avoids an allocation and host-to-device copy on every strided launch.
+    metadata_cache = OrderedDict()
+    metadata_cache_limit = 256
+
     def _metadata_tensor(values, device):
         if len(values) == 0:
             values = (0,)
-        return torch.tensor(values, dtype=torch.int64, device=device)
+        values = tuple(int(value) for value in values)
+        device = torch.device(device)
+        key = (device.type, device.index, values)
+        cached = metadata_cache.get(key)
+        if cached is not None:
+            metadata_cache.move_to_end(key)
+            return cached
+
+        result = torch.tensor(values, dtype=torch.int64, device=device)
+        metadata_cache[key] = result
+        if len(metadata_cache) > metadata_cache_limit:
+            metadata_cache.popitem(last=False)
+        return result
 
     def _prepare_unary(x, out_dtype):
         out = torch.empty(x.shape, dtype=out_dtype, device=x.device)
@@ -597,173 +604,455 @@ def register_triton_ops(
             le_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
             return out
 
+    if lt is not None:
+        @triton.jit
+        def relu_kernel(
+            x_ptr, out_ptr, shape_ptr, x_stride_ptr, N,
+            NDIM: tl.constexpr, CONTIGUOUS: tl.constexpr,
+            BLOCK_SIZE: tl.constexpr,
+        ):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
 
-    # @triton.jit
-    # def relu_kernel(x_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+            x_offsets = prepared_unary_offsets(offs, shape_ptr, x_stride_ptr, NDIM, CONTIGUOUS)
+            x = tl.load(x_ptr + x_offsets, mask=mask, other=_ZERO)
 
-    #     x = tl.load(x_ptr + offs, mask=mask, other=_ZERO)
+            zero = tl.cast(_ZERO, tl_int_dtype)
+            tl.store(out_ptr + offs, tl.where(lt(x, zero), zero, x), mask=mask)
 
-    #     out = tl.where(lt(x, _ZERO), _ZERO, x)
-    #     tl.store(out_ptr + offs, out, mask=mask)
+        @dtype_cls.register_op("relu", backend="triton")
+        def dt_relu(ops, x):
+            out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(x, dtype_cls.int_dtype)
+            if out.numel() == 0:
+                return out
 
-    # @dtype_cls.register_op("relu")
-    # def dt_relu(ops, x):
-    #     out = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
-    #     grid = (triton.cdiv(x.numel(), 1024),)
-    #     relu_kernel[grid](x, out, x.numel(), BLOCK_SIZE=1024)
-    #     return out
+            block = 512
+            grid = (triton.cdiv(out.numel(), block),)
+            relu_kernel[grid](
+                x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous,
+                BLOCK_SIZE=block, num_warps=4,
+            )
+            return out
 
-    # @triton.jit
-    # def relu_backward_kernel(dy_ptr, y_ptr, dx_ptr, N, BLOCK_SIZE: tl.constexpr):
-    #     pid = tl.program_id(0)
-    #     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    #     mask = offs < N
+        @triton.jit
+        def relu_backward_kernel(
+            dy_ptr, y_ptr, dx_ptr,
+            shape_ptr, dy_stride_ptr, y_stride_ptr,
+            N, NDIM: tl.constexpr, MODE: tl.constexpr,
+            BLOCK_SIZE: tl.constexpr,
+        ):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < N
 
-    #     dy = tl.load(dy_ptr + offs, mask=mask, other=_ZERO)
-    #     y = tl.load(y_ptr + offs, mask=mask, other=_ZERO)
+            dy_offsets, y_offsets = prepared_binary_offsets(
+                offs, shape_ptr, dy_stride_ptr, y_stride_ptr, NDIM, MODE
+            )
+            dy = tl.load(dy_ptr + dy_offsets, mask=mask, other=_ZERO)
+            y = tl.load(y_ptr + y_offsets, mask=mask, other=_ZERO)
 
-    #     dx = tl.where(y == _ZERO, _ZERO, dy)
-    #     tl.store(dx_ptr + offs, dx, mask=mask)
+            tl.store(dx_ptr + offs, tl.where(y == _ZERO, _ZERO, dy), mask=mask)
 
-    # def relu_backward(grad_output, output):
-    #     grad_input = torch.empty(grad_output.shape, dtype=dtype_cls.int_dtype, device=grad_output.device)
-    #     grid = (triton.cdiv(grad_output.numel(), 1024),)
-    #     relu_backward_kernel[grid](grad_output, grad_input, grad_input, grad_output.numel(), BLOCK_SIZE=1024)
-    #     return grad_input
+        def relu_backward(grad_output, output):
+            dx, grad_output, output, shape_meta, dy_stride_meta, y_stride_meta, ndim, mode = _prepare_binary(
+                grad_output, output, dtype_cls.int_dtype
+            )
+            if dx.numel() == 0:
+                return dx
+            block = 512
+            grid = (triton.cdiv(dx.numel(), block),)
+            relu_backward_kernel[grid](
+                grad_output, output, dx,
+                shape_meta, dy_stride_meta, y_stride_meta,
+                dx.numel(), ndim, mode,
+                BLOCK_SIZE=block, num_warps=4,
+            )
+            return dx
 
-    # class DTReLUFunction(DTFunction):
+        class DTReLUFunction(DTFunction):
+            @staticmethod
+            def forward(ops, x):
+                return ops.relu(x)
 
-    #     @staticmethod
-    #     def forward(ops, x):
-    #         return ops.relu(x)
+            @staticmethod
+            def setup_context(ctx, ops, inputs, output):
+                ctx.save_for_backward(output)
 
-    #     @staticmethod
-    #     def setup_context(ctx, ops, inputs, output):
-    #         ctx.save_for_backward(output)
+            @staticmethod
+            def backward(ctx, ops, grad_output):
+                output, = ctx.saved_tensors
+                return relu_backward(grad_output, output)
 
-    #     @staticmethod
-    #     def backward(ctx, ops, grad_output):
-    #         output, = ctx.saved_tensors
-    #         return relu_backward(grad_output, output)
+        @dtype_cls.register_func(
+            torch.nn.functional.relu, torch.Tensor.relu,
+            cast=("input",), backend="triton",
+        )
+        def dt_relu(input, inplace=False):
+            result = DTReLUFunction.apply(input)
+            return result
 
-    # @dtype_cls.register_func(torch.nn.functional.relu, torch.Tensor.relu,
-    #                  cast=("input",))
-    # def dt_relu(input, inplace=False):
-    #     result = DTReLUFunction.apply(input)
-    #     return result
+    @triton.jit
+    def reduction_row_base_offset(
+        row, kept_shape_ptr, kept_stride_ptr,
+        KEPT_NDIM: tl.constexpr,
+    ):
+        remaining = tl.cast(row, tl.int64)
+        base = remaining * 0
+        for rev_dim in tl.static_range(0, KEPT_NDIM):
+            dim = KEPT_NDIM - 1 - rev_dim
+            dim_size = tl.load(kept_shape_ptr + dim).to(tl.int64)
+            dim_index = remaining % dim_size
+            remaining = remaining // dim_size
+            stride = tl.load(kept_stride_ptr + dim).to(tl.int64)
+            base += dim_index * stride
+        return base
 
+    @triton.jit
+    def max_reduce_kernel(
+        x_ptr, value_ptr, index_ptr,
+        kept_shape_ptr, kept_stride_ptr,
+        M, N, reduce_stride,
+        KEPT_NDIM: tl.constexpr,
+        CONTIGUOUS_LAST: tl.constexpr,
+        WRITE_INDICES: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        if CONTIGUOUS_LAST:
+            x_base = row * N
+        else:
+            x_base = reduction_row_base_offset(row, kept_shape_ptr, kept_stride_ptr, KEPT_NDIM)
 
-    # @triton.jit
-    # def log_softmax_kernel(x_ptr, y_ptr, B, N, s_x_b, s_x_n, s_y_b, s_y_n, BLOCK_N: tl.constexpr):
-    #     pid0 = tl.program_id(0)
-    #     pid1 = tl.program_id(1)
+        lane = tl.arange(0, BLOCK)
+        best = tl.cast(_NEG_INF, tl_int_dtype)
+        best_idx = 0
+        for start in range(0, N, BLOCK):
+            idx = start + lane
+            mask = idx < N
+            values = tl.load(x_ptr + x_base + idx * reduce_stride, mask=mask, other=_NEG_INF)
+            tile_max = tl.reduce(values, axis=0, combine_fn=max_combine_fn)
+            candidate_idx = tl.min(tl.where(mask & (values == tile_max), idx, 0x7fffffff), axis=0)
+            better = gt(tile_max, best)
+            tie_earlier = (tile_max == best) & (candidate_idx < best_idx)
+            best = tl.where(better, tile_max, best)
+            best_idx = tl.where(better | tie_earlier, candidate_idx, best_idx)
 
-    #     offs_n = tl.arange(0, BLOCK_N)
-    #     n_idx = offs_n + pid1 * BLOCK_N
+        tl.store(value_ptr + row, best)
+        if WRITE_INDICES:
+            tl.store(index_ptr + row, best_idx)
 
-    #     x_ptrs = x_ptr + pid0 * s_x_b + n_idx * s_x_n
-    #     y_ptrs = y_ptr + pid0 * s_y_b + n_idx * s_y_n
+    def _reduction_block_size(n):
+        return max(1, triton.next_power_of_2(min(int(n), 1024)))
 
-    #     mask = n_idx < N
-    #     x = tl.load(x_ptrs, mask=mask, other=_NEG_INF)
+    if gt is not None:
+        @dtype_cls.register_op("max", backend="triton")
+        def dt_max(ops, x, dim=None, keepdim=False):
+            if x.numel() == 0 and dim is None:
+                raise RuntimeError("max(): Expected reduction dim to be specified for input.numel() == 0")
 
-    #     row_max = tl.reduce(x, 0, max_combine_fn)
-    #     x_centered = sub(x, row_max)
-    #     exps = exp(x_centered)
-    #     sum_exp = tl.reduce(tl.where(mask, exps, _ZERO), 0, add)
-    #     log_sum_exp = log(sum_exp)
+            original_shape = tuple(x.shape)
+            write_indices = dim is not None
+            if dim is None:
+                # Arbitrary flattened strides need offset decoding across every
+                # dimension, so use a contiguous copy only for this rare form.
+                x_work = x.contiguous().view(-1)
+                reduce_dim = 0
+            else:
+                reduce_dim = int(dim)
+                if x.dim() == 0 and reduce_dim in (0, -1):
+                    reduce_dim = 0
+                    x_work = x.reshape(1)
+                else:
+                    reduce_dim %= x.dim()
+                    x_work = x
 
-    #     out = sub(x_centered, log_sum_exp)
-    #     tl.store(y_ptrs, out, mask=mask)
+            N = x_work.shape[reduce_dim]
+            if N == 0:
+                raise IndexError("max(): Expected reduction dim to have non-zero size.")
+            kept_dims = tuple(d for d in range(x_work.dim()) if d != reduce_dim)
+            kept_shape = tuple(x_work.shape[d] for d in kept_dims)
+            M = math.prod(kept_shape) if kept_shape else 1
+            kept_strides = tuple(x_work.stride(d) for d in kept_dims)
+            contiguous_last = x_work.is_contiguous() and reduce_dim == x_work.dim() - 1
 
-    # @dtype_cls.register_op("log_softmax")
-    # def log_softmax(ops, x, dim=None):
-    #     assert x.dim() == 2
-    #     BLOCK_N = 128
+            meta_shape = _metadata_tensor(kept_shape, x.device)
+            meta_stride = _metadata_tensor(kept_strides, x.device)
+            values = torch.empty((M,), dtype=dtype_cls.int_dtype, device=x.device)
+            indices = torch.empty((M,), dtype=torch.int64, device=x.device)
+            block = _reduction_block_size(N)
+            num_warps = 1 if block <= 128 else (2 if block <= 256 else 4)
+            if M:
+                max_reduce_kernel[(M,)](
+                    x_work, values, indices,
+                    meta_shape, meta_stride,
+                    M, N, x_work.stride(reduce_dim),
+                    len(kept_dims), contiguous_last, write_indices,
+                    BLOCK=block, num_warps=num_warps,
+                )
 
-    #     B, N = x.shape
-    #     y = torch.empty(x.shape, dtype=dtype_cls.int_dtype, device=x.device)
+            if dim is None:
+                return values.view(())
 
-    #     num_tiles = (N + 128 - 1) // 128
-    #     grid = (B, num_tiles)
+            out_shape = list(original_shape)
+            del out_shape[reduce_dim]
+            values = values.reshape(out_shape)
+            indices = indices.reshape(out_shape)
+            if keepdim:
+                values = values.unsqueeze(reduce_dim)
+                indices = indices.unsqueeze(reduce_dim)
+            return torch.return_types.max((values, indices))
 
-    #     s_x_b, s_x_n = x.stride()
-    #     s_y_b, s_y_n = y.stride()
+    def _prepare_rowwise(x, dim):
+        original_shape = tuple(x.shape)
+        flattened = dim is None
+        if flattened:
+            x_work = x.contiguous().reshape(-1)
+            reduce_dim = 0
+        elif x.dim() == 0:
+            x_work = x.reshape(1)
+            reduce_dim = 0
+        else:
+            x_work = x
+            reduce_dim = int(dim) % x.dim()
 
-    #     log_softmax_kernel[grid](x, y, B, N, s_x_b, s_x_n, s_y_b, s_y_n, BLOCK_N)
-    #     return y
+        out = torch.empty(original_shape, dtype=dtype_cls.int_dtype, device=x.device)
+        out_work = out.reshape(-1) if flattened or x.dim() == 0 else out
+        kept_dims = tuple(d for d in range(x_work.dim()) if d != reduce_dim)
+        kept_shape = tuple(x_work.shape[d] for d in kept_dims)
+        M = math.prod(kept_shape) if kept_shape else 1
+        N = x_work.shape[reduce_dim]
+        x_kept_strides = tuple(x_work.stride(d) for d in kept_dims)
+        out_kept_strides = tuple(out_work.stride(d) for d in kept_dims)
+        contiguous_last = (
+            x_work.is_contiguous() and out_work.is_contiguous()
+            and reduce_dim == x_work.dim() - 1
+        )
+        return (
+            x_work, out_work, out,
+            _metadata_tensor(kept_shape, x.device),
+            _metadata_tensor(x_kept_strides, x.device),
+            _metadata_tensor(out_kept_strides, x.device),
+            M, N, reduce_dim, len(kept_dims), contiguous_last,
+        )
 
-    # @triton.jit
-    # def log_softmax_backward_kernel(dy_ptr, y_ptr, dx_ptr, B, N, s_dy_b, s_dy_n, s_y_b, s_y_n, s_dx_b, s_dx_n, BLOCK_N: tl.constexpr):
-    #     pid0 = tl.program_id(0)
-    #     pid1 = tl.program_id(1)
+    @triton.jit
+    def softmax_forward_kernel(
+        x_ptr, y_ptr,
+        kept_shape_ptr, x_kept_stride_ptr, y_kept_stride_ptr,
+        M, N, x_reduce_stride, y_reduce_stride,
+        KEPT_NDIM: tl.constexpr,
+        CONTIGUOUS_LAST: tl.constexpr,
+        LOG_SOFTMAX: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        if CONTIGUOUS_LAST:
+            x_base = row * N
+            y_base = row * N
+        else:
+            x_base = reduction_row_base_offset(row, kept_shape_ptr, x_kept_stride_ptr, KEPT_NDIM)
+            y_base = reduction_row_base_offset(row, kept_shape_ptr, y_kept_stride_ptr, KEPT_NDIM)
 
-    #     offs_n = tl.arange(0, BLOCK_N)
-    #     n_idx = pid1 * BLOCK_N + offs_n
-    #     mask = n_idx < N
+        lane = tl.arange(0, BLOCK)
+        row_max = tl.cast(_NEG_INF, tl_int_dtype)
+        for start in range(0, N, BLOCK):
+            idx = start + lane
+            mask = idx < N
+            x = tl.load(x_ptr + x_base + idx * x_reduce_stride, mask=mask, other=_NEG_INF)
+            tile_max = tl.reduce(x, axis=0, combine_fn=max_combine_fn)
+            row_max = tl.where(gt(tile_max, row_max), tile_max, row_max)
 
-    #     dy_ptrs = dy_ptr + pid0 * s_dy_b + n_idx * s_dy_n
-    #     y_ptrs  = y_ptr + pid0 * s_y_b + n_idx * s_y_n
-    #     dx_ptrs = dx_ptr + pid0 * s_dx_b + n_idx * s_dx_n
+        sum_acc = to_accumulator(tl.cast(_ZERO, tl_int_dtype))
+        for start in range(0, N, BLOCK):
+            idx = start + lane
+            mask = idx < N
+            x = tl.load(x_ptr + x_base + idx * x_reduce_stride, mask=mask, other=row_max)
+            centered = sub(x, row_max)
+            exp_value = tl.where(mask, exp(centered), tl.cast(_ZERO, tl_int_dtype))
+            sum_acc = acc_add(sum_acc, tl.reduce(to_accumulator(exp_value), axis=0, combine_fn=acc_add))
+            temporary = centered if LOG_SOFTMAX else exp_value
+            tl.store(y_ptr + y_base + idx * y_reduce_stride, temporary, mask=mask)
 
-    #     dy = tl.load(dy_ptrs, mask=mask, other=_ZERO)
-    #     y = tl.load(y_ptrs, mask=mask, other=_NEG_INF)
+        sum_value = from_accumulator(sum_acc)
+        log_sum = log(sum_value) if LOG_SOFTMAX else tl.cast(_ZERO, tl_int_dtype)
+        for start in range(0, N, BLOCK):
+            idx = start + lane
+            mask = idx < N
+            temporary = tl.load(y_ptr + y_base + idx * y_reduce_stride, mask=mask, other=_ZERO)
+            result = sub(temporary, log_sum) if LOG_SOFTMAX else div(temporary, sum_value)
+            tl.store(y_ptr + y_base + idx * y_reduce_stride, result, mask=mask)
 
-    #     sum_dy = tl.reduce(dy, 0, combine_fn=add)
-    #     softmax = exp(y)
+    def softmax_forward(x, dim, log_softmax):
+        prepared = _prepare_rowwise(x, dim)
+        x_work, out_work, out, shape_meta, x_stride_meta, out_stride_meta, M, N, reduce_dim, kept_ndim, fast = prepared
+        if out.numel() == 0:
+            return out
+        block = _reduction_block_size(N)
+        num_warps = 1 if block <= 128 else (2 if block <= 256 else 4)
+        softmax_forward_kernel[(M,)](
+            x_work, out_work,
+            shape_meta, x_stride_meta, out_stride_meta,
+            M, N, x_work.stride(reduce_dim), out_work.stride(reduce_dim),
+            kept_ndim, fast, log_softmax,
+            BLOCK=block, num_warps=num_warps,
+        )
+        return out
 
-    #     dx = sub(dy, mul(softmax, sum_dy))
-    #     tl.store(dx_ptrs, dx, mask=mask)
+    if exp is not None and div is not None and sub is not None and mul is not None:
+        @dtype_cls.register_op("softmax", backend="triton")
+        def dt_softmax(ops, x, dim=None):
+            return softmax_forward(x, dim, False)
 
-    # def log_softmax_backward(grad_output, output):
-    #     B, N = grad_output.shape
-    #     BLOCK_N = 128
+        @dtype_cls.register_op("log_softmax", backend="triton")
+        def dt_log_softmax(ops, x, dim=None):
+            return softmax_forward(x, dim, True)
 
-    #     grad_input = torch.empty(grad_output.shape, dtype=dtype_cls.int_dtype, device=grad_output.device)
+        @triton.jit
+        def softmax_backward_kernel(
+            dy_ptr, y_ptr, dx_ptr,
+            kept_shape_ptr,
+            dy_kept_stride_ptr, y_kept_stride_ptr, dx_kept_stride_ptr,
+            M, N, dy_reduce_stride, y_reduce_stride, dx_reduce_stride,
+            KEPT_NDIM: tl.constexpr,
+            CONTIGUOUS_LAST: tl.constexpr,
+            LOG_SOFTMAX: tl.constexpr,
+            BLOCK: tl.constexpr,
+        ):
+            row = tl.program_id(0)
+            if CONTIGUOUS_LAST:
+                dy_base = row * N
+                y_base = row * N
+                dx_base = row * N
+            else:
+                dy_base = reduction_row_base_offset(row, kept_shape_ptr, dy_kept_stride_ptr, KEPT_NDIM)
+                y_base = reduction_row_base_offset(row, kept_shape_ptr, y_kept_stride_ptr, KEPT_NDIM)
+                dx_base = reduction_row_base_offset(row, kept_shape_ptr, dx_kept_stride_ptr, KEPT_NDIM)
 
-    #     s_dy_b, s_dy_n = grad_output.stride()
-    #     s_y_b, s_y_n = output.stride()
-    #     s_dx_b, s_dx_n = grad_input.stride()
+            lane = tl.arange(0, BLOCK)
+            sum_acc = to_accumulator(tl.cast(_ZERO, tl_int_dtype))
+            for start in range(0, N, BLOCK):
+                idx = start + lane
+                mask = idx < N
+                dy = tl.load(dy_ptr + dy_base + idx * dy_reduce_stride, mask=mask, other=_ZERO)
+                if LOG_SOFTMAX:
+                    term = dy
+                else:
+                    y = tl.load(y_ptr + y_base + idx * y_reduce_stride, mask=mask, other=_ZERO)
+                    term = mul(dy, y)
+                term = tl.where(mask, term, tl.cast(_ZERO, tl_int_dtype))
+                sum_acc = acc_add(sum_acc, tl.reduce(to_accumulator(term), axis=0, combine_fn=acc_add))
 
-    #     grid = (B, (N + BLOCK_N - 1) // BLOCK_N)
-    #     log_softmax_backward_kernel[grid](
-    #         grad_output, output, grad_input,
-    #         B, N,
-    #         s_dy_b, s_dy_n,
-    #         s_y_b, s_y_n,
-    #         s_dx_b, s_dx_n,
-    #         BLOCK_N
-    #     )
-    #     return grad_input
+            row_sum = from_accumulator(sum_acc)
+            for start in range(0, N, BLOCK):
+                idx = start + lane
+                mask = idx < N
+                dy = tl.load(dy_ptr + dy_base + idx * dy_reduce_stride, mask=mask, other=_ZERO)
+                y = tl.load(y_ptr + y_base + idx * y_reduce_stride, mask=mask, other=_ZERO)
+                if LOG_SOFTMAX:
+                    dx = sub(dy, mul(exp(y), row_sum))
+                else:
+                    dx = mul(y, sub(dy, row_sum))
+                tl.store(dx_ptr + dx_base + idx * dx_reduce_stride, dx, mask=mask)
 
-    # class DTLogSoftmaxFunction(DTFunction):
+        def softmax_backward(grad_output, output, dim, log_softmax):
+            original_shape = tuple(output.shape)
+            flattened = dim is None
+            if flattened:
+                dy_work = grad_output.contiguous().reshape(-1)
+                y_work = output.contiguous().reshape(-1)
+                reduce_dim = 0
+            elif output.dim() == 0:
+                dy_work = grad_output.reshape(1)
+                y_work = output.reshape(1)
+                reduce_dim = 0
+            else:
+                dy_work = grad_output
+                y_work = output
+                reduce_dim = int(dim) % output.dim()
 
-    #     @staticmethod
-    #     def forward(ops, x, dim=None):
-    #         return ops.log_softmax(x, dim=dim)
+            dx = torch.empty(original_shape, dtype=dtype_cls.int_dtype, device=output.device)
+            dx_work = dx.reshape(-1) if flattened or output.dim() == 0 else dx
+            if dx.numel() == 0:
+                return dx
 
-    #     @staticmethod
-    #     def setup_context(ctx, ops, inputs, output):
-    #         _, dim = inputs
-    #         ctx.save_for_backward(output)
-    #         ctx.dim = dim
+            kept_dims = tuple(d for d in range(y_work.dim()) if d != reduce_dim)
+            kept_shape = tuple(y_work.shape[d] for d in kept_dims)
+            M = math.prod(kept_shape) if kept_shape else 1
+            N = y_work.shape[reduce_dim]
+            shape_meta = _metadata_tensor(kept_shape, output.device)
+            dy_stride_meta = _metadata_tensor(tuple(dy_work.stride(d) for d in kept_dims), output.device)
+            y_stride_meta = _metadata_tensor(tuple(y_work.stride(d) for d in kept_dims), output.device)
+            dx_stride_meta = _metadata_tensor(tuple(dx_work.stride(d) for d in kept_dims), output.device)
+            fast = (
+                dy_work.is_contiguous() and y_work.is_contiguous() and dx_work.is_contiguous()
+                and reduce_dim == y_work.dim() - 1
+            )
+            block = _reduction_block_size(N)
+            num_warps = 1 if block <= 128 else (2 if block <= 256 else 4)
+            softmax_backward_kernel[(M,)](
+                dy_work, y_work, dx_work,
+                shape_meta, dy_stride_meta, y_stride_meta, dx_stride_meta,
+                M, N,
+                dy_work.stride(reduce_dim), y_work.stride(reduce_dim), dx_work.stride(reduce_dim),
+                len(kept_dims), fast, log_softmax,
+                BLOCK=block, num_warps=num_warps,
+            )
+            return dx
 
-    #     @staticmethod
-    #     def backward(ctx, ops, grad_output):
-    #         output, = ctx.saved_tensors
-    #         return log_softmax_backward(grad_output, output), None
+        class DTSoftmaxFunction(DTFunction):
+            @staticmethod
+            def forward(ops, x, dim=None):
+                return ops.softmax(x, dim=dim)
 
-    # @dtype_cls.register_func(torch.nn.functional.log_softmax, torch.Tensor.log_softmax,
-    #                  cast=("input",))
-    # def dt_log_softmax(input, dim=None, _stacklevel=3, dtype=None, *, out=None):
-    #     result = DTLogSoftmaxFunction.apply(input, dim)
+            @staticmethod
+            def setup_context(ctx, ops, inputs, output):
+                _, dim = inputs
+                ctx.save_for_backward(output)
+                ctx.dim = dim
 
-    #     if out is not None:
-    #         return out.copy_(result)
-    #     return result
+            @staticmethod
+            def backward(ctx, ops, grad_output):
+                output, = ctx.saved_tensors
+                return softmax_backward(grad_output, output, ctx.dim, False), None
+
+        class DTLogSoftmaxFunction(DTFunction):
+            @staticmethod
+            def forward(ops, x, dim=None):
+                return ops.log_softmax(x, dim=dim)
+
+            @staticmethod
+            def setup_context(ctx, ops, inputs, output):
+                _, dim = inputs
+                ctx.save_for_backward(output)
+                ctx.dim = dim
+
+            @staticmethod
+            def backward(ctx, ops, grad_output):
+                output, = ctx.saved_tensors
+                return softmax_backward(grad_output, output, ctx.dim, True), None
+
+        @dtype_cls.register_func(
+            torch.nn.functional.softmax, torch.Tensor.softmax,
+            cast=("input",), backend="triton",
+        )
+        def dt_softmax(input, dim=None, _stacklevel=3, dtype=None, *, out=None):
+            result = DTSoftmaxFunction.apply(input, dim)
+
+            if out is not None:
+                return out.copy_(result)
+            return result
+
+        @dtype_cls.register_func(
+            torch.nn.functional.log_softmax, torch.Tensor.log_softmax,
+            cast=("input",), backend="triton",
+        )
+        def dt_log_softmax(input, dim=None, _stacklevel=3, dtype=None, *, out=None):
+            result = DTLogSoftmaxFunction.apply(input, dim)
+
+            if out is not None:
+                return out.copy_(result)
+            return result
 
 
     @triton.autotune(
@@ -774,10 +1063,14 @@ def register_triton_ops(
             triton.Config({"BLOCK": 256},  num_warps=2, num_stages=2),
             triton.Config({"BLOCK": 256},  num_warps=4, num_stages=2),
         ],
-        key=["N"],
+        key=["N", "DO_MEAN"],
     )
     @triton.jit
-    def sum_kernel(x_ptr, y_ptr, M, N: tl.constexpr, s_x_r, s_x_c, s_y_r, BLOCK: tl.constexpr):
+    def sum_kernel(
+        x_ptr, y_ptr, M, N: tl.constexpr, divisor,
+        s_x_r, s_x_c, s_y_r,
+        DO_MEAN: tl.constexpr, BLOCK: tl.constexpr,
+    ):
         pid = tl.program_id(0)
         row_ptr = x_ptr + pid * s_x_r
         acc = to_accumulator(tl.cast(_ZERO, tl_int_dtype))
@@ -790,10 +1083,12 @@ def register_triton_ops(
             vals = to_accumulator(vals)
             acc = acc_add(acc, tl.reduce(vals, axis=0, combine_fn=acc_add))
 
-        tl.store(y_ptr + pid * s_y_r, from_accumulator(acc))
+        result = from_accumulator(acc)
+        if DO_MEAN:
+            result = div(result, tl.cast(divisor, tl_int_dtype))
+        tl.store(y_ptr + pid * s_y_r, result)
 
-    @dtype_cls.register_op("sum", backend="triton")
-    def dt_sum(ops, x, dim=None, keepdim=False):
+    def sum_or_mean(ops, x, dim=None, keepdim=False, do_mean=False):
         orig_shape = x.shape
         ndim = x.dim()
 
@@ -829,9 +1124,10 @@ def register_triton_ops(
         sum_kernel[grid](
             y,
             out,
-            M, N,
+            M, N, ops.encoded_scalar(N),
             stride_row, stride_col,
             out.stride(0),
+            do_mean,
         )
 
         if keepdim:
@@ -846,6 +1142,15 @@ def register_triton_ops(
 
         return out
 
+    @dtype_cls.register_op("sum", backend="triton")
+    def dt_sum(ops, x, dim=None, keepdim=False):
+        return sum_or_mean(ops, x, dim, keepdim, False)
+
+    if div is not None:
+        @dtype_cls.register_op("mean", backend="triton")
+        def dt_mean(ops, x, dim=None, keepdim=False):
+            return sum_or_mean(ops, x, dim, keepdim, True)
+
 
     @triton.autotune(
         configs=[
@@ -856,22 +1161,31 @@ def register_triton_ops(
             triton.Config({"BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 4 }, num_warps=4, num_stages=2),
             triton.Config({"BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 16}, num_warps=4, num_stages=2),
         ],
-        key=["M", "N", "K"],
+        key=["M_BUCKET", "N_BUCKET", "K_BUCKET"],
     )
     @triton.jit
     def matmul_kernel(
         a_ptr, b_ptr, c_ptr,
         BATCH, M, N, K,
+        M_BUCKET, N_BUCKET, K_BUCKET,
         stride_ab, stride_am, stride_ak,
         stride_bb, stride_bk, stride_bn,
         stride_cb, stride_cm, stride_cn,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        GROUP_SIZE_M: tl.constexpr,
     ):
-        pid_n = tl.program_id(0)
-        pid_m = tl.program_id(1)
-        pid_b = tl.program_id(2)
+        pid = tl.program_id(0)
+        pid_b = tl.program_id(1)
+        num_pid_m = tl.cdiv(M, BLOCK_M)
+        num_pid_n = tl.cdiv(N, BLOCK_N)
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = pid // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + (pid % num_pid_in_group) % group_size_m
+        pid_n = (pid % num_pid_in_group) // group_size_m
 
         offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -945,20 +1259,25 @@ def register_triton_ops(
         if B_batch != batch_shape:
             B = B.expand(*batch_shape, K_B, N)
 
-        need_materialize = (A_batch != batch_shape) or (B_batch != batch_shape)
-        if need_materialize or not A.is_contiguous():
-            A = A.contiguous()
-        if need_materialize or not B.is_contiguous():
-            B = B.contiguous()
-
         if len(batch_shape) == 0:
             batch = 1
-            A2 = A.reshape(1, M, K_A)
-            B2 = B.reshape(1, K_B, N)
+            A2 = A.unsqueeze(0)
+            B2 = B.unsqueeze(0)
+        elif len(batch_shape) == 1:
+            # Preserve transposes and stride-zero broadcasting.
+            batch = batch_shape[0]
+            A2 = A
+            B2 = B
         else:
             batch = math.prod(batch_shape)
-            A2 = A.reshape(batch, M, K_A)
-            B2 = B.reshape(batch, K_B, N)
+            try:
+                A2 = A.view(batch, M, K_A)
+            except RuntimeError:
+                A2 = A.contiguous().view(batch, M, K_A)
+            try:
+                B2 = B.view(batch, K_B, N)
+            except RuntimeError:
+                B2 = B.contiguous().view(batch, K_B, N)
 
         C = torch.empty((batch, M, N), device=A.device, dtype=dtype_cls.int_dtype)
 
@@ -967,17 +1286,21 @@ def register_triton_ops(
         stride_cb, stride_cm, stride_cn = C.stride()
 
         grid = lambda META: (
-            triton.cdiv(N, META["BLOCK_N"]),
-            triton.cdiv(M, META["BLOCK_M"]),
+            triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
             batch,
         )
+
+        def shape_bucket(value):
+            return min(4096, triton.next_power_of_2(max(1, int(value))))
 
         matmul_kernel[grid](
             A2, B2, C,
             batch, M, N, K_A,
+            shape_bucket(M), shape_bucket(N), shape_bucket(K_A),
             stride_ab, stride_am, stride_ak,
             stride_bb, stride_bk, stride_bn,
             stride_cb, stride_cm, stride_cn,
+            GROUP_SIZE_M=8,
         )
 
         if len(batch_shape) == 0:
@@ -1008,12 +1331,12 @@ def register_triton_ops(
     def conv2d_kernel(
         X_ptr, W_ptr, B_ptr, Y_ptr,
         N, Cin, H, W,
-        Cout, Kh, Kw,
+        Cout, Kh: tl.constexpr, Kw: tl.constexpr,
         Hout, Wout,
-        sh, sw,
-        ph, pw,
-        dh, dw,
-        groups,
+        sh: tl.constexpr, sw: tl.constexpr,
+        ph: tl.constexpr, pw: tl.constexpr,
+        dh: tl.constexpr, dw: tl.constexpr,
+        groups: tl.constexpr,
         s_x_n, s_x_c, s_x_h, s_x_w,
         s_w_co, s_w_cinperg, s_w_kh, s_w_kw,
         s_y_n, s_y_c, s_y_h, s_y_w,
@@ -1141,9 +1464,10 @@ def register_triton_ops(
 
     @triton.autotune(
         configs=[
-            triton.Config({"BLOCK_HW": 64},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_HW": 32},  num_warps=2, num_stages=1),
-            triton.Config({"BLOCK_HW": 128}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_IC": 4, "BLOCK_HW": 64}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_IC": 8, "BLOCK_HW": 32}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_IC": 2, "BLOCK_HW": 128}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_IC": 4, "BLOCK_HW": 32}, num_warps=2, num_stages=1),
         ],
         key=["Cin", "H", "W", "Cout", "Kh", "Kw", "Hout", "Wout", "sh", "sw", "ph", "pw", "dh", "dw", "groups"],
     )
@@ -1151,64 +1475,67 @@ def register_triton_ops(
     def conv2d_dinput_kernel(
         dX_ptr, dY_ptr, W_ptr,
         N, Cin, H, W,
-        Cout, Kh, Kw,
+        Cout, Kh: tl.constexpr, Kw: tl.constexpr,
         Hout, Wout,
-        sh, sw,
-        ph, pw,
-        dh, dw,
-        groups,
+        sh: tl.constexpr, sw: tl.constexpr,
+        ph: tl.constexpr, pw: tl.constexpr,
+        dh: tl.constexpr, dw: tl.constexpr,
+        groups: tl.constexpr,
         s_dx_n, s_dx_c, s_dx_h, s_dx_w,
         s_dy_n, s_dy_c, s_dy_h, s_dy_w,
         s_w_co, s_w_cinperg, s_w_kh, s_w_kw,
+        BLOCK_IC: tl.constexpr,
         BLOCK_HW: tl.constexpr,
     ):
         pid0 = tl.program_id(0)
         pid1 = tl.program_id(1)
-
-        n = pid0 // Cin
-        cin = pid0 % Cin
-
-        HW = H * W
-        hw_start = pid1 * BLOCK_HW
-        offs = tl.arange(0, BLOCK_HW)
-        idx = hw_start + offs
-        mask = idx < HW
-
-        h = idx // W
-        w = idx % W
-
         cin_per_g = Cin // groups
         cout_per_g = Cout // groups
-        group_id = cin // cin_per_g
-        base_w_cin = cin % cin_per_g
+        ic_tiles = tl.cdiv(cin_per_g, BLOCK_IC)
+
+        n = pid0 // (groups * ic_tiles)
+        group_tile = pid0 % (groups * ic_tiles)
+        group_id = group_tile // ic_tiles
+        ic_tile = group_tile % ic_tiles
+        ic_in_group = ic_tile * BLOCK_IC + tl.arange(0, BLOCK_IC)
+        cin = group_id * cin_per_g + ic_in_group
+        mask_ic = ic_in_group < cin_per_g
+
+        HW = H * W
+        idx = pid1 * BLOCK_HW + tl.arange(0, BLOCK_HW)
+        mask_hw = idx < HW
+        h = idx // W
+        w = idx % W
+        acc = to_accumulator(tl.full((BLOCK_IC, BLOCK_HW), _ZERO, dtype=tl_int_dtype))
+
         cout_start = group_id * cout_per_g
         cout_end = cout_start + cout_per_g
-
-        acc = to_accumulator(tl.full((BLOCK_HW,), _ZERO, dtype=tl_int_dtype))
-
-        for kh in range(Kh):
+        for kh in tl.static_range(0, Kh):
             numer_h = h + ph - kh * dh
             divisible_h = (numer_h % sh) == 0
             h_out = numer_h // sh
-
-            for kw in range(Kw):
+            for kw in tl.static_range(0, Kw):
                 numer_w = w + pw - kw * dw
                 divisible_w = (numer_w % sw) == 0
                 w_out = numer_w // sw
-
-                valid_pos = mask & divisible_h & divisible_w & (h_out >= 0) & (h_out < Hout) & (w_out >= 0) & (w_out < Wout)
+                valid_pos = mask_hw & divisible_h & divisible_w & (h_out >= 0) & (h_out < Hout) & (w_out >= 0) & (w_out < Wout)
 
                 for cout in range(cout_start, cout_end):
                     dy_idx = n * s_dy_n + cout * s_dy_c + h_out * s_dy_h + w_out * s_dy_w
                     dy_vals = tl.load(dY_ptr + dy_idx, mask=valid_pos, other=_ZERO)
+                    w_idx = (
+                        cout * s_w_co + ic_in_group * s_w_cinperg
+                        + kh * s_w_kh + kw * s_w_kw
+                    )
+                    w_vals = tl.load(W_ptr + w_idx, mask=mask_ic, other=_ZERO)
+                    product = mul(w_vals[:, None], dy_vals[None, :])
+                    acc = acc_add(acc, to_accumulator(product))
 
-                    w_idx = cout * s_w_co + base_w_cin * s_w_cinperg + kh * s_w_kh + kw * s_w_kw
-                    w_val = tl.load(W_ptr + w_idx)
-
-                    acc = acc_add(acc, to_accumulator(mul(dy_vals, w_val)))
-
-        dx_idx = n * s_dx_n + cin * s_dx_c + h * s_dx_h + w * s_dx_w
-        tl.store(dX_ptr + dx_idx, from_accumulator(acc), mask=mask)
+        dx_idx = (
+            n * s_dx_n + cin[:, None] * s_dx_c
+            + h[None, :] * s_dx_h + w[None, :] * s_dx_w
+        )
+        tl.store(dX_ptr + dx_idx, from_accumulator(acc), mask=mask_ic[:, None] & mask_hw[None, :])
 
     def conv2d_dinput(grad_output, weight, input_shape, stride, padding, dilation, groups):
         N, Cin, Hin, Win = input_shape
@@ -1225,7 +1552,11 @@ def register_triton_ops(
         s_dy_n, s_dy_c, s_dy_h, s_dy_w = grad_output.stride()
         s_w_co,  s_w_cinperg, s_w_kh, s_w_kw = weight.stride()
 
-        grid = lambda META: (N * Cin, triton.cdiv(Hin * Win, META["BLOCK_HW"]))
+        cin_per_group = Cin // groups
+        grid = lambda META: (
+            N * groups * triton.cdiv(cin_per_group, META["BLOCK_IC"]),
+            triton.cdiv(Hin * Win, META["BLOCK_HW"]),
+        )
         conv2d_dinput_kernel[grid](
             grad_input, grad_output, weight,
             N, Cin, Hin, Win,
@@ -1241,165 +1572,169 @@ def register_triton_ops(
         )
         return grad_input
 
-    # @triton.jit
-    # def conv2d_dweight_kernel(
-    #     dW_ptr,
-    #     X_ptr,
-    #     dY_ptr,
-    #     N, Cin, H, W,
-    #     Cout, Kh, Kw,
-    #     Hout, Wout,
-    #     sh, sw,
-    #     ph, pw,
-    #     dh, dw,
-    #     groups,
-    #     s_dw_co, s_dw_cin, s_dw_kh, s_dw_kw,
-    #     s_x_n, s_x_c, s_x_h, s_x_w,
-    #     s_dy_n, s_dy_c, s_dy_h, s_dy_w,
-    #     BLOCK_NHW: tl.constexpr,
-    # ):
-    #     pid0 = tl.program_id(0)
-    #     pid1 = tl.program_id(1)
-
-    #     Cin_per_group = Cin // groups
-    #     Cout_per_group = Cout // groups
-
-    #     cout = pid0 // (Cin_per_group * Kh * Kw)
-    #     rem = pid0 - cout * (Cin_per_group * Kh * Kw)
-    #     cin = rem // (Kh * Kw)
-    #     rem2 = rem -  cin * (Kh * Kw)
-    #     kh = rem2 // Kw
-    #     kw = rem2 % Kw
-
-    #     group_id = cout // Cout_per_group
-    #     cin_abs = group_id * Cin_per_group + cin
-
-    #     offs = pid1 * BLOCK_NHW + tl.arange(0, BLOCK_NHW)
-    #     NHW = N * Hout * Wout
-    #     mask = offs < NHW
-
-    #     hw = Hout * Wout
-    #     n = offs // hw
-    #     r = offs - n * hw
-    #     hout = r // Wout
-    #     wout = r - hout * Wout
-
-    #     h = hout * sh - ph + kh * dh
-    #     w = wout * sw - pw + kw * dw
-    #     inb = mask & (h >= 0) & (h < H) & (w >= 0) & (w < W)
-
-    #     x_ptrs = X_ptr + n * s_x_n + cin_abs * s_x_c + h * s_x_h + w * s_x_w
-    #     dy_ptrs = dY_ptr + n * s_dy_n + cout * s_dy_c + hout * s_dy_h + wout * s_dy_w
-
-    #     x = tl.load(x_ptrs, mask=inb, other=_ZERO)
-    #     dy = tl.load(dy_ptrs, mask=inb, other=_ZERO)
-
-    #     partial = tl.reduce(mul(x, dy), axis=0, combine_fn=add)
-
-    #     dw_idx = cout * s_dw_co + cin * s_dw_cin + kh * s_dw_kh + kw * s_dw_kw
-    #     # atomic add with a scalar ptr
-    #     atomic_add(dW_ptr + dw_idx + tl.zeros((1,), dtype=tl.int32), partial, tl.full((1,), True, tl.int1))
-
     @triton.autotune(
         configs=[
-            triton.Config({"BLOCK_NHW": 64},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_NHW": 32},  num_warps=2, num_stages=1),
-            triton.Config({"BLOCK_NHW": 128}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_OC": 4, "BLOCK_IC": 4, "BLOCK_NHW": 64}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_OC": 8, "BLOCK_IC": 4, "BLOCK_NHW": 32}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_OC": 4, "BLOCK_IC": 8, "BLOCK_NHW": 32}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_OC": 2, "BLOCK_IC": 4, "BLOCK_NHW": 64}, num_warps=2, num_stages=1),
         ],
-        key=["N", "Cin", "H", "W", "Cout", "Kh", "Kw", "Hout", "Wout", "sh", "sw", "ph", "pw", "dh", "dw", "groups"],
+        key=["N", "Cin", "H", "W", "Cout", "Kh", "Kw", "Hout", "Wout", "sh", "sw", "ph", "pw", "dh", "dw", "groups", "SPLIT_K"],
     )
     @triton.jit
     def conv2d_dweight_kernel(
-        dW_ptr,
-        X_ptr,
-        dY_ptr,
+        partial_ptr, X_ptr, dY_ptr,
         N, Cin, H, W,
-        Cout, Kh, Kw,
+        Cout, Kh: tl.constexpr, Kw: tl.constexpr,
         Hout, Wout,
-        sh, sw,
-        ph, pw,
-        dh, dw,
-        groups,
-        s_dw_co, s_dw_cin, s_dw_kh, s_dw_kw,
+        sh: tl.constexpr, sw: tl.constexpr,
+        ph: tl.constexpr, pw: tl.constexpr,
+        dh: tl.constexpr, dw: tl.constexpr,
+        groups: tl.constexpr,
         s_x_n, s_x_c, s_x_h, s_x_w,
         s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+        SPLIT_K: tl.constexpr,
+        BLOCK_OC: tl.constexpr,
+        BLOCK_IC: tl.constexpr,
         BLOCK_NHW: tl.constexpr,
     ):
-        pid = tl.program_id(0)
-        offs = tl.arange(0, BLOCK_NHW)
+        tile = tl.program_id(0)
+        split_id = tl.program_id(1)
+        cin_per_group = Cin // groups
+        cout_per_group = Cout // groups
+        ic_tiles = tl.cdiv(cin_per_group, BLOCK_IC)
+        oc_tiles = tl.cdiv(cout_per_group, BLOCK_OC)
 
-        Cin_per_group = Cin // groups
-        Cout_per_group = Cout // groups
+        kw = tile % Kw
+        tile = tile // Kw
+        kh = tile % Kh
+        tile = tile // Kh
+        ic_tile = tile % ic_tiles
+        tile = tile // ic_tiles
+        oc_tile = tile % oc_tiles
+        group_id = tile // oc_tiles
 
-        cout = pid // (Cin_per_group * Kh * Kw)
-        rem = pid - cout * (Cin_per_group * Kh * Kw)
-        cin = rem // (Kh * Kw)
-        rem2 = rem -  cin * (Kh * Kw)
-        kh = rem2 // Kw
-        kw = rem2 % Kw
+        ic = ic_tile * BLOCK_IC + tl.arange(0, BLOCK_IC)
+        oc_in_group = oc_tile * BLOCK_OC + tl.arange(0, BLOCK_OC)
+        oc = group_id * cout_per_group + oc_in_group
+        ic_abs = group_id * cin_per_group + ic
+        mask_ic = ic < cin_per_group
+        mask_oc = oc_in_group < cout_per_group
 
-        group_id = cout // Cout_per_group
-        cin_abs = group_id * Cin_per_group + cin
-
-        acc = to_accumulator(tl.full((BLOCK_NHW,), _ZERO, dtype=tl_int_dtype))
-
-        for nhw_start in range(0, N * Hout * Wout, BLOCK_NHW):
-            idx = nhw_start + offs
-            mask = idx < N * Hout * Wout
-
+        acc = to_accumulator(tl.full((BLOCK_OC, BLOCK_IC), _ZERO, dtype=tl_int_dtype))
+        lane = tl.arange(0, BLOCK_NHW)
+        total = N * Hout * Wout
+        for start in range(split_id * BLOCK_NHW, total, SPLIT_K * BLOCK_NHW):
+            idx = start + lane
+            mask_nhw = idx < total
             n = idx // (Hout * Wout)
-            rem3 = idx % (Hout * Wout)
-            hout = rem3 // Wout
-            wout = rem3 % Wout
-
+            spatial = idx % (Hout * Wout)
+            hout = spatial // Wout
+            wout = spatial % Wout
             h = hout * sh - ph + kh * dh
             w = wout * sw - pw + kw * dw
+            in_bounds = mask_nhw & (h >= 0) & (h < H) & (w >= 0) & (w < W)
 
-            valid_mask = mask & (h >= 0) & (h < H) & (w >= 0) & (w < W)
+            x_idx = (
+                n[None, :] * s_x_n + ic_abs[:, None] * s_x_c
+                + h[None, :] * s_x_h + w[None, :] * s_x_w
+            )
+            x_vals = tl.load(
+                X_ptr + x_idx,
+                mask=mask_ic[:, None] & in_bounds[None, :], other=_ZERO,
+            )
+            dy_idx = (
+                n[None, :] * s_dy_n + oc[:, None] * s_dy_c
+                + hout[None, :] * s_dy_h + wout[None, :] * s_dy_w
+            )
+            dy_vals = tl.load(
+                dY_ptr + dy_idx,
+                mask=mask_oc[:, None] & mask_nhw[None, :], other=_ZERO,
+            )
+            product = mul(dy_vals[:, None, :], x_vals[None, :, :])
+            tile_sum = tl.reduce(to_accumulator(product), axis=2, combine_fn=acc_add)
+            acc = acc_add(acc, tile_sum)
 
-            x_idx = n * s_x_n + cin_abs * s_x_c + h * s_x_h + w * s_x_w
-            x_vals = tl.load(X_ptr + x_idx, mask=valid_mask, other=_ZERO)
+        weight_count = Cout * cin_per_group * Kh * Kw
+        weight_idx = (
+            ((oc[:, None] * cin_per_group + ic[None, :]) * Kh + kh) * Kw + kw
+        )
+        weight_mask = mask_oc[:, None] & mask_ic[None, :]
+        if SPLIT_K == 1:
+            tl.store(partial_ptr + weight_idx, from_accumulator(acc), mask=weight_mask)
+        else:
+            tl.store(
+                partial_ptr + split_id * weight_count + weight_idx,
+                acc, mask=weight_mask,
+            )
 
-            dy_idx = n * s_dy_n + cout * s_dy_c + hout * s_dy_h + wout * s_dy_w
-            dy_vals = tl.load(dY_ptr + dy_idx, mask=valid_mask, other=_ZERO)
-
-            prod = mul(dy_vals, x_vals)
-            acc = acc_add(to_accumulator(prod), acc)
-
-        dw_idx = cout * s_dw_co + cin * s_dw_cin + kh * s_dw_kh + kw * s_dw_kw
-        tl.store(dW_ptr + dw_idx, from_accumulator(tl.reduce(acc, axis=0, combine_fn=acc_add)))
+    @triton.jit
+    def conv2d_dweight_finalize_kernel(
+        partial_ptr, dW_ptr, weight_count,
+        SPLIT_K: tl.constexpr, BLOCK: tl.constexpr,
+    ):
+        idx = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        mask = idx < weight_count
+        acc = to_accumulator(tl.full((BLOCK,), _ZERO, dtype=tl_int_dtype))
+        for split in tl.static_range(0, SPLIT_K):
+            value = tl.load(
+                partial_ptr + split * weight_count + idx,
+                mask=mask, other=to_accumulator(tl.cast(_ZERO, tl_int_dtype)),
+            )
+            acc = acc_add(acc, value)
+        tl.store(dW_ptr + idx, from_accumulator(acc), mask=mask)
 
     def conv2d_dweight(grad_output, input, weight_shape, stride, padding, dilation, groups):
         N, Cin, H, W = input.shape
         _, Cout, Hout, Wout = grad_output.shape
         Kh, Kw = weight_shape[2], weight_shape[3]
-
-        Cin_per_group = Cin // groups
+        cin_per_group = Cin // groups
+        cout_per_group = Cout // groups
+        weight_count = Cout * cin_per_group * Kh * Kw
         grad_weight = torch.empty(weight_shape, device=grad_output.device, dtype=dtype_cls.int_dtype)
 
         sh, sw = stride[0], stride[1]
         ph, pw = padding[0], padding[1]
         dh, dw = dilation[0], dilation[1]
-
-        s_dw_co, s_dw_cin, s_dw_kh, s_dw_kw = grad_weight.stride()
         s_x_n, s_x_c, s_x_h, s_x_w = input.stride()
         s_dy_n, s_dy_c, s_dy_h, s_dy_w = grad_output.stride()
 
-        grid = (Cout * Cin_per_group * Kh * Kw,)
+        total = N * Hout * Wout
+        split_k = min(8, max(1, triton.next_power_of_2(triton.cdiv(total, 4096))))
+        accumulator_bytes = torch.empty((), dtype=acc_int_dtype).element_size()
+        while split_k > 1 and split_k * weight_count * accumulator_bytes > 64 * 1024 * 1024:
+            split_k //= 2
+
+        if split_k == 1:
+            partials = grad_weight
+        else:
+            partials = torch.empty(
+                (split_k, weight_count), device=grad_output.device, dtype=acc_int_dtype
+            )
+
+        grid = lambda META: (
+            groups * Kh * Kw
+            * triton.cdiv(cin_per_group, META["BLOCK_IC"])
+            * triton.cdiv(cout_per_group, META["BLOCK_OC"]),
+            split_k,
+        )
         conv2d_dweight_kernel[grid](
-            grad_weight, input, grad_output,
+            partials, input, grad_output,
             N, Cin, H, W,
             Cout, Kh, Kw,
             Hout, Wout,
-            sh, sw,
-            ph, pw,
-            dh, dw,
-            groups,
-            s_dw_co, s_dw_cin, s_dw_kh, s_dw_kw,
+            sh, sw, ph, pw, dh, dw, groups,
             s_x_n, s_x_c, s_x_h, s_x_w,
             s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+            SPLIT_K=split_k,
         )
 
+        if split_k > 1:
+            block = 256
+            conv2d_dweight_finalize_kernel[(triton.cdiv(weight_count, block),)](
+                partials, grad_weight, weight_count,
+                SPLIT_K=split_k, BLOCK=block, num_warps=4,
+            )
         return grad_weight
 
     @triton.autotune(
@@ -1503,13 +1838,6 @@ def register_triton_ops(
                     grad_output, input, weight.shape,
                     stride, padding, dilation, groups
                 )
-                # grad_weight = torch.nn.grad.conv2d_weight(
-                #     ops.to_float(input), weight.shape,
-                #     ops.to_float(grad_output),
-                #     stride=stride, padding=padding,
-                #     dilation=dilation, groups=groups
-                # )
-                # grad_weight = ops.from_float(grad_weight)
             else:
                 grad_weight = None
 
@@ -1646,7 +1974,7 @@ def register_triton_ops(
         return (output, indices) if return_indices else output
 
     @triton.jit
-    def max_pool2d_dinput_kernel(
+    def max_pool2d_dinput_scatter_kernel(
         dY_ptr, dX_ptr, idx_ptr,
         N, C, H, W,
         Hout, Wout,
@@ -1684,32 +2012,103 @@ def register_triton_ops(
         iw = safe_idx - ih * W
 
         ptr_x = dx_base + ih * s_dx_h + iw * s_dx_w
-        atomic_add(ptr_x, dy, valid)
+        # Non-overlapping windows guarantee one writer per selected input.
+        tl.store(ptr_x, dy, mask=valid)
 
-    def max_pool2d_dinput(grad_output, indices, input_shape):
+
+    @triton.jit
+    def max_pool2d_dinput_gather_kernel(
+        dY_ptr, dX_ptr, idx_ptr,
+        N, C, H, W, Hout, Wout,
+        s_dy_n, s_dy_c, s_dy_h, s_dy_w,
+        s_dx_n, s_dx_c, s_dx_h, s_dx_w,
+        s_idx_n, s_idx_c, s_idx_h, s_idx_w,
+        Kh: tl.constexpr, Kw: tl.constexpr,
+        sh: tl.constexpr, sw: tl.constexpr,
+        ph: tl.constexpr, pw: tl.constexpr,
+        dh: tl.constexpr, dw: tl.constexpr,
+        BLOCK_W: tl.constexpr,
+    ):
+        pid0 = tl.program_id(0)
+        ih = tl.program_id(1)
+        iw = tl.program_id(2) * BLOCK_W + tl.arange(0, BLOCK_W)
+        mask_w = iw < W
+        n = pid0 // C
+        c = pid0 % C
+        input_index = ih * W + iw
+        acc = to_accumulator(tl.full((BLOCK_W,), _ZERO, dtype=tl_int_dtype))
+
+        dy_base = dY_ptr + n * s_dy_n + c * s_dy_c
+        idx_base = idx_ptr + n * s_idx_n + c * s_idx_c
+        for kh in tl.static_range(0, Kh):
+            numer_h = ih + ph - kh * dh
+            valid_h = (numer_h % sh) == 0
+            oh = numer_h // sh
+            valid_h = valid_h & (oh >= 0) & (oh < Hout)
+            for kw in tl.static_range(0, Kw):
+                numer_w = iw + pw - kw * dw
+                valid_w = (numer_w % sw) == 0
+                ow = numer_w // sw
+                valid = mask_w & valid_h & valid_w & (ow >= 0) & (ow < Wout)
+                idx_offset = oh * s_idx_h + ow * s_idx_w
+                selected = tl.load(idx_base + idx_offset, mask=valid, other=-1)
+                contributes = valid & (selected == input_index)
+                dy_offset = oh * s_dy_h + ow * s_dy_w
+                dy = tl.load(dy_base + dy_offset, mask=contributes, other=_ZERO)
+                acc = acc_add(acc, to_accumulator(dy))
+
+        dx_base = dX_ptr + n * s_dx_n + c * s_dx_c
+        dx_offset = ih * s_dx_h + iw * s_dx_w
+        tl.store(dx_base + dx_offset, from_accumulator(acc), mask=mask_w)
+
+    def max_pool2d_dinput(grad_output, indices, input_shape, kernel_size, stride, padding, dilation):
         N, C, H, W = input_shape
         Hout = grad_output.shape[2]
         Wout = grad_output.shape[3]
+        if isinstance(kernel_size, int):
+            kernel_size = (kernel_size, kernel_size)
+        if stride is None:
+            stride = kernel_size
+        elif isinstance(stride, int):
+            stride = (stride, stride)
+        if isinstance(padding, int):
+            padding = (padding, padding)
+        if isinstance(dilation, int):
+            dilation = (dilation, dilation)
+        Kh, Kw = kernel_size
+        sh, sw = stride
+        ph, pw = padding
+        dh, dw = dilation
+        non_overlapping = sh >= dh * (Kh - 1) + 1 and sw >= dw * (Kw - 1) + 1
 
-        grad_input = torch.full((N, C, H, W), _ZERO.value, device=grad_output.device, dtype=dtype_cls.int_dtype)
+        if non_overlapping:
+            grad_input = torch.full((N, C, H, W), _ZERO.value, device=grad_output.device, dtype=dtype_cls.int_dtype)
+        else:
+            grad_input = torch.empty((N, C, H, W), device=grad_output.device, dtype=dtype_cls.int_dtype)
 
         s_dy_n, s_dy_c, s_dy_h, s_dy_w = grad_output.stride()
         s_dx_n, s_dx_c, s_dx_h, s_dx_w = grad_input.stride()
         s_idx_n, s_idx_c, s_idx_h, s_idx_w = indices.stride()
 
         BLOCK_W = 128
-        grid = (N * C, Hout, triton.cdiv(Wout, BLOCK_W))
-
-        max_pool2d_dinput_kernel[grid](
-            grad_output, grad_input, indices,
-            N, C, H, W,
-            Hout, Wout,
+        common_args = (
+            grad_output, grad_input, indices, N, C, H, W, Hout, Wout,
             s_dy_n, s_dy_c, s_dy_h, s_dy_w,
             s_dx_n, s_dx_c, s_dx_h, s_dx_w,
             s_idx_n, s_idx_c, s_idx_h, s_idx_w,
-            BLOCK_W=BLOCK_W,
-            num_warps=4,
         )
+        if non_overlapping:
+            grid = (N * C, Hout, triton.cdiv(Wout, BLOCK_W))
+            max_pool2d_dinput_scatter_kernel[grid](
+                *common_args, BLOCK_W=BLOCK_W, num_warps=4,
+            )
+        else:
+            grid = (N * C, H, triton.cdiv(W, BLOCK_W))
+            max_pool2d_dinput_gather_kernel[grid](
+                *common_args,
+                Kh, Kw, sh, sw, ph, pw, dh, dw,
+                BLOCK_W=BLOCK_W, num_warps=4,
+            )
 
         return grad_input
 
@@ -1720,6 +2119,10 @@ def register_triton_ops(
         @staticmethod
         def forward(ctx, ops, input, kernel_size, stride, padding, dilation, ceil_mode, return_indices):
             ctx.input_shape = input.shape
+            ctx.kernel_size = kernel_size
+            ctx.stride = stride
+            ctx.padding = padding
+            ctx.dilation = dilation
             output, indices = ops.max_pool2d(
                 input, kernel_size,
                 stride, padding, dilation,
@@ -1734,7 +2137,11 @@ def register_triton_ops(
             indices, = ctx.saved_tensors
             input_shape = ctx.input_shape
 
-            return max_pool2d_dinput(grad_output, indices, input_shape), None, None, None, None, None, None
+            grad_input = max_pool2d_dinput(
+                grad_output, indices, input_shape,
+                ctx.kernel_size, ctx.stride, ctx.padding, ctx.dilation,
+            )
+            return grad_input, None, None, None, None, None, None
 
     @dtype_cls.register_func(torch.nn.functional.max_pool2d,
                              cast=("input",), backend="triton")
@@ -2217,17 +2624,19 @@ def register_triton_ops(
             triton.Config({"BLOCK": 1024}, num_warps=4, num_stages=1),
             triton.Config({"BLOCK": 1024}, num_warps=8, num_stages=1),
         ],
-        key=["count", "HW", "W"],
+        key=["count", "HW", "W", "EVAL_FUSED"],
     )
     @triton.jit
     def batch_norm2d_apply_kernel(
         X_ptr, Y_ptr,
         w_ptr, b_ptr,
-        sm_ptr, sis_ptr,
+        rm_ptr, rv_ptr, sm_ptr, sis_ptr,
+        eps,
         HW, W, count,
         s_x_n, s_x_c, s_x_h, s_x_w,
         s_y_n, s_y_c, s_y_h, s_y_w,
         has_weight, has_bias,
+        EVAL_FUSED: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
         pid0 = tl.program_id(0)
@@ -2237,8 +2646,17 @@ def register_triton_ops(
         idx = pid1 * BLOCK + lane
         mask = idx < count
 
-        mean = tl.load(sm_ptr + pid0)
-        invstd = tl.load(sis_ptr + pid0)
+        if EVAL_FUSED:
+            mean = tl.load(rm_ptr + pid0)
+            var = tl.load(rv_ptr + pid0)
+            var = tl.where(lt(var, tl.cast(_ZERO, tl_int_dtype)), tl.cast(_ZERO, tl_int_dtype), var)
+            invstd = div(tl.cast(_ONE, tl_int_dtype), sqrt(add(var, tl.cast(eps, tl_int_dtype))))
+            if pid1 == 0:
+                tl.store(sm_ptr + pid0, mean)
+                tl.store(sis_ptr + pid0, invstd)
+        else:
+            mean = tl.load(sm_ptr + pid0)
+            invstd = tl.load(sis_ptr + pid0)
 
         if has_weight:
             weight = tl.load(w_ptr + pid0)
@@ -2291,6 +2709,7 @@ def register_triton_ops(
 
         s_x_n, s_x_c, s_x_h, s_x_w = x.stride()
         s_y_n, s_y_c, s_y_h, s_y_w = output.stride()
+        fused_eval = (not training) and count <= 256
 
         if training:
             partial_sum = torch.empty((C, partial_tiles), device=x.device, dtype=acc_int_dtype)
@@ -2332,7 +2751,7 @@ def register_triton_ops(
                 partial_tiles,
                 pv_s0, pv_s1,
             )
-        else:
+        elif not fused_eval:
             batch_norm2d_eval_stats_kernel[(C,)](
                 running_mean,
                 running_var,
@@ -2346,12 +2765,14 @@ def register_triton_ops(
         batch_norm2d_apply_kernel[grid_apply](
             x, output,
             weight, bias,
-            save_mean, save_invstd,
+            running_mean, running_var, save_mean, save_invstd,
+            eps_dt,
             HW, W, count,
             s_x_n, s_x_c, s_x_h, s_x_w,
             s_y_n, s_y_c, s_y_h, s_y_w,
             has_weight,
             has_bias,
+            fused_eval,
         )
 
         return output, save_mean, save_invstd
@@ -2777,6 +3198,48 @@ def register_triton_ops(
             denom = tl.where(valid, denom, tl.cast(_ZERO, tl_int_dtype))
             tl.store(denom_ptr + offs, denom, mask=mask)
 
+    @triton.jit
+    def nll_loss_reduce_kernel(
+        x_ptr, t_ptr, w_ptr, loss_ptr, denom_ptr,
+        target_shape_ptr, x_nonclass_stride_ptr, t_stride_ptr,
+        total, x_class_stride, w_stride,
+        HAS_WEIGHT: tl.constexpr,
+        HAS_DENOM: tl.constexpr,
+        IGNORE_INDEX: tl.constexpr,
+        TARGET_NDIM: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < total
+        x_base_offsets, t_offsets = nll_target_offsets(
+            offs, target_shape_ptr, x_nonclass_stride_ptr, t_stride_ptr, TARGET_NDIM
+        )
+        target = tl.load(t_ptr + t_offsets, mask=mask, other=IGNORE_INDEX)
+        valid = mask & (target != IGNORE_INDEX)
+        safe_target = tl.where(valid, target, 0)
+        x_vals = tl.load(
+            x_ptr + x_base_offsets + safe_target * x_class_stride,
+            mask=valid, other=_ZERO,
+        )
+
+        if HAS_WEIGHT:
+            weights = tl.load(w_ptr + safe_target * w_stride, mask=valid, other=_ZERO)
+            weighted = mul(x_vals, weights)
+            denominator = weights
+        else:
+            weighted = x_vals
+            denominator = tl.full((BLOCK,), _ONE, dtype=tl_int_dtype)
+
+        loss = tl.where(valid, neg(weighted), tl.cast(_ZERO, tl_int_dtype))
+        loss_partial = tl.reduce(to_accumulator(loss), axis=0, combine_fn=acc_add)
+        tl.store(loss_ptr + pid, from_accumulator(loss_partial))
+
+        if HAS_DENOM:
+            denominator = tl.where(valid, denominator, tl.cast(_ZERO, tl_int_dtype))
+            denom_partial = tl.reduce(to_accumulator(denominator), axis=0, combine_fn=acc_add)
+            tl.store(denom_ptr + pid, from_accumulator(denom_partial))
+
     @triton.autotune(
         configs=[
             triton.Config({"BLOCK": 128},  num_warps=1, num_stages=1),
@@ -2937,37 +3400,57 @@ def register_triton_ops(
         return ops.sum(denom_values)
 
     @dtype_cls.register_op("nll_loss", backend="triton")
-    def dt_nll_loss(ops, x, target, weight=None, reduction='mean', ignore_index=-100):
+    def dt_nll_loss(ops, x, target, weight=None, reduction='mean', ignore_index=-100, return_denominator=False):
         if reduction not in ("none", "sum", "mean"):
             raise ValueError(f"Invalid reduction: {reduction}")
 
         target_shape, target_shape_meta, x_nonclass_stride_meta, target_stride_meta, x_class_stride = _nll_metadata(x, target)
-        loss = torch.empty(target_shape, device=x.device, dtype=dtype_cls.int_dtype)
-        denom_values = torch.empty(target_shape if reduction == "mean" else (0,), device=x.device, dtype=dtype_cls.int_dtype)
         weight, weight_stride, has_weight = _nll_weight_and_stride(weight, x.device)
-
-        if loss.numel() != 0:
-            grid = lambda META: (triton.cdiv(loss.numel(), META["BLOCK"]),)
-            nll_loss_kernel[grid](
-                x, target, weight, loss, denom_values,
-                target_shape_meta, x_nonclass_stride_meta, target_stride_meta,
-                loss.numel(), x_class_stride, weight_stride,
-                has_weight,
-                reduction == "mean",
-                ignore_index,
-                len(target_shape),
-            )
+        total = target.numel()
 
         if reduction == "none":
+            loss = torch.empty(target_shape, device=x.device, dtype=dtype_cls.int_dtype)
+            denom_values = torch.empty((0,), device=x.device, dtype=dtype_cls.int_dtype)
+            if total != 0:
+                grid = lambda META: (triton.cdiv(total, META["BLOCK"]),)
+                nll_loss_kernel[grid](
+                    x, target, weight, loss, denom_values,
+                    target_shape_meta, x_nonclass_stride_meta, target_stride_meta,
+                    total, x_class_stride, weight_stride,
+                    has_weight, False, ignore_index, len(target_shape),
+                )
             return loss
 
-        loss_sum = ops.sum(loss)
+        block = 512
+        partial_count = triton.cdiv(total, block)
+        loss_partials = torch.empty((partial_count,), device=x.device, dtype=dtype_cls.int_dtype)
+        denom_partials = torch.empty(
+            (partial_count if reduction == "mean" else 0,),
+            device=x.device, dtype=dtype_cls.int_dtype,
+        )
+        if total != 0:
+            nll_loss_reduce_kernel[(partial_count,)](
+                x, target, weight, loss_partials, denom_partials,
+                target_shape_meta, x_nonclass_stride_meta, target_stride_meta,
+                total, x_class_stride, weight_stride,
+                has_weight, reduction == "mean", ignore_index, len(target_shape),
+                BLOCK=block, num_warps=4,
+            )
+
+        loss_sum = ops.sum(loss_partials)
         if reduction == "sum":
-            return loss_sum
+            denominator = torch.empty((0,), device=x.device, dtype=dtype_cls.int_dtype)
+            result = loss_sum
+        else:
+            denominator = ops.sum(denom_partials)
+            result = ops.div(loss_sum, denominator)
 
-        return ops.div(loss_sum, ops.sum(denom_values))
+        return (result, denominator) if return_denominator else result
 
-    def nll_loss_backward(ops, grad_output, target, weight, input_shape, reduction, ignore_index):
+    def nll_loss_backward(
+        ops, grad_output, target, weight, input_shape, reduction, ignore_index,
+        saved_denominator=None,
+    ):
         if reduction not in ("none", "sum", "mean"):
             raise ValueError(f"Invalid reduction: {reduction}")
 
@@ -2980,7 +3463,12 @@ def register_triton_ops(
             denom = torch.empty(1, device=grad_output.device, dtype=dtype_cls.int_dtype)
         elif reduction == "mean":
             dy_stride_meta = _metadata_tensor((0,) * len(target_shape), grad_output.device)
-            denom = _nll_denominator(ops, target, None if not has_weight else weight, input_shape, ignore_index)
+            if saved_denominator is not None and saved_denominator.numel() != 0:
+                denom = saved_denominator
+            else:
+                denom = _nll_denominator(
+                    ops, target, None if not has_weight else weight, input_shape, ignore_index
+                )
         else:
             dy_stride_meta = _metadata_tensor((0,) * len(target_shape), grad_output.device)
             denom = torch.empty(1, device=grad_output.device, dtype=dtype_cls.int_dtype)
@@ -3003,21 +3491,25 @@ def register_triton_ops(
     class DTNLLLossFunction(DTFunction):
 
         @staticmethod
-        def forward(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
-            return ops.nll_loss(x, y, weight, reduction, ignore_index)
-
-        @staticmethod
-        def setup_context(ctx, ops, inputs, output):
-            x, y, weight, reduction, ignore_index = inputs
-            ctx.save_for_backward(x, y, weight)
+        def forward(ctx, ops, x, y, weight=None, reduction='mean', ignore_index=-100):
+            if reduction == "none":
+                result = ops.nll_loss(x, y, weight, reduction, ignore_index)
+                denominator = torch.empty((0,), device=x.device, dtype=dtype_cls.int_dtype)
+            else:
+                result, denominator = ops.nll_loss(
+                    x, y, weight, reduction, ignore_index, True
+                )
+            ctx.save_for_backward(x, y, weight, denominator)
             ctx.reduction = reduction
             ctx.ignore_index = ignore_index
+            return result
 
         @staticmethod
         def backward(ctx, ops, grad_output):
-            x, y, weight = ctx.saved_tensors
+            x, y, weight, denominator = ctx.saved_tensors
             grad_input = nll_loss_backward(
-                ops, grad_output, y, weight, x.shape, ctx.reduction, ctx.ignore_index
+                ops, grad_output, y, weight, x.shape, ctx.reduction, ctx.ignore_index,
+                denominator,
             )
             return grad_input, None, None, None, None
 
@@ -3094,6 +3586,98 @@ def register_triton_ops(
 
 
     @triton.jit
+    def sgd_step_group_kernel(
+        meta_ptr,
+        lr_ptr, momentum_ptr, dampening_ptr, weight_decay_ptr,
+        MAXIMIZE: tl.constexpr, NESTEROV: tl.constexpr,
+        USE_MOMENTUM: tl.constexpr, FIRST_MOMENTUM: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        block_id = tl.program_id(0)
+        tensor_id = tl.program_id(1)
+        meta_base = tensor_id * 4
+        p_ptr = tl.load(meta_ptr + meta_base).to(tl.pointer_type(tl_int_dtype))
+        g_ptr = tl.load(meta_ptr + meta_base + 1).to(tl.pointer_type(tl_int_dtype))
+        buf_ptr = tl.load(meta_ptr + meta_base + 2).to(tl.pointer_type(tl_int_dtype))
+        N = tl.load(meta_ptr + meta_base + 3)
+        offs = block_id * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < N
+
+        p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
+        g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
+        lr = tl.load(lr_ptr)
+        momentum = tl.load(momentum_ptr)
+        dampening = tl.load(dampening_ptr)
+        weight_decay = tl.load(weight_decay_ptr)
+
+        if MAXIMIZE:
+            g = neg(g)
+        if weight_decay != _ZERO:
+            g = add(g, mul(p, tl.cast(weight_decay, tl_int_dtype)))
+        if USE_MOMENTUM:
+            if FIRST_MOMENTUM:
+                buf_new = g
+            else:
+                buf = tl.load(buf_ptr + offs, mask=mask, other=_ZERO)
+                buf_new = add(
+                    mul(buf, tl.cast(momentum, tl_int_dtype)),
+                    mul(g, sub(tl.cast(_ONE, tl_int_dtype), tl.cast(dampening, tl_int_dtype))),
+                )
+            tl.store(buf_ptr + offs, buf_new, mask=mask)
+            if NESTEROV:
+                g = add(g, mul(buf_new, tl.cast(momentum, tl_int_dtype)))
+            else:
+                g = buf_new
+
+        tl.store(p_ptr + offs, sub(p, mul(g, tl.cast(lr, tl_int_dtype))), mask=mask)
+
+    def _size_bucket_entries(entries):
+        buckets = {}
+        for entry in entries:
+            size = entry[0].numel()
+            bucket = max(0, (max(1, size) - 1).bit_length())
+            buckets.setdefault(bucket, []).append(entry)
+        return buckets.values()
+
+    @dtype_cls.register_op("triton_sgd_step_group", backend="triton")
+    def triton_sgd_step_group(
+        ops, params, grads, bufs,
+        lr, momentum, dampening, weight_decay, nesterov, maximize, use_momentum,
+    ):
+        if not params:
+            return []
+        outputs = list(bufs)
+        grouped = {}
+        for index, (param, grad, buf) in enumerate(zip(params, grads, bufs)):
+            first = use_momentum and buf is None
+            if first:
+                buf = torch.empty_like(param)
+                outputs[index] = buf
+            elif buf is None:
+                buf = param
+            size_bucket = max(0, (max(1, param.numel()) - 1).bit_length())
+            grouped.setdefault((first, size_bucket), []).append((index, param, grad, buf))
+
+        block = 512
+        for (first, _), entries in grouped.items():
+            metadata = torch.tensor(
+                [
+                    [param.data_ptr(), grad.data_ptr(), buf.data_ptr(), param.numel()]
+                    for _, param, grad, buf in entries
+                ],
+                dtype=torch.int64, device=params[0].device,
+            )
+            max_size = max(param.numel() for _, param, _, _ in entries)
+            grid = (triton.cdiv(max_size, block), len(entries))
+            sgd_step_group_kernel[grid](
+                metadata, lr, momentum, dampening, weight_decay,
+                maximize, nesterov, use_momentum, first,
+                BLOCK=block, num_warps=4,
+            )
+        return outputs
+
+
+    @triton.jit
     def madam_step_kernel(
         p_ptr, g_ptr, exp_avg_sq_ptr,
         lr_ptr, beta_ptr, eps_ptr,
@@ -3156,6 +3740,88 @@ def register_triton_ops(
             BLOCK=BLOCK,
         )
         return exp_avg_sq
+
+
+    @triton.jit
+    def madam_step_group_kernel(
+        meta_ptr,
+        lr_ptr, beta_ptr, eps_ptr, g_bound_ptr, bias_corr_ptr,
+        MAXIMIZE: tl.constexpr, USE_POW: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        block_id = tl.program_id(0)
+        tensor_id = tl.program_id(1)
+        meta_base = tensor_id * 5
+        p_ptr = tl.load(meta_ptr + meta_base).to(tl.pointer_type(tl_int_dtype))
+        g_ptr = tl.load(meta_ptr + meta_base + 1).to(tl.pointer_type(tl_int_dtype))
+        v_ptr = tl.load(meta_ptr + meta_base + 2).to(tl.pointer_type(tl_int_dtype))
+        max_ptr = tl.load(meta_ptr + meta_base + 3).to(tl.pointer_type(tl_int_dtype))
+        N = tl.load(meta_ptr + meta_base + 4)
+        offs = block_id * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < N
+
+        p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
+        g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
+        v = tl.load(v_ptr + offs, mask=mask, other=_ZERO)
+        lr = tl.load(lr_ptr)
+        beta = tl.load(beta_ptr)
+        eps = tl.load(eps_ptr)
+        g_bound = tl.load(g_bound_ptr)
+        maximum = tl.load(max_ptr)
+        bias_corr = tl.load(bias_corr_ptr)
+
+        g2 = mul(g, g)
+        v_new = add(
+            mul(tl.cast(beta, tl_int_dtype), v),
+            mul(sub(tl.cast(_ONE, tl_int_dtype), tl.cast(beta, tl_int_dtype)), g2),
+        )
+        tl.store(v_ptr + offs, v_new, mask=mask)
+        corr = add(div(v_new, tl.cast(bias_corr, tl_int_dtype)), tl.cast(eps, tl_int_dtype))
+        g_normed = div(g, sqrt(corr))
+        g_clipped = clamp(
+            g_normed, neg(tl.cast(g_bound, tl_int_dtype)), tl.cast(g_bound, tl_int_dtype)
+        )
+        delta = mul(mul(tl.cast(lr, tl_int_dtype), g_clipped), sign(p))
+        if not MAXIMIZE:
+            delta = neg(delta)
+        if USE_POW:
+            updated = mul(p, exp(delta))
+        else:
+            updated = mul(p, add(tl.cast(_ONE, tl_int_dtype), delta))
+        updated = clamp(
+            updated, neg(tl.cast(maximum, tl_int_dtype)), tl.cast(maximum, tl_int_dtype)
+        )
+        tl.store(p_ptr + offs, updated, mask=mask)
+
+    @dtype_cls.register_op("triton_madam_step_group", backend="triton")
+    def triton_madam_step_group(
+        ops, params, grads, exp_avg_sqs, maxima,
+        lr, beta, eps, g_bound, bias_corr, use_pow, maximize,
+    ):
+        if not params:
+            return exp_avg_sqs
+        entries = list(zip(params, grads, exp_avg_sqs, maxima))
+        block = 512
+        for bucket_entries in _size_bucket_entries(entries):
+            metadata = torch.tensor(
+                [
+                    [
+                        param.data_ptr(), grad.data_ptr(), exp_avg_sq.data_ptr(),
+                        maximum.data_ptr(), param.numel(),
+                    ]
+                    for param, grad, exp_avg_sq, maximum in bucket_entries
+                ],
+                dtype=torch.int64, device=params[0].device,
+            )
+            max_size = max(param.numel() for param, _, _, _ in bucket_entries)
+            grid = (triton.cdiv(max_size, block), len(bucket_entries))
+            madam_step_group_kernel[grid](
+                metadata,
+                lr, beta, eps, g_bound, bias_corr,
+                maximize, use_pow,
+                BLOCK=block, num_warps=4,
+            )
+        return exp_avg_sqs
 
 
     @triton.jit
@@ -3244,5 +3910,99 @@ def register_triton_ops(
         )
 
         return exp_avg, exp_avg_sq, max_exp_avg_sq
+
+
+    @triton.jit
+    def adam_step_group_kernel(
+        meta_ptr,
+        lr_ptr, beta1_ptr, beta2_ptr, eps_ptr, weight_decay_ptr,
+        bias_corr1_ptr, bias_corr2_ptr,
+        MAXIMIZE: tl.constexpr, AMSGRAD: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        block_id = tl.program_id(0)
+        tensor_id = tl.program_id(1)
+        meta_base = tensor_id * 6
+        p_ptr = tl.load(meta_ptr + meta_base).to(tl.pointer_type(tl_int_dtype))
+        g_ptr = tl.load(meta_ptr + meta_base + 1).to(tl.pointer_type(tl_int_dtype))
+        m_ptr = tl.load(meta_ptr + meta_base + 2).to(tl.pointer_type(tl_int_dtype))
+        v_ptr = tl.load(meta_ptr + meta_base + 3).to(tl.pointer_type(tl_int_dtype))
+        vhat_ptr = tl.load(meta_ptr + meta_base + 4).to(tl.pointer_type(tl_int_dtype))
+        N = tl.load(meta_ptr + meta_base + 5)
+        offs = block_id * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < N
+
+        p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
+        g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
+        if MAXIMIZE:
+            g = neg(g)
+        weight_decay = tl.load(weight_decay_ptr)
+        if weight_decay != _ZERO:
+            g = add(g, mul(p, tl.cast(weight_decay, tl_int_dtype)))
+
+        beta1 = tl.load(beta1_ptr)
+        beta2 = tl.load(beta2_ptr)
+        m = tl.load(m_ptr + offs, mask=mask, other=_ZERO)
+        v = tl.load(v_ptr + offs, mask=mask, other=_ZERO)
+        m_new = add(
+            mul(m, tl.cast(beta1, tl_int_dtype)),
+            mul(g, sub(tl.cast(_ONE, tl_int_dtype), tl.cast(beta1, tl_int_dtype))),
+        )
+        g2 = mul(g, g)
+        v_new = add(
+            mul(v, tl.cast(beta2, tl_int_dtype)),
+            mul(g2, sub(tl.cast(_ONE, tl_int_dtype), tl.cast(beta2, tl_int_dtype))),
+        )
+        if AMSGRAD:
+            vhat = tl.load(vhat_ptr + offs, mask=mask, other=_ZERO)
+            vhat_new = tl.where(gt(vhat, v_new), vhat, v_new)
+            tl.store(vhat_ptr + offs, vhat_new, mask=mask)
+            v_denom = vhat_new
+        else:
+            v_denom = v_new
+
+        step_size = div(
+            mul(tl.cast(tl.load(lr_ptr), tl_int_dtype), sqrt(tl.cast(tl.load(bias_corr2_ptr), tl_int_dtype))),
+            tl.cast(tl.load(bias_corr1_ptr), tl_int_dtype),
+        )
+        denom = add(sqrt(v_denom), tl.cast(tl.load(eps_ptr), tl_int_dtype))
+        p_new = sub(p, mul(step_size, div(m_new, denom)))
+        tl.store(p_ptr + offs, p_new, mask=mask)
+        tl.store(m_ptr + offs, m_new, mask=mask)
+        tl.store(v_ptr + offs, v_new, mask=mask)
+
+    @dtype_cls.register_op("triton_adam_step_group", backend="triton")
+    def triton_adam_step_group(
+        ops, params, grads, exp_avgs, exp_avg_sqs, max_exp_avg_sqs,
+        lr, beta1, beta2, eps, weight_decay,
+        bias_corr1, bias_corr2, amsgrad, maximize,
+    ):
+        if not params:
+            return exp_avgs, exp_avg_sqs, max_exp_avg_sqs
+        entries = list(zip(params, grads, exp_avgs, exp_avg_sqs, max_exp_avg_sqs))
+        block = 512
+        for bucket_entries in _size_bucket_entries(entries):
+            metadata = torch.tensor(
+                [
+                    [
+                        param.data_ptr(), grad.data_ptr(), exp_avg.data_ptr(),
+                        exp_avg_sq.data_ptr(),
+                        (max_exp_avg_sq if max_exp_avg_sq is not None else param).data_ptr(),
+                        param.numel(),
+                    ]
+                    for param, grad, exp_avg, exp_avg_sq, max_exp_avg_sq in bucket_entries
+                ],
+                dtype=torch.int64, device=params[0].device,
+            )
+            max_size = max(param.numel() for param, _, _, _, _ in bucket_entries)
+            grid = (triton.cdiv(max_size, block), len(bucket_entries))
+            adam_step_group_kernel[grid](
+                metadata,
+                lr, beta1, beta2, eps, weight_decay,
+                bias_corr1, bias_corr2,
+                maximize, amsgrad,
+                BLOCK=block, num_warps=4,
+            )
+        return exp_avgs, exp_avg_sqs, max_exp_avg_sqs
 
     dtype_cls.ops.enable_backend("triton", "cuda")

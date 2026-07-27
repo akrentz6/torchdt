@@ -124,19 +124,26 @@ class TritonSGD(DTOptimizer):
             nesterov = group["nesterov"]
             maximize = group["maximize"]
 
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-
-                state = self.state[p]
-                buf = state.get("momentum_buffer", None)
-
-                new_buf = self.dtype.ops.triton_sgd_step(
-                    p._int, p.grad._int, buf,
-                    lr._int, momentum._int,
-                    dampening._int, weight_decay._int,
-                    nesterov, maximize
-                )
-                state["momentum_buffer"] = new_buf
+            active = [p for p in group["params"] if p.grad is not None]
+            if not active:
+                continue
+            states = [self.state[p] for p in active]
+            buffers = [state.get("momentum_buffer", None) for state in states]
+            use_momentum = bool(momentum != self._zero)
+            new_buffers = self.dtype.ops.triton_sgd_step_group(
+                [p._int for p in active],
+                [p.grad._int for p in active],
+                [buffer._int if buffer is not None else None for buffer in buffers],
+                lr._int,
+                momentum._int,
+                dampening._int,
+                weight_decay._int,
+                nesterov,
+                maximize,
+                use_momentum,
+            )
+            for state, new_buffer in zip(states, new_buffers):
+                if new_buffer is not None:
+                    state["momentum_buffer"] = self.dtype(new_buffer, internal=True)
 
         return loss

@@ -152,43 +152,44 @@ class TritonAdam(DTOptimizer):
             amsgrad = group["amsgrad"]
             maximize = group["maximize"]
 
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-
-                grad = p.grad
+            active = [p for p in group["params"] if p.grad is not None]
+            step_groups = {}
+            for p in active:
                 state = self.state[p]
-
                 if len(state) == 0:
-                    # First time we see this parameter
                     state["step"] = 0
-                    state["exp_avg"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)._int
-                    state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)._int
+                    state["exp_avg"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)
+                    state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)
                     if amsgrad:
-                        state["max_exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)._int
-
+                        state["max_exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)
                 step = state["step"] + 1
-                step_value = self.encoded_step(step, step_cache)
-                exp_avg = state["exp_avg"]
-                exp_avg_sq = state["exp_avg_sq"]
-                max_exp_avg_sq = state.get("max_exp_avg_sq", None)
+                step_groups.setdefault(step, []).append(p)
 
+            for step, params in step_groups.items():
+                step_value = self.encoded_step(step, step_cache)
                 bias_corr1 = self._one - (beta1 ** step_value)
                 bias_corr2 = self._one - (beta2 ** step_value)
-
-                exp_avg, exp_avg_sq, max_exp_avg_sq = self.dtype.ops.triton_adam_step(
-                    p._int, grad._int,
-                    exp_avg, exp_avg_sq, max_exp_avg_sq,
-                    lr._int, beta1._int, beta2._int,
-                    eps._int, weight_decay._int,
-                    bias_corr1._int, bias_corr2._int,
-                    amsgrad, maximize,
+                states = [self.state[p] for p in params]
+                exp_avgs = [state["exp_avg"]._int for state in states]
+                exp_avg_sqs = [state["exp_avg_sq"]._int for state in states]
+                max_exp_avg_sqs = [state["max_exp_avg_sq"]._int if amsgrad else None for state in states]
+                self.dtype.ops.triton_adam_step_group(
+                    [p._int for p in params],
+                    [p.grad._int for p in params],
+                    exp_avgs,
+                    exp_avg_sqs,
+                    max_exp_avg_sqs,
+                    lr._int,
+                    beta1._int,
+                    beta2._int,
+                    eps._int,
+                    weight_decay._int,
+                    bias_corr1._int,
+                    bias_corr2._int,
+                    amsgrad,
+                    maximize,
                 )
-
-                state["exp_avg"] = exp_avg
-                state["exp_avg_sq"] = exp_avg_sq
-                state["step"] = step
-                if amsgrad:
-                    state["max_exp_avg_sq"] = max_exp_avg_sq
+                for state in states:
+                    state["step"] = step
 
         return loss

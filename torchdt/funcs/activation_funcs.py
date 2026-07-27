@@ -70,7 +70,7 @@ def dt_softmin(input, dim=None, *, out=None):
 
 @DType.register_func(torch.nn.functional.softmax, torch.Tensor.softmax,
                      cast=("input",))
-def dt_softmax(input, dim=None, *, out=None):
+def dt_softmax(input, dim=None, _stacklevel=3, dtype=None, *, out=None):
     result = DTSoftmaxFunction.apply(input, dim)
 
     if out is not None:

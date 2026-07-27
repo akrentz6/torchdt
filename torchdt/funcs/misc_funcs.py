@@ -22,7 +22,9 @@ from torchdt.ops.misc_ops import (
 
 @DType.register_func(torch.broadcast_to, torch.Tensor.broadcast_to, torch.Tensor.expand,
                      cast=("input",))
-def dt_broadcast_to(input, shape):
+def dt_broadcast_to(input, *shape):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list, torch.Size)):
+        shape = shape[0]
     return DTBroadcastToFunction.apply(input, shape)
 
 @DType.register_func(torch.clone, torch.Tensor.clone,

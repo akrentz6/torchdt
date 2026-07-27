@@ -147,33 +147,36 @@ class TritonMadam(DTOptimizer):
             use_pow = group["use_pow"]
             maximize = group["maximize"]
 
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-
-                grad = p.grad
+            active = [p for p in group["params"] if p.grad is not None]
+            step_groups = {}
+            for p in active:
                 state = self.state[p]
-
                 if len(state) == 0:
                     rms = torch.sqrt(torch.mean(p * p))
                     state["max"] = p_scale * rms
                     state["step"] = 0
-                    state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)._int
-
-                max = state["max"]
+                    state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.dtype, device=self.device)
                 step = state["step"] + 1
+                step_groups.setdefault(step, []).append(p)
+
+            for step, params in step_groups.items():
                 step_value = self.encoded_step(step, step_cache)
-                exp_avg_sq = state["exp_avg_sq"]
-
                 bias_corr = self._one - beta ** step_value
-                new_exp_avg_sq = self.dtype.ops.triton_madam_step(
-                    p._int, grad._int, exp_avg_sq,
-                    lr._int, beta._int, eps._int,
-                    g_bound._int, max._int, bias_corr._int,
-                    use_pow, maximize,
+                states = [self.state[p] for p in params]
+                self.dtype.ops.triton_madam_step_group(
+                    [p._int for p in params],
+                    [p.grad._int for p in params],
+                    [state["exp_avg_sq"]._int for state in states],
+                    [state["max"]._int for state in states],
+                    lr._int,
+                    beta._int,
+                    eps._int,
+                    g_bound._int,
+                    bias_corr._int,
+                    use_pow,
+                    maximize,
                 )
-
-                state["step"] = step
-                state["exp_avg_sq"] = new_exp_avg_sq
+                for state in states:
+                    state["step"] = step
 
         return loss
