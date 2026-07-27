@@ -63,6 +63,6 @@ def register_triton_ops(
     accumulator_ops: Optional[TritonAccumulatorOps] = None,
 ) -> None:
     """Register generic Triton kernels for a dtype."""
-    from ._triton_ops_impl import register_triton_ops as _register_triton_ops
+    from torchdt.ops._triton import register_triton_ops as _register_triton_ops
 
     return _register_triton_ops(dtype_cls, scalar_ops, accumulator_ops)
