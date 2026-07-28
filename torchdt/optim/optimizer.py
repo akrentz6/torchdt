@@ -3,17 +3,30 @@ from torchdt import DType
 
 class DTOptimizer(torch.optim.Optimizer):
 
-    def __init__(self, dtype, device, params, defaults):
+    def __init__(self, dtype, params, defaults):
         if not issubclass(dtype, DType):
             raise ValueError("dtype must be a subclass of DType.")
         self.dtype = dtype
-        self.device = device
         super().__init__(params, defaults)
+
+        devices = {
+            param.device
+            for group in self.param_groups
+            for param in group["params"]
+        }
+        if len(devices) != 1:
+            device_names = ", ".join(sorted(map(str, devices))) or "none"
+            raise ValueError(
+                "DTOptimizer parameters must use exactly one device, got "
+                f"{device_names}."
+            )
+        self.device = next(iter(devices))
+
         # These scalars are shared by validation and every parameter update.
         # Constructing native scalar tensors in the inner loops would force the
         # dtype interception path to encode them again for every parameter.
-        self._zero = dtype(0, device=device)
-        self._one = dtype(1, device=device)
+        self._zero = dtype(0, device=self.device)
+        self._one = dtype(1, device=self.device)
 
     def step(self, closure=None):
         raise NotImplementedError("This method should be implemented by subclasses.")

@@ -37,70 +37,6 @@ def register_ops(context):
     can_register_sign = context.can_register_sign
 
     @triton.jit
-    def sgd_step_kernel(
-        p_ptr, g_ptr, buf_ptr,
-        lr_ptr, momentum_ptr, dampening_ptr, weight_decay_ptr,
-        N,
-        MAXIMIZE: tl.constexpr, NESTEROV: tl.constexpr,
-        FIRST_MOMENTUM: tl.constexpr, BLOCK: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK + tl.arange(0, BLOCK)
-        mask = offs < N
-
-        p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
-        g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
-        lr = tl.load(lr_ptr)
-        momentum = tl.load(momentum_ptr)
-        dampening = tl.load(dampening_ptr)
-        weight_decay = tl.load(weight_decay_ptr)
-
-        if MAXIMIZE:
-            g = neg(g)
-
-        if weight_decay != _ZERO:
-            g = add(g, mul(p, tl.cast(weight_decay, tl_int_dtype)))
-
-        if momentum != _ZERO:
-            if FIRST_MOMENTUM:
-                buf_new = g
-            else:
-                buf = tl.load(buf_ptr + offs, mask=mask, other=_ZERO)
-                buf_new = add(mul(buf, tl.cast(momentum, tl_int_dtype)), mul(g, sub(tl.cast(_ONE, tl_int_dtype), tl.cast(dampening, tl_int_dtype))))
-
-            tl.store(buf_ptr + offs, buf_new, mask=mask)
-
-            if NESTEROV:
-                g = add(g, mul(buf_new, tl.cast(momentum, tl_int_dtype)))
-            else:
-                g = buf_new
-
-        p_new = sub(p, mul(g, tl.cast(lr, tl_int_dtype)))
-        tl.store(p_ptr + offs, p_new, mask=mask)
-
-    @dtype_cls.register_op("triton_sgd_step", backend="triton")
-    def triton_sgd_step(ops, p, grad, buf, lr, momentum, dampening, weight_decay, nesterov, maximize):
-        N = p.numel()
-        BLOCK = 1024
-        grid = (triton.cdiv(N, BLOCK),)
-
-        first_mom = False
-        if buf is None:
-            buf = torch.empty(p.shape, dtype=p.dtype, device=p.device)
-            first_mom = True
-
-        sgd_step_kernel[grid](
-            p, grad, buf,
-            lr, momentum, dampening, weight_decay,
-            N,
-            maximize, nesterov,
-            first_mom, BLOCK
-        )
-
-        return buf
-
-
-    @triton.jit
     def sgd_step_group_kernel(
         meta_ptr,
         lr_ptr, momentum_ptr, dampening_ptr, weight_decay_ptr,
@@ -154,8 +90,8 @@ def register_ops(context):
             buckets.setdefault(bucket, []).append(entry)
         return buckets.values()
 
-    @dtype_cls.register_op("triton_sgd_step_group", backend="triton")
-    def triton_sgd_step_group(
+    @dtype_cls.register_op("sgd_step", backend="triton")
+    def sgd_step(
         ops, params, grads, bufs,
         lr, momentum, dampening, weight_decay, nesterov, maximize, use_momentum,
     ):
@@ -190,71 +126,6 @@ def register_ops(context):
                 BLOCK=block, num_warps=4,
             )
         return outputs
-
-
-    @triton.jit
-    def madam_step_kernel(
-        p_ptr, g_ptr, exp_avg_sq_ptr,
-        lr_ptr, beta_ptr, eps_ptr,
-        g_bound_ptr, max_ptr, bias_corr_ptr,
-        N,
-        MAXIMIZE: tl.constexpr, USE_POW: tl.constexpr,
-        BLOCK: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK + tl.arange(0, BLOCK)
-        mask = offs < N
-
-        p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
-        g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
-        v = tl.load(exp_avg_sq_ptr + offs, mask=mask, other=_ZERO)
-        lr = tl.load(lr_ptr)
-        beta = tl.load(beta_ptr)
-        eps = tl.load(eps_ptr)
-        g_bound = tl.load(g_bound_ptr)
-        max = tl.load(max_ptr)
-        bias_corr = tl.load(bias_corr_ptr)
-
-        g2 = mul(g, g)
-        v_new = add(
-            mul(tl.cast(beta, tl_int_dtype), v),
-            mul(sub(tl.cast(_ONE, tl_int_dtype), tl.cast(beta, tl_int_dtype)), g2)
-        )
-        tl.store(exp_avg_sq_ptr + offs, v_new, mask=mask)
-
-        corr = add(div(v_new, tl.cast(bias_corr, tl_int_dtype)), tl.cast(eps, tl_int_dtype))
-        denom = sqrt(corr)
-        g_normed = div(g, denom)
-
-        g_clipped = clamp(g_normed, neg(tl.cast(g_bound, tl_int_dtype)), tl.cast(g_bound, tl_int_dtype))
-        delta = mul(mul(tl.cast(lr, tl_int_dtype), g_clipped), sign(p))
-
-        if not MAXIMIZE:
-            delta = neg(delta)
-
-        if USE_POW:
-            mul_update = mul(p, exp(delta))
-        else:
-            mul_update = mul(p, add(tl.cast(_ONE, tl_int_dtype), delta))
-
-        p_new = clamp(mul_update, neg(tl.cast(max, tl_int_dtype)), tl.cast(max, tl_int_dtype))
-        tl.store(p_ptr + offs, p_new, mask=mask)
-
-    @dtype_cls.register_op("triton_madam_step", backend="triton")
-    def triton_madam_step(ops, p, grad, exp_avg_sq, lr, beta, eps, g_bound, max, bias_corr, use_pow, maximize):
-        N = p.numel()
-        BLOCK = 1024
-        grid = (triton.cdiv(N, BLOCK),)
-
-        madam_step_kernel[grid](
-            p, grad, exp_avg_sq,
-            lr, beta, eps,
-            g_bound, max, bias_corr,
-            N,
-            maximize, use_pow,
-            BLOCK=BLOCK,
-        )
-        return exp_avg_sq
 
 
     @triton.jit
@@ -308,8 +179,8 @@ def register_ops(context):
         )
         tl.store(p_ptr + offs, updated, mask=mask)
 
-    @dtype_cls.register_op("triton_madam_step_group", backend="triton")
-    def triton_madam_step_group(
+    @dtype_cls.register_op("madam_step", backend="triton")
+    def madam_step(
         ops, params, grads, exp_avg_sqs, maxima,
         lr, beta, eps, g_bound, bias_corr, use_pow, maximize,
     ):
@@ -337,94 +208,6 @@ def register_ops(context):
                 BLOCK=block, num_warps=4,
             )
         return exp_avg_sqs
-
-
-    @triton.jit
-    def adam_step_kernel(
-        p_ptr, g_ptr,
-        m_ptr, v_ptr, vhat_ptr,
-        lr_ptr, beta1_ptr, beta2_ptr, eps_ptr, weight_decay_ptr,
-        bias_corr1_ptr, bias_corr2_ptr,
-        N,
-        MAXIMIZE: tl.constexpr, AMSGRAD: tl.constexpr,
-        BLOCK: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK + tl.arange(0, BLOCK)
-        mask = offs < N
-
-        p = tl.load(p_ptr + offs, mask=mask, other=_ZERO)
-        g = tl.load(g_ptr + offs, mask=mask, other=_ZERO)
-        lr = tl.load(lr_ptr)
-        beta1 = tl.load(beta1_ptr)
-        beta2 = tl.load(beta2_ptr)
-        eps = tl.load(eps_ptr)
-        weight_decay = tl.load(weight_decay_ptr)
-        bias_corr1 = tl.load(bias_corr1_ptr)
-        bias_corr2 = tl.load(bias_corr2_ptr)
-
-        if MAXIMIZE:
-            g = neg(g)
-
-        if weight_decay != _ZERO:
-            g = add(g, mul(p, tl.cast(weight_decay, tl_int_dtype)))
-
-        m = tl.load(m_ptr + offs, mask=mask, other=_ZERO)
-        v = tl.load(v_ptr + offs, mask=mask, other=_ZERO)
-
-        m_new = add(
-            mul(m, tl.cast(beta1, tl_int_dtype)),
-            mul(g, sub(tl.cast(_ONE, tl_int_dtype), tl.cast(beta1, tl_int_dtype)))
-        )
-
-        g2 = mul(g, g)
-        v_new = add(
-            mul(v, tl.cast(beta2, tl_int_dtype)),
-            mul(g2, sub(tl.cast(_ONE, tl_int_dtype), tl.cast(beta2, tl_int_dtype)))
-        )
-
-        if AMSGRAD:
-            vhat = tl.load(vhat_ptr + offs, mask=mask, other=_ZERO)
-            vhat_new = tl.where(gt(vhat, v_new), vhat, v_new)
-            tl.store(vhat_ptr + offs, vhat_new, mask=mask)
-            v_denom = vhat_new
-
-        else:
-            v_denom = v_new
-
-        step_size = div(
-            mul(tl.cast(lr, tl_int_dtype), sqrt(tl.cast(bias_corr2, tl_int_dtype))),
-            tl.cast(bias_corr1, tl_int_dtype)
-        )
-
-        denom = add(sqrt(v_denom), tl.cast(eps, tl_int_dtype))
-        step_update = mul(step_size, div(m_new, denom))
-        p_new = sub(p, step_update)
-
-        tl.store(p_ptr + offs, p_new, mask=mask)
-        tl.store(m_ptr + offs, m_new, mask=mask)
-        tl.store(v_ptr + offs, v_new, mask=mask)
-
-    @dtype_cls.register_op("triton_adam_step", backend="triton")
-    def triton_adam_step(ops,
-                        p, grad, exp_avg, exp_avg_sq, max_exp_avg_sq,
-                        lr, beta1, beta2, eps, weight_decay,
-                        bias_corr1, bias_corr2, amsgrad, maximize):
-        N = p.numel()
-        BLOCK = 1024
-        grid = (triton.cdiv(N, BLOCK),)
-
-        adam_step_kernel[grid](
-            p, grad,
-            exp_avg, exp_avg_sq, max_exp_avg_sq,
-            lr, beta1, beta2, eps, weight_decay,
-            bias_corr1, bias_corr2,
-            N,
-            maximize, amsgrad,
-            BLOCK=BLOCK,
-        )
-
-        return exp_avg, exp_avg_sq, max_exp_avg_sq
 
 
     @triton.jit
@@ -486,8 +269,8 @@ def register_ops(context):
         tl.store(m_ptr + offs, m_new, mask=mask)
         tl.store(v_ptr + offs, v_new, mask=mask)
 
-    @dtype_cls.register_op("triton_adam_step_group", backend="triton")
-    def triton_adam_step_group(
+    @dtype_cls.register_op("adam_step", backend="triton")
+    def adam_step(
         ops, params, grads, exp_avgs, exp_avg_sqs, max_exp_avg_sqs,
         lr, beta1, beta2, eps, weight_decay,
         bias_corr1, bias_corr2, amsgrad, maximize,
@@ -519,4 +302,3 @@ def register_ops(context):
                 BLOCK=block, num_warps=4,
             )
         return exp_avgs, exp_avg_sqs, max_exp_avg_sqs
-

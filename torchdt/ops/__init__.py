@@ -17,6 +17,7 @@ from . import activation_ops
 from . import misc_ops
 from . import loss_ops
 from . import layer_ops
+from . import optimizer_ops
 
 __all__ = [
     "OpsBase",
