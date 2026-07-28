@@ -3,11 +3,15 @@ import torch.optim.lr_scheduler as lr_sched
 from torchdt.optim import DTOptimizer
 from collections import Counter
 from bisect import bisect_right
+import math
 import warnings
 
 __all__ = [
     "StepLR",
     "MultiStepLR",
+    "LinearLR",
+    "CosineAnnealingLR",
+    "SequentialLR",
     "ReduceLROnPlateau",
 ]
 
@@ -97,6 +101,236 @@ class MultiStepLR(lr_sched.LRScheduler):
             )
             for base_lr in self.base_lrs
         ]
+
+class LinearLR(lr_sched.LRScheduler):
+
+    def __init__(
+        self,
+        optimizer,
+        start_factor = 1.0 / 3,
+        end_factor = 1.0,
+        total_iters = 5,
+        last_epoch = -1,
+    ):
+        if start_factor > 1.0 or start_factor <= 0:
+            raise ValueError(
+                "Starting multiplicative factor expected to be greater than 0 "
+                "and less or equal to 1."
+            )
+        if end_factor > 1.0 or end_factor < 0:
+            raise ValueError(
+                "Ending multiplicative factor expected to be between 0 and 1."
+            )
+
+        self.start_factor = start_factor
+        self.end_factor = end_factor
+        self.total_iters = total_iters
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        _warn_get_lr_called_within_step(self)
+
+        if self.last_epoch == 0:
+            return [
+                group["lr"] * self.optimizer.dtype(
+                    self.start_factor,
+                    device=group["lr"].device,
+                )
+                for group in self.optimizer.param_groups
+            ]
+
+        if getattr(self, "_is_initial", False) or self.last_epoch > self.total_iters:
+            return _param_groups_val_list(self.optimizer, "lr")
+
+        factor = 1.0 + (
+            (self.end_factor - self.start_factor)
+            / (
+                self.total_iters * self.start_factor
+                + (self.last_epoch - 1) * (self.end_factor - self.start_factor)
+            )
+        )
+        return [
+            group["lr"] * self.optimizer.dtype(factor, device=group["lr"].device)
+            for group in self.optimizer.param_groups
+        ]
+
+    def _get_closed_form_lr(self):
+        factor = (
+            self.start_factor
+            + (self.end_factor - self.start_factor)
+            * min(self.total_iters, self.last_epoch)
+            / self.total_iters
+        )
+        return [
+            base_lr * self.optimizer.dtype(factor, device=base_lr.device)
+            for base_lr in self.base_lrs
+        ]
+
+class CosineAnnealingLR(lr_sched.LRScheduler):
+
+    def __init__(
+        self,
+        optimizer,
+        T_max,
+        eta_min = 0,
+        last_epoch = -1,
+    ):
+        self.T_max = T_max
+        self.eta_min = eta_min
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        _warn_get_lr_called_within_step(self)
+
+        if self.last_epoch == 0:
+            return _param_groups_val_list(self.optimizer, "lr")
+
+        if self._step_count == 1 and self.last_epoch > 0:
+            factor = (1 + math.cos(self.last_epoch * math.pi / self.T_max)) / 2
+            return [
+                self.optimizer.dtype(self.eta_min, device=group["lr"].device)
+                + (
+                    base_lr
+                    - self.optimizer.dtype(self.eta_min, device=group["lr"].device)
+                ) * self.optimizer.dtype(factor, device=group["lr"].device)
+                for base_lr, group in zip(self.base_lrs, self.optimizer.param_groups)
+            ]
+
+        if (self.last_epoch - 1 - self.T_max) % (2 * self.T_max) == 0:
+            factor = (1 - math.cos(math.pi / self.T_max)) / 2
+            return [
+                group["lr"]
+                + (
+                    base_lr
+                    - self.optimizer.dtype(self.eta_min, device=group["lr"].device)
+                ) * self.optimizer.dtype(factor, device=group["lr"].device)
+                for base_lr, group in zip(self.base_lrs, self.optimizer.param_groups)
+            ]
+
+        factor = (
+            (1 + math.cos(math.pi * self.last_epoch / self.T_max))
+            / (1 + math.cos(math.pi * (self.last_epoch - 1) / self.T_max))
+        )
+        return [
+            (
+                group["lr"]
+                - self.optimizer.dtype(self.eta_min, device=group["lr"].device)
+            ) * self.optimizer.dtype(factor, device=group["lr"].device)
+            + self.optimizer.dtype(self.eta_min, device=group["lr"].device)
+            for group in self.optimizer.param_groups
+        ]
+
+    def _get_closed_form_lr(self):
+        factor = (1 + math.cos(math.pi * self.last_epoch / self.T_max)) / 2
+        return [
+            self.optimizer.dtype(self.eta_min, device=base_lr.device)
+            + (
+                base_lr
+                - self.optimizer.dtype(self.eta_min, device=base_lr.device)
+            ) * self.optimizer.dtype(factor, device=base_lr.device)
+            for base_lr in self.base_lrs
+        ]
+
+class SequentialLR(lr_sched.LRScheduler):
+
+    def __init__(
+        self,
+        optimizer,
+        schedulers,
+        milestones,
+        last_epoch = -1,
+    ):
+        if len(schedulers) < 1:
+            raise ValueError(
+                f"{self.__class__.__name__} expects at least one scheduler, "
+                "but got no scheduler."
+            )
+
+        for scheduler_idx, scheduler in enumerate(schedulers):
+            if not hasattr(scheduler, "optimizer"):
+                raise TypeError(
+                    f"{self.__class__.__name__} at index {scheduler_idx} should "
+                    "have `optimizer` as its attribute."
+                )
+            if isinstance(
+                scheduler,
+                (ReduceLROnPlateau, lr_sched.ReduceLROnPlateau),
+            ):
+                raise ValueError(
+                    f"{self.__class__.__name__} does not support "
+                    "`ReduceLROnPlateau` because it requires metrics when stepping."
+                )
+            if optimizer != scheduler.optimizer:
+                raise ValueError(
+                    f"{self.__class__.__name__} expects every scheduler to use "
+                    "the same optimizer."
+                )
+
+        if len(milestones) != len(schedulers) - 1:
+            raise ValueError(
+                "SequentialLR expects one fewer milestone than schedulers, but "
+                f"got {len(milestones)} milestones and {len(schedulers)} schedulers."
+            )
+
+        self._schedulers = schedulers
+        self._milestones = milestones
+        self.last_epoch = last_epoch + 1
+        self.optimizer = optimizer
+
+        for group in self.optimizer.param_groups:
+            initial_lr = group["initial_lr"]
+            group["lr"] = (
+                initial_lr.clone()
+                if isinstance(initial_lr, torch.Tensor)
+                else initial_lr
+            )
+
+        self.recursive_undo()
+        self._schedulers[0]._initial_step()
+        self._last_lr = self._schedulers[0].get_last_lr()
+
+    def recursive_undo(self, scheduler=None):
+        scheduler = self if scheduler is None else scheduler
+
+        if hasattr(scheduler, "_schedulers"):
+            for child_scheduler in scheduler._schedulers:
+                self.recursive_undo(child_scheduler)
+        elif hasattr(scheduler, "last_epoch"):
+            scheduler.last_epoch -= 1
+
+    def step(self):
+        self.last_epoch += 1
+        idx = bisect_right(self._milestones, self.last_epoch)
+        scheduler = self._schedulers[idx]
+
+        if idx > 0 and self._milestones[idx - 1] == self.last_epoch:
+            scheduler.step(0)
+        else:
+            scheduler.step()
+
+        self._last_lr = scheduler.get_last_lr()
+
+    def state_dict(self):
+        state_dict = {
+            key: value
+            for key, value in self.__dict__.items()
+            if key not in ("optimizer", "_schedulers")
+        }
+        state_dict["_schedulers"] = [
+            scheduler.state_dict() for scheduler in self._schedulers
+        ]
+        return state_dict
+
+    def load_state_dict(self, state_dict):
+        scheduler_states = state_dict.pop("_schedulers")
+        self.__dict__.update(state_dict)
+        state_dict["_schedulers"] = scheduler_states
+
+        for scheduler, scheduler_state in zip(
+            self._schedulers,
+            scheduler_states,
+        ):
+            scheduler.load_state_dict(scheduler_state)
 
 class ReduceLROnPlateau(lr_sched.LRScheduler):
 
