@@ -71,6 +71,15 @@ def make_lns_triton_scalar_ops(
 
     tl_int_dtype = _lns_triton_int_dtype(bitwidth, tl)
 
+    # log_base_value = torch.log(base).item()
+    # log2_base_value = torch.log2(base).item()
+    # # limit to lower precision for boundary cases
+    # use_fast_from_float = abs(1.0 / log2_base_value) <= 512
+
+    # LOG_BASE = tl.constexpr(log_base_value)
+    # LOG2_BASE = tl.constexpr(log2_base_value)
+    # NAN_VALUE = tl.constexpr(0)
+
     LOG_BASE = tl.constexpr(torch.log(base).item())
     ZERO = tl.constexpr(zero_value)
     POS_INF = tl.constexpr(pos_inf_value)
@@ -79,6 +88,56 @@ def make_lns_triton_scalar_ops(
     MAX_LOG = tl.constexpr(pos_inf_value >> 1)
     MIN_FINITE_LOG = tl.constexpr((zero_value >> 1) + 1)
     MAX_FINITE_LOG = tl.constexpr((pos_inf_value >> 1) - 1)
+
+    # @triton.jit
+    # def from_float(x):
+    #     abs_x = tl.abs(tl.cast(x, tl.float32))
+    #     bits = tl.cast(abs_x, tl.int32, bitcast=True)
+    #     exponent_bits = (bits >> 23) & 0xff
+    #     subnormal = exponent_bits == 0
+
+    #     normalized = tl.where(subnormal, abs_x * 16777216.0, abs_x)
+    #     normalized_bits = tl.cast(normalized, tl.int32, bitcast=True)
+    #     exponent = ((normalized_bits >> 23) & 0xff) - 127 - tl.where(subnormal, 24, 0)
+    #     mantissa_bits = (normalized_bits & 0x7fffff) | 0x3f800000
+    #     mantissa = tl.cast(mantissa_bits, tl.float32, bitcast=True)
+
+    #     fraction = tl.log2(mantissa) / LOG2_BASE
+    #     lower = tl.floor(fraction)
+    #     boundary = fraction == lower + 0.5
+    #     threshold = tl.exp2(
+    #         (tl.cast(lower, tl.float64) + 0.5) * tl.cast(LOG2_BASE, tl.float64)
+    #     )
+    #     rounded_fraction = tl.where(
+    #         boundary,
+    #         lower + tl.cast(tl.cast(mantissa, tl.float64) >= threshold, tl.float32),
+    #         tl.floor(fraction + 0.5),
+    #     )
+    #     rounded = tl.cast(exponent, tl.float32) / LOG2_BASE + rounded_fraction
+
+    #     sign_bit = tl.cast(x < 0, tl_int_dtype)
+    #     finite_rounded = tl.minimum(
+    #         tl.maximum(rounded, tl.cast(MIN_FINITE_LOG, tl.float32)),
+    #         tl.cast(MAX_FINITE_LOG, tl.float32),
+    #     )
+    #     packed = (tl.cast(finite_rounded, tl_int_dtype) << 1) | sign_bit
+    #     overflow = rounded >= tl.cast(MAX_LOG, tl.float32)
+    #     underflow = rounded <= tl.cast(MIN_LOG, tl.float32)
+    #     inf = tl.where(
+    #         sign_bit == 0,
+    #         tl.cast(POS_INF, tl_int_dtype),
+    #         tl.cast(NEG_INF, tl_int_dtype),
+    #     )
+    #     result = tl.where(
+    #         x == 0.0,
+    #         tl.cast(ZERO, tl_int_dtype),
+    #         tl.where(overflow, inf, tl.where(underflow, tl.cast(ZERO, tl_int_dtype), packed)),
+    #     )
+    #     return tl.where(
+    #         x != x,
+    #         tl.cast(NAN_VALUE, tl_int_dtype),
+    #         tl.where(exponent_bits == 0xff, inf, result),
+    #     )
 
     @triton.jit
     def from_float(x):
@@ -260,6 +319,18 @@ def make_lns_triton_scalar_ops(
         _bump_triton_jit_hash(add, LOG_BASE=LOG_BASE, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
 
     _bump_triton_jit_hash(from_float, LOG_BASE=LOG_BASE, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
+    # _bump_triton_jit_hash(
+    #     from_float,
+    #     LOG_BASE=LOG_BASE,
+    #     LOG2_BASE=LOG2_BASE,
+    #     ZERO=ZERO,
+    #     POS_INF=POS_INF,
+    #     NEG_INF=NEG_INF,
+    #     NAN_VALUE=NAN_VALUE,
+    #     bitwidth=bitwidth,
+    #     use_fast_from_float=use_fast_from_float,
+    # )
+
     _bump_triton_jit_hash(to_float, LOG_BASE=LOG_BASE, ZERO=ZERO, bitwidth=bitwidth)
     _bump_triton_jit_hash(mul, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
     _bump_triton_jit_hash(div, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
