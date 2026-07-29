@@ -115,7 +115,7 @@ def register_ops(context):
             return out
 
         grid = (triton.cdiv(out.numel(), 1024),)
-        from_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
+        from_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024, num_warps=2)
         return out
 
     @triton.jit
@@ -137,7 +137,7 @@ def register_ops(context):
             return out
 
         grid = (triton.cdiv(out.numel(), 1024),)
-        to_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
+        to_float_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024, num_warps=2)
         return out
 
     def _prepare_binary(x, y, out_dtype):
@@ -204,7 +204,7 @@ def register_ops(context):
             return out
 
         grid = (triton.cdiv(out.numel(), 1024),)
-        add_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
+        add_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024, num_warps=2)
         return out
 
     if sub is not None:
@@ -228,7 +228,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            sub_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
+            sub_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     if mul is not None:
@@ -252,7 +252,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            mul_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
+            mul_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     if div is not None:
@@ -276,7 +276,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            div_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
+            div_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     if sqrt is not None:
@@ -299,7 +299,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            sqrt_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
+            sqrt_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     if neg is not None:
@@ -322,7 +322,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            neg_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
+            neg_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     @triton.jit
@@ -344,7 +344,7 @@ def register_ops(context):
             return out
 
         grid = (triton.cdiv(out.numel(), 1024),)
-        exp_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
+        exp_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024, num_warps=2)
         return out
 
     @triton.jit
@@ -366,7 +366,7 @@ def register_ops(context):
             return out
 
         grid = (triton.cdiv(out.numel(), 1024),)
-        log_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
+        log_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024, num_warps=2)
         return out
 
     if can_register_sign:
@@ -389,7 +389,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            sign_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
+            sign_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     if lt is not None and neg is not None:
@@ -413,7 +413,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            abs_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024)
+            abs_kernel[grid](x, out, shape_meta, stride_meta, out.numel(), ndim, contiguous, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     if gt is not None:
@@ -437,7 +437,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            gt_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
+            gt_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     if ge is not None:
@@ -461,7 +461,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            ge_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
+            ge_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     if lt is not None:
@@ -485,7 +485,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            lt_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
+            lt_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     if le is not None:
@@ -509,7 +509,7 @@ def register_ops(context):
                 return out
 
             grid = (triton.cdiv(out.numel(), 1024),)
-            le_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024)
+            le_kernel[grid](x, y, out, shape_meta, x_stride_meta, y_stride_meta, out.numel(), ndim, mode, BLOCK_SIZE=1024, num_warps=2)
             return out
 
     if lt is not None:

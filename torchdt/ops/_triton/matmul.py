@@ -44,6 +44,7 @@ def register_ops(context):
             triton.Config({"BLOCK_M": 16, "BLOCK_N": 32, "BLOCK_K": 8 }, num_warps=2, num_stages=2),
             triton.Config({"BLOCK_M": 32, "BLOCK_N": 16, "BLOCK_K": 8 }, num_warps=2, num_stages=2),
             triton.Config({"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 8 }, num_warps=1, num_stages=2),
+            triton.Config({"BLOCK_M": 16, "BLOCK_N": 32, "BLOCK_K": 4 }, num_warps=2, num_stages=2),
             triton.Config({"BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 4 }, num_warps=4, num_stages=2),
             triton.Config({"BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 16}, num_warps=4, num_stages=2),
         ],
