@@ -10,28 +10,13 @@ def _bump_triton_jit_hash(fn, **values):
     return fn
 
 
-def _lns_triton_bit_config(bitwidth: int, tl):
+def _lns_triton_int_dtype(bitwidth: int, tl):
     if bitwidth == 16:
-        return (
-            tl.int16,
-            tl.constexpr("=h, l"),
-            tl.constexpr("ld.global.b16 $0, [$1];"),
-            tl.constexpr(2),
-        )
+        return tl.int16
     if bitwidth == 32:
-        return (
-            tl.int32,
-            tl.constexpr("=r, l"),
-            tl.constexpr("ld.global.b32 $0, [$1];"),
-            tl.constexpr(4),
-        )
+        return tl.int32
     if bitwidth == 64:
-        return (
-            tl.int64,
-            tl.constexpr("=l, l"),
-            tl.constexpr("ld.global.b64 $0, [$1];"),
-            tl.constexpr(8),
-        )
+        return tl.int64
     raise ValueError(f"LNS Triton backend does not support bitwidth {bitwidth}.")
 
 
@@ -84,7 +69,7 @@ def make_lns_triton_scalar_ops(
 ) -> TritonScalarOps:
     triton, tl = require_triton()
 
-    tl_int_dtype, asm_output_constraint, asm_load, bytes_per_value = _lns_triton_bit_config(bitwidth, tl)
+    tl_int_dtype = _lns_triton_int_dtype(bitwidth, tl)
 
     LOG_BASE = tl.constexpr(torch.log(base).item())
     ZERO = tl.constexpr(zero_value)
@@ -238,16 +223,8 @@ def make_lns_triton_scalar_ops(
             s = ((x ^ y) & 1).to(tl.int64)
 
             idx = (s + 1) * tab_sbdb_size + tl.where(z < tab_ez_item, tab_ez_item, tl.where(z == 0, -1, z))
-            abs_ptr = tab_sbdb_data_ptr + idx * bytes_per_value
-
-            sbdb = tl.inline_asm_elementwise(
-                "{{\n   " + asm_load + "\n}}",
-                asm_output_constraint,
-                [abs_ptr],
-                dtype=tl_int_dtype,
-                is_pure=True,
-                pack=1,
-            )
+            table_ptr = tl.cast(tab_sbdb_data_ptr, tl.pointer_type(tl_int_dtype))
+            sbdb = tl.load(table_ptr + idx)
 
             result = checked_add(max_operand, sbdb, max_operand & 1)
             return tl.where(x == ZERO, y, tl.where(y == ZERO, x, tl.where(x == neg(y), tl.cast(ZERO, tl_int_dtype), result)))

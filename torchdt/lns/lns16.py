@@ -50,7 +50,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
         from dataclasses import replace
 
         from torchdt.ops import TritonAccumulatorOps, register_triton_ops, require_triton
-        from ._triton import _bump_triton_jit_hash, _lns_triton_bit_config, make_lns_triton_scalar_ops
+        from ._triton import _bump_triton_jit_hash, _lns_triton_int_dtype, make_lns_triton_scalar_ops
 
         if accumulator:
             from . import lns32
@@ -202,21 +202,14 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
 
         if tab_exp is not None:
 
-            tl_int_dtype, asm_output_constraint, asm_load, bytes_per_value = _lns_triton_bit_config(16, tl)
+            tl_int_dtype = _lns_triton_int_dtype(16, tl)
             EXP_TABLE_DATA_PTR = tl.constexpr(tab_exp.data_ptr())
 
             @triton.jit
             def exp(x):
                 idx = tl.cast(x, tl.int64) - tl.cast(VALUE_ZERO, tl.int64)
-                abs_ptr = EXP_TABLE_DATA_PTR + idx * bytes_per_value
-                return tl.inline_asm_elementwise(
-                    "{{\n   " + asm_load + "\n}}",
-                    asm_output_constraint,
-                    [abs_ptr],
-                    dtype=tl_int_dtype,
-                    is_pure=True,
-                    pack=1,
-                )
+                table_ptr = tl.cast(EXP_TABLE_DATA_PTR, tl.pointer_type(tl_int_dtype))
+                return tl.load(table_ptr + idx)
 
             _bump_triton_jit_hash(
                 exp,
