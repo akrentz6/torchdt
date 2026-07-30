@@ -426,6 +426,20 @@ class DType(Tensor):
     def to_float(self):
         return self.ops.to_float(self._int)
 
+    def copy_(self, src, non_blocking=False):
+        if not isinstance(src, Tensor):
+            raise TypeError("copy_(): argument 'src' must be Tensor")
+
+        if type(src) is type(self):
+            encoded = src._int
+        else:
+            values = src.to_float() if isinstance(src, DType) else src
+            values = values.to(dtype=torch.float32, device=self.device)
+            encoded = self.ops.direct_for_device(self.device).from_float(values)
+
+        self._int.copy_(encoded, non_blocking=non_blocking)
+        return self
+
     def __float__(self):
         return self.ops.scalar_to_float(self._int)
 
