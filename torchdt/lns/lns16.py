@@ -46,24 +46,43 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
                 return tab_exp[idx]
 
     @classmethod
-    def enable_triton(cls, accumulator: bool = False):
+    def enable_triton(cls, accumulator: bool | str = False):
         from dataclasses import replace
 
         from torchdt.ops import TritonAccumulatorOps, register_triton_ops, require_triton
-        from ._triton import _bump_triton_jit_hash, _lns_triton_int_dtype, make_lns_triton_scalar_ops
+        from ._triton import (
+            _bump_triton_jit_hash,
+            _lns_triton_int_dtype,
+            make_lns_triton_scalar_ops,
+            make_lpvip_triton_add,
+        )
 
-        if accumulator:
+        if accumulator is False:
+            accumulator_mode = "native"
+        elif accumulator is True or accumulator == "lns32":
+            accumulator_mode = "lns32"
+        elif accumulator == "lpvip":
+            accumulator_mode = "lpvip"
+        else:
+            raise ValueError(
+                "accumulator must be False, True, 'lns32', or 'lpvip'."
+            )
+
+        use_accumulator = accumulator_mode != "native"
+        if use_accumulator:
             from . import lns32
 
         fingerprint = (
             precision,
-            accumulator,
+            accumulator_mode,
             tab_sbdb.data_ptr() if tab_sbdb is not None else None,
             tab_ez.data_ptr() if tab_ez is not None else None,
             tab_exp.data_ptr() if tab_exp is not None else None,
-            lns32.precision if accumulator else None,
-            lns32.tab_sbdb.data_ptr() if accumulator and lns32.tab_sbdb is not None else None,
-            lns32.tab_ez.data_ptr() if accumulator and lns32.tab_ez is not None else None,
+            lns32.precision if use_accumulator else None,
+            lns32.tab_sbdb.data_ptr()
+            if use_accumulator and lns32.tab_sbdb is not None else None,
+            lns32.tab_ez.data_ptr()
+            if use_accumulator and lns32.tab_ez is not None else None,
         )
         if getattr(cls.ops, "_triton_fingerprint", None) == fingerprint:
             return
@@ -80,7 +99,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
         VALUE_MAX_FINITE_LOG = tl.constexpr(MAX_FINITE_LOG)
 
         accumulator_ops = None
-        if accumulator:
+        if use_accumulator:
             ACC_PRECISION = tl.constexpr(lns32.precision)
             ACC_ZERO = tl.constexpr(lns32.ZERO.item())
             ACC_POS_INF = tl.constexpr(lns32.POS_INF.item())
@@ -91,30 +110,37 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
             ACC_MAX_FINITE_LOG = tl.constexpr(lns32.MAX_FINITE_LOG)
             TO_ACC_SHIFT = tl.constexpr(lns32.precision - precision)
             FROM_ACC_SHIFT = tl.constexpr(precision - lns32.precision)
+            # Every finite LNS16 log fits LNS32 after an upshift of at most 16,
+            # so this common embedding cannot overflow or underflow.
+            EXACT_TO_ACC = tl.constexpr(0 <= lns32.precision - precision <= 16)
 
             @triton.jit
             def to_lns32(x):
                 log_x = tl.cast(x >> 1, tl.int32)
                 sign_bit = tl.cast(x & 1, tl.int32)
-                if TO_ACC_SHIFT > 0:
+                if EXACT_TO_ACC:
                     rounded = log_x << TO_ACC_SHIFT
-                elif TO_ACC_SHIFT < 0:
-                    downshift = -TO_ACC_SHIFT
-                    half = 1 << (downshift - 1)
-                    magnitude = tl.abs(log_x)
-                    rounded_magnitude = (magnitude + half) >> downshift
-                    rounded = tl.where(log_x < 0, -rounded_magnitude, rounded_magnitude)
+                    converted = (rounded << 1) | sign_bit
                 else:
-                    rounded = log_x
-                finite_rounded = tl.minimum(
-                    tl.maximum(rounded, tl.cast(ACC_MIN_FINITE_LOG, tl.int32)),
-                    tl.cast(ACC_MAX_FINITE_LOG, tl.int32),
-                )
-                packed = (tl.cast(finite_rounded, tl.int32) << 1) | sign_bit
-                overflow = rounded >= tl.cast(ACC_MAX_LOG, tl.int32)
-                underflow = rounded <= tl.cast(ACC_MIN_LOG, tl.int32)
-                inf = tl.where(sign_bit == 0, tl.cast(ACC_POS_INF, tl.int32), tl.cast(ACC_NEG_INF, tl.int32))
-                converted = tl.where(overflow, inf, tl.where(underflow, tl.cast(ACC_ZERO, tl.int32), packed))
+                    if TO_ACC_SHIFT > 0:
+                        rounded = log_x << TO_ACC_SHIFT
+                    elif TO_ACC_SHIFT < 0:
+                        downshift = -TO_ACC_SHIFT
+                        half = 1 << (downshift - 1)
+                        magnitude = tl.abs(log_x)
+                        rounded_magnitude = (magnitude + half) >> downshift
+                        rounded = tl.where(log_x < 0, -rounded_magnitude, rounded_magnitude)
+                    else:
+                        rounded = log_x
+                    finite_rounded = tl.minimum(
+                        tl.maximum(rounded, tl.cast(ACC_MIN_FINITE_LOG, tl.int32)),
+                        tl.cast(ACC_MAX_FINITE_LOG, tl.int32),
+                    )
+                    packed = (tl.cast(finite_rounded, tl.int32) << 1) | sign_bit
+                    overflow = rounded >= tl.cast(ACC_MAX_LOG, tl.int32)
+                    underflow = rounded <= tl.cast(ACC_MIN_LOG, tl.int32)
+                    inf = tl.where(sign_bit == 0, tl.cast(ACC_POS_INF, tl.int32), tl.cast(ACC_NEG_INF, tl.int32))
+                    converted = tl.where(overflow, inf, tl.where(underflow, tl.cast(ACC_ZERO, tl.int32), packed))
                 return tl.where(
                     x == VALUE_ZERO,
                     tl.cast(ACC_ZERO, tl.int32),
@@ -159,6 +185,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
                 VALUE_POS_INF=VALUE_POS_INF,
                 VALUE_NEG_INF=VALUE_NEG_INF,
                 ACC_PRECISION=ACC_PRECISION,
+                EXACT_TO_ACC=EXACT_TO_ACC,
                 ACC_ZERO=ACC_ZERO,
                 ACC_POS_INF=ACC_POS_INF,
                 ACC_NEG_INF=ACC_NEG_INF,
@@ -175,17 +202,31 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
                 ACC_NEG_INF=ACC_NEG_INF,
             )
 
+            accumulator_scalar_ops = make_lns_triton_scalar_ops(
+                bitwidth=32,
+                base=lns32.base,
+                zero_value=lns32.ZERO.item(),
+                pos_inf_value=lns32.POS_INF.item(),
+                neg_inf_value=lns32.NEG_INF.item(),
+                tab_sbdb=lns32.tab_sbdb if accumulator_mode == "lns32" else None,
+                tab_ez=lns32.tab_ez if accumulator_mode == "lns32" else None,
+            )
+            if accumulator_mode == "lpvip":
+                accumulator_scalar_ops = replace(
+                    accumulator_scalar_ops,
+                    add=make_lpvip_triton_add(
+                        precision=lns32.precision,
+                        zero_value=lns32.ZERO.item(),
+                        pos_inf_value=lns32.POS_INF.item(),
+                        neg_inf_value=lns32.NEG_INF.item(),
+                        tab_sbdb=lns32.tab_sbdb,
+                        tab_ez=lns32.tab_ez,
+                    ),
+                )
+
             accumulator_ops = TritonAccumulatorOps(
                 int_dtype=torch.int32,
-                scalar_ops=make_lns_triton_scalar_ops(
-                    bitwidth=32,
-                    base=lns32.base,
-                    zero_value=lns32.ZERO.item(),
-                    pos_inf_value=lns32.POS_INF.item(),
-                    neg_inf_value=lns32.NEG_INF.item(),
-                    tab_sbdb=lns32.tab_sbdb,
-                    tab_ez=lns32.tab_ez,
-                ),
+                scalar_ops=accumulator_scalar_ops,
                 to_accumulator=to_lns32,
                 from_accumulator=from_lns32,
             )

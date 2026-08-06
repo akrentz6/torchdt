@@ -24,6 +24,8 @@ class LNS32(DType, bitwidth=32):
         validate_precision(prec, table)
         precision = prec
         base = lns_base(precision)
+        tab_sbdb = None
+        tab_ez = None
         LNS32.ops.clear_scalar_cache()
 
         if table:
@@ -36,6 +38,8 @@ class LNS32(DType, bitwidth=32):
                 filestem=filestem,
             )
             register_table_add(LNS32, zero=ZERO, tab_sbdb=tab_sbdb, tab_ez=tab_ez)
+        else:
+            LNS32.register_op("add")(lns32_add)
 
     @classmethod
     def enable_triton(cls):

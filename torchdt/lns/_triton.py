@@ -1,4 +1,5 @@
 import hashlib
+import math
 
 import torch
 from torchdt.ops import TritonAccumulatorOps, TritonScalarOps, register_triton_ops, require_triton
@@ -18,6 +19,190 @@ def _lns_triton_int_dtype(bitwidth: int, tl):
     if bitwidth == 64:
         return tl.int64
     raise ValueError(f"LNS Triton backend does not support bitwidth {bitwidth}.")
+
+
+def _lpvip_essential_zero(precision):
+    scale = 1 << precision
+    half_ulp = 0.5 / scale
+    one_minus_power = -math.expm1(-math.log(2.0) * half_ulp)
+    boundary = -math.log2(one_minus_power)
+    return math.floor(scale * boundary)
+
+
+def make_lpvip_triton_add(precision, zero_value, pos_inf_value, neg_inf_value, tab_sbdb=None, tab_ez=None):
+    triton, tl = require_triton()
+    from triton.language.extra import libdevice
+
+    F = tl.constexpr(precision)
+    SCALE = tl.constexpr(1 << precision)
+    FRACTION_MASK = tl.constexpr((1 << precision) - 1)
+    ESSZER = tl.constexpr(_lpvip_essential_zero(precision))
+    LN2 = tl.constexpr(math.log(2.0))
+
+    # Through F25, values remains within int32
+    WORK_INT = tl.int32 if precision <= 25 else tl.int64
+
+    ZERO = tl.constexpr(zero_value)
+    POS_INF = tl.constexpr(pos_inf_value)
+    NEG_INF = tl.constexpr(neg_inf_value)
+    MIN_LOG = tl.constexpr(zero_value >> 1)
+    MAX_LOG = tl.constexpr(pos_inf_value >> 1)
+    MIN_FINITE_LOG = tl.constexpr((zero_value >> 1) + 1)
+    MAX_FINITE_LOG = tl.constexpr((pos_inf_value >> 1) - 1)
+
+    SAME_PRE_LIMIT = tl.constexpr(-(7 * (1 << precision) // 2))
+    SAME_PRE_CAP = tl.constexpr(7 * (1 << precision) // 16)
+    SAME_POST_FAR = tl.constexpr(-3 * (1 << precision))
+    SAME_POST_NEAR = tl.constexpr(-(3 * (1 << precision) // 4))
+    POST_UNIT = tl.constexpr((1 << precision) // 64)
+
+    OPP_PRE_LIMIT = tl.constexpr(-2 * (1 << precision))
+    OPP_PRE_FAR = tl.constexpr(5 * (1 << precision) // 8)
+    OPP_PRE_OFFSET = tl.constexpr(9 * (1 << precision) // 8)
+
+    @triton.jit
+    def mitchell(w):
+        w = tl.cast(w, WORK_INT)
+        integer_part = w >> F
+        fractional_part = w & FRACTION_MASK
+        shift = -integer_part
+        safe_shift = tl.minimum(shift, F)
+        approximation = (tl.cast(SCALE, WORK_INT) + fractional_part) >> safe_shift
+        return tl.where(shift > F, tl.cast(0, WORK_INT), approximation)
+
+    if tab_sbdb is not None:
+
+        DB_TABLE_SIZE = tl.constexpr(tab_sbdb.size(1))
+        DB_TABLE_DATA_PTR = tl.constexpr(tab_sbdb.data_ptr())
+        DB_TABLE_EZ = tl.constexpr(tab_ez.item())
+
+        @triton.jit
+        def db_correction(d, z, use_db):
+            table_z = tl.maximum(-d, tl.cast(DB_TABLE_EZ, WORK_INT))
+            index = 2 * DB_TABLE_SIZE + table_z
+            table_ptr = tl.cast(DB_TABLE_DATA_PTR, tl.pointer_type(tl.int32))
+            gaussian_db = tl.cast(tl.load(table_ptr + index, mask=use_db, other=0), WORK_INT) >> 1
+            return -gaussian_db
+
+        db_mode = "table"
+        db_table_ptr = tab_sbdb.data_ptr()
+        db_table_ez = tab_ez.item()
+
+    else:
+        @triton.jit
+        def db_correction(d, z, use_db):
+            d_real = tl.cast(d, tl.float64) / tl.cast(SCALE, tl.float64)
+            magnitude = libdevice.expm1(d_real * tl.cast(LN2, tl.float64))
+            result = libdevice.log(magnitude) / tl.cast(LN2, tl.float64)
+            scaled = result * tl.cast(SCALE, tl.float64)
+            biased = scaled + 0.5
+            truncated = tl.where(biased >= 0, tl.floor(biased), tl.ceil(biased))
+            return -tl.cast(truncated, WORK_INT) - z
+
+        db_mode = "ideal"
+        db_table_ptr = None
+        db_table_ez = None
+
+    @triton.jit
+    def add(x, y):
+        log_x = tl.cast(x >> 1, WORK_INT)
+        log_y = tl.cast(y >> 1, WORK_INT)
+        x_is_large = log_x >= log_y
+
+        large_log = tl.where(x_is_large, log_x, log_y)
+        large_sign = tl.cast(tl.where(x_is_large, x & 1, y & 1), WORK_INT)
+        z = tl.where(x_is_large, log_y - log_x, log_x - log_y)
+        distance = -z
+        subtract = ((x ^ y) & 1) != 0
+
+        same_pre = tl.where(z > SAME_PRE_LIMIT, (-z) >> 3, SAME_PRE_CAP)
+        same_post = tl.where(
+            z <= SAME_POST_FAR,
+            tl.cast(0, WORK_INT),
+            tl.where(z >= SAME_POST_NEAR, -POST_UNIT, POST_UNIT),
+        )
+        opposite_pre = tl.where(
+            z < OPP_PRE_LIMIT,
+            OPP_PRE_FAR,
+            (z >> 2) + OPP_PRE_OFFSET,
+        )
+
+        pre = tl.where(subtract, opposite_pre, same_pre)
+        use_mitchell = (subtract == 0) | (distance >= SCALE)
+        mitch = mitchell(tl.where(use_mitchell, z + pre, tl.cast(0, WORK_INT)))
+        same_adjustment = tl.where(
+            z == 0,
+            tl.cast(SCALE, WORK_INT),
+            mitch + same_post,
+        )
+
+        # db_correction is evaluated eagerly by tl.where. Keep its argument positive
+        # for exact cancellation, which is handled separately below.
+        safe_distance = tl.maximum(distance, 1)
+        use_db = subtract & (distance < SCALE) & (z != 0) & (x != ZERO) & (y != ZERO)
+        correction = tl.where(distance >= SCALE, mitch, db_correction(safe_distance, z, use_db))
+        opposite_adjustment = -correction
+
+        adjustment = tl.where(subtract, opposite_adjustment, same_adjustment)
+        adjustment = tl.where(z < -ESSZER, tl.cast(0, WORK_INT), adjustment)
+        result_log = large_log + adjustment
+
+        finite_log = tl.minimum(
+            tl.maximum(result_log, tl.cast(MIN_FINITE_LOG, WORK_INT)),
+            tl.cast(MAX_FINITE_LOG, WORK_INT),
+        )
+        packed = tl.cast((finite_log << 1) | large_sign, tl.int32)
+        inf = tl.where(
+            large_sign == 0,
+            tl.cast(POS_INF, tl.int32),
+            tl.cast(NEG_INF, tl.int32),
+        )
+        result = tl.where(
+            result_log >= tl.cast(MAX_LOG, WORK_INT),
+            inf,
+            tl.where(
+                result_log <= tl.cast(MIN_LOG, WORK_INT),
+                tl.cast(ZERO, tl.int32),
+                packed,
+            ),
+        )
+
+        exact_cancellation = subtract & (z == 0)
+        return tl.where(
+            x == ZERO, y,
+            tl.where(
+                y == ZERO, x,
+                tl.where(exact_cancellation, tl.cast(ZERO, tl.int32), result),
+            ),
+        )
+
+    _bump_triton_jit_hash(
+        mitchell, F=F, SCALE=SCALE, FRACTION_MASK=FRACTION_MASK, WORK_INT=WORK_INT
+    )
+    _bump_triton_jit_hash(
+        db_correction,
+        F=F,
+        SCALE=SCALE,
+        LN2=LN2,
+        mode=db_mode,
+        WORK_INT=WORK_INT,
+        table=db_table_ptr,
+        table_ez=db_table_ez,
+    )
+    _bump_triton_jit_hash(
+        add,
+        F=F,
+        SCALE=SCALE,
+        ESSZER=ESSZER,
+        ZERO=ZERO,
+        POS_INF=POS_INF,
+        NEG_INF=NEG_INF,
+        db_mode=db_mode,
+        db_table=db_table_ptr,
+        db_table_ez=db_table_ez,
+        WORK_INT=WORK_INT,
+    )
+    return add
 
 
 def enable_lns_triton_backend(
