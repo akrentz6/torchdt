@@ -362,10 +362,53 @@ def lns16_sqrt(ops, x):
         )
     )
 
+# todo: add support for negative bases
 @LNS16.register_op("pow")
 def lns16_pow(ops, x, y):
-    y_float = ops.to_float(y)
-    return ((x & (-2)) * y_float).to(torch.int16) & (-2)
+    zero = ZERO.to(device=x.device)
+    pos_inf = POS_INF.to(device=x.device)
+
+    y_float = ops.to_float(y).to(torch.float64)
+    x_log = (x >> 1).to(torch.float64)
+
+    scaled_log = x_log * y_float
+    scaled_log = torch.where(
+        x_log == 0,
+        torch.zeros_like(scaled_log),
+        scaled_log,
+    )
+
+    rounded_log = torch.round(scaled_log)
+    finite_log = rounded_log.clamp(
+        MIN_FINITE_LOG,
+        MAX_FINITE_LOG,
+    )
+    finite_result = finite_log.to(torch.int16) << 1
+
+    result = torch.where(
+        rounded_log <= MIN_LOG,
+        zero,
+        torch.where(
+            rounded_log >= MAX_LOG,
+            pos_inf,
+            finite_result,
+        ),
+    )
+
+    # Handle zero and infinity
+    result = torch.where(
+        x == zero,
+        torch.where(y_float < 0, pos_inf, zero),
+        result,
+    )
+    result = torch.where(
+        x == pos_inf,
+        torch.where(y_float < 0, zero, pos_inf),
+        result,
+    )
+
+    # Includes 0**0 and inf**0, consistent with torch.pow.
+    return torch.where(y == zero, 0, result)
 
 @LNS16.register_op("neg")
 def lns16_neg(ops, x):
