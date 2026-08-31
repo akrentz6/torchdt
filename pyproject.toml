@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchdt"
-version = "0.1.0"
+version = "0.2.0"
 description = "torchdt is a python package that provides custom datatypes for training and inference in PyTorch."
 readme = "README.md"
 license = {file = "LICENSE"}
