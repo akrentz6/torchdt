@@ -145,7 +145,7 @@ class OpsBase:
         code = owner._scalar_codes.get(key)
         if code is None:
             python_ops = owner.direct_for_backend("python")
-            tensor = torch.tensor(key, dtype=torch.float32)
+            tensor = torch.tensor(key, dtype=owner.dtype.conversion_dtype)
             code = int(python_ops.from_float(tensor).item())
             owner._scalar_codes[key] = code
         return code
@@ -188,9 +188,9 @@ class OpsBase:
                 raise ValueError("scalar_from_float expects a scalar value")
             if device is None:
                 device = x.device
-            x_tensor = x.detach().to(dtype=torch.float32, device=device).reshape(())
+            x_tensor = x.detach().to(dtype=cls.dtype.conversion_dtype, device=device).reshape(())
         else:
-            x_tensor = torch.tensor(x, dtype=torch.float32, device=device)
+            x_tensor = torch.tensor(x, dtype=cls.dtype.conversion_dtype, device=device)
         return cls.from_float(x_tensor)
 
     @classmethod

@@ -105,6 +105,8 @@ class DType(Tensor):
     but expose their own semantics.
     """
     bitwidth: int = 32 # subclasses override
+    # Floating-point type used at conversion boundaries. 
+    conversion_dtype = torch.float32
     # Python implementations shared by every dtype. Backend-specific and
     # dtype-specific implementations live on each concrete subclass.
     torch_funcs: Dict[Callable, Callable] = {}
@@ -138,13 +140,13 @@ class DType(Tensor):
                 else:
                     payload = data
             else:
-                payload = data.to(dtype=torch.float32, device=device, memory_format=memory_format)
+                payload = data.to(dtype=cls.conversion_dtype, device=device, memory_format=memory_format)
                 payload = ToDType.apply(payload, cls)
         else:
             if internal:
                 payload = torch.tensor(data, dtype=cls.int_dtype, device=device).view(cls.float_dtype)
             else:
-                payload = torch.tensor(data, dtype=torch.float32, device=device)
+                payload = torch.tensor(data, dtype=cls.conversion_dtype, device=device)
                 payload = ToDType.apply(payload, cls)
                 payload = payload.to(memory_format=memory_format)
 
@@ -434,7 +436,7 @@ class DType(Tensor):
             encoded = src._int
         else:
             values = src.to_float() if isinstance(src, DType) else src
-            values = values.to(dtype=torch.float32, device=self.device)
+            values = values.to(dtype=self.__class__.conversion_dtype, device=self.device)
             encoded = self.ops.direct_for_device(self.device).from_float(values)
 
         self._int.copy_(encoded, non_blocking=non_blocking)
