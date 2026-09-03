@@ -34,13 +34,9 @@ class DTOptimizer(torch.optim.Optimizer):
     def zero_grad(self, set_to_none: bool = True):
         for group in self.param_groups:
             for param in group['params']:
-                hook = getattr(param, "_grad_accum_hook", None)
-                reset_existing = (
-                    hook.reset(set_to_none=set_to_none) if hook is not None else False
-                )
                 if set_to_none:
                     param.grad = None
-                elif param.grad is not None and not reset_existing:
+                elif param.grad is not None:
                     param.grad.zero_()
 
     def convert_params(self, *param_names):

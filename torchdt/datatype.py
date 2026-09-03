@@ -48,57 +48,6 @@ no_override_func_names = {
     "__get__",
 }
 
-class GradAccumHook:
-
-    def __init__(self, tensor, dtype):
-        self.value = None
-        self.dtype = dtype
-
-        self.grad_hook_handle = tensor.register_hook(self.grad_hook)
-        if tensor.is_leaf:
-            self.grad_accum_hook_handle = tensor.register_post_accumulate_grad_hook(self.accumulate_hook)
-
-    def grad_hook(self, grad):
-        if grad is None:
-            return None
-        return self.value if self.value is not None else grad
-
-    def accumulate_hook(self, tensor):
-        if self.value is not None:
-            tensor.grad.copy_(self.value)
-            # Keep the buffer PyTorch already owns and release the temporary
-            # first-contribution view after leaf accumulation.
-            self.value = tensor.grad.as_subclass(self.dtype)
-
-    def register_edge_hook(self, edge, arg_index):
-
-        def edge_hook(grad_inputs, grad_outputs):
-            if grad_inputs[arg_index] is not None:
-                # __torch_function__ doesn't work inside hooks, so we must
-                # re-enable it manually with a context manager.
-                with torch._C._EnableTorchFunction():
-                    contribution = grad_inputs[arg_index].as_subclass(self.dtype)
-                    if self.value is None:
-                        self.value = contribution
-                    else:
-                        self.value = self.value + contribution
-
-        edge.node.register_hook(edge_hook)
-
-    def remove(self):
-        self.grad_hook_handle.remove()
-        if hasattr(self, "grad_accum_hook_handle"):
-            self.grad_accum_hook_handle.remove()
-
-    def reset(self, set_to_none=True):
-        if set_to_none:
-            self.value = None
-            return False
-        elif self.value is not None:
-            self.value.zero_()
-            return True
-        return False
-
 class DType(Tensor):
     """
     Parent class for custom dtypes (posit, LNS, etc) that live in a Tensor
@@ -217,27 +166,9 @@ class DType(Tensor):
         register_cpp_ops(cls, backend_name)
         cls.ops._cpp_backend_name = backend_name
 
-    def _track_operation(self, edge, arg_index):
-        """
-        Registers a hook to track the operation that produced this DType tensor.
-        This is used to accumulate gradients from different paths in the computation
-        graph since PyTorch will internally add these, but since they are DType
-        tensors we must perform our custom DType addition.
-        """
-        self._grad_accum_hook.register_edge_hook(edge, arg_index)
-
     def requires_grad_(self, requires_grad: bool = True):
         """Sets the requires_grad flag for this DType tensor in-place."""
-        super().requires_grad_(requires_grad)
-
-        hook = getattr(self, "_grad_accum_hook", None)
-        if requires_grad and hook is None:
-            self._grad_accum_hook = GradAccumHook(self, self.__class__)
-        elif not requires_grad and hook is not None:
-            hook.remove()
-            del self._grad_accum_hook
-
-        return self
+        return super().requires_grad_(requires_grad)
 
     def backward(self, gradient=None, retain_graph=None, create_graph=False, inputs=None):
         """
@@ -263,9 +194,8 @@ class DType(Tensor):
         elif gradient.__class__ != self.__class__:
             gradient = self.__class__(gradient, device=self.device, requires_grad=False)
 
-        # manually set the incoming gradients for the output
-        # tensor since no hooks will be registered for it.
-        self._grad_accum_hook.value = gradient
+        from torchdt.autograd import _mark_gradient
+        gradient = _mark_gradient(gradient._float, self.__class__)
 
         return super().backward(
             gradient=gradient,
@@ -277,9 +207,16 @@ class DType(Tensor):
     @property
     def grad(self):
         """The gradient of this DType tensor."""
-        if super().grad is None:
+        from torchdt.autograd import _Gradient, _gradient_as_dtype
+
+        value = super().grad
+        if value is None:
             return None
-        return super().grad.as_subclass(self.__class__)
+        if isinstance(value, _Gradient):
+            if value._dtype is not self.__class__:
+                raise TypeError("Stored gradient has the wrong DType.")
+            return _gradient_as_dtype(value)
+        return value.as_subclass(self.__class__)
 
     @grad.setter
     def grad(self, value):
@@ -287,6 +224,29 @@ class DType(Tensor):
             value = value._float
         with torch._C.DisableTorchFunctionSubclass():
             Tensor.grad.__set__(self, value)
+
+    def register_hook(self, hook):
+        from torchdt.autograd import _Gradient, _gradient_as_dtype, _mark_gradient
+
+        def wrapped(gradient):
+            if isinstance(gradient, _Gradient):
+                gradient = _gradient_as_dtype(gradient)
+            with torch._C._EnableTorchFunction():
+                result = hook(gradient)
+            if result is None:
+                return result
+            if isinstance(result, _Gradient):
+                return _mark_gradient(result, self.__class__)
+            if isinstance(result, DType):
+                if result.__class__ is not self.__class__:
+                    raise TypeError("Gradient hooks must return the same DType.")
+                return _mark_gradient(result._float, self.__class__)
+            if isinstance(result, Tensor):
+                result = self.__class__(result, device=self.device, requires_grad=False)
+                return _mark_gradient(result._float, self.__class__)
+            return result
+
+        return super().register_hook(wrapped)
 
     @classmethod
     def register_func(
@@ -460,5 +420,14 @@ class ToDType(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: DType) -> Tensor:
+        from torchdt.autograd import _Gradient
+
+        if isinstance(grad_output, _Gradient):
+            dtype = grad_output._dtype
+            with torch._C._DisableTorchDispatch():
+                grad_output = grad_output.as_subclass(Tensor)
+            ops = dtype.ops.direct_for_device(grad_output.device)
+            return ops.to_float(grad_output.view(dtype.int_dtype)), None
+
         ops = grad_output.__class__.ops.direct_for_device(grad_output.device)
         return ops.to_float(grad_output._int), None

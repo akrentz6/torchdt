@@ -1,5 +1,5 @@
 import torch
-from torch.autograd.graph import get_gradient_edge
+from torch.utils._pytree import tree_flatten, tree_map
 from typing import Optional, Tuple
 import inspect
 from torchdt._dispatch import current_dispatch
@@ -9,16 +9,112 @@ __all__ = [
     "DTNonDifferentiableFunction",
 ]
 
+_aten = torch.ops.aten
+_gradient_view_ops = {
+    _aten.alias.default,
+    _aten.clone.default,
+    _aten.detach.default,
+    _aten.expand.default,
+    _aten.permute.default,
+    _aten.reshape.default,
+    _aten.squeeze.default,
+    _aten.squeeze.dim,
+    _aten.transpose.int,
+    _aten.unsqueeze.default,
+    _aten.view.default,
+}
 
-def _find_first_grad_tensor(values):
-    if isinstance(values, torch.Tensor):
-        return values if values.requires_grad else None
-    if isinstance(values, (list, tuple)):
-        for value in values:
-            tensor = _find_first_grad_tensor(value)
-            if tensor is not None:
-                return tensor
-    return None
+
+class _Gradient(torch.Tensor):
+
+    @staticmethod
+    def __new__(cls, value, dtype):
+        if type(value) is not torch.Tensor:
+            raise TypeError("Expected a plain Tensor for gradient storage.")
+        if value.layout != torch.strided:
+            raise NotImplementedError("DType gradients must use a strided layout.")
+        if value.dtype != dtype.float_dtype:
+            raise TypeError(
+                f"Expected {dtype.float_dtype} gradient storage, got {value.dtype}."
+            )
+        result = torch.Tensor._make_subclass(cls, value, value.requires_grad)
+        result._dtype = dtype
+        return result
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        values, _ = tree_flatten((args, kwargs))
+        dtypes = {value._dtype for value in values if isinstance(value, cls)}
+        if len(dtypes) != 1:
+            names = ", ".join(sorted(dtype.__name__ for dtype in dtypes))
+            raise TypeError(f"Cannot combine gradients of different DTypes: {names}.")
+        dtype = next(iter(dtypes))
+
+        with torch._C._DisableTorchDispatch():
+            def unwrap(value):
+                if isinstance(value, cls):
+                    return value.as_subclass(torch.Tensor)
+                return value
+
+            base_args = tree_map(unwrap, args)
+            base_kwargs = tree_map(unwrap, kwargs)
+
+            if func in (_aten.add.Tensor, _aten.add_.Tensor):
+                if base_kwargs.get("alpha", 1) != 1:
+                    raise NotImplementedError("DType gradient addition requires alpha=1.")
+                left, right = base_args[:2]
+                if left.layout != torch.strided or right.layout != torch.strided:
+                    raise NotImplementedError("Sparse DType gradients are not supported.")
+                if left.dtype != dtype.float_dtype or right.dtype != dtype.float_dtype:
+                    raise TypeError("DType gradient storage types do not match.")
+
+                ops = dtype.ops.direct_for_device(left.device)
+                result = ops.add(
+                    left.view(dtype.int_dtype),
+                    right.view(dtype.int_dtype),
+                ).view(dtype.float_dtype)
+                if func is _aten.add_.Tensor:
+                    left.copy_(result)
+                    return args[0]
+                return cls(result, dtype)
+
+            if func is _aten.zero_.default:
+                target = base_args[0]
+                integer = target.view(dtype.int_dtype)
+                ops = dtype.ops.direct_for_device(target.device)
+                integer.copy_(ops.zeros_like(integer))
+                return args[0]
+
+            if func is _aten.copy_.default:
+                base_args[0].copy_(base_args[1], **base_kwargs)
+                return args[0]
+
+            if func in _gradient_view_ops:
+                return cls(func(*base_args, **base_kwargs), dtype)
+
+            # Backward implementations use a dtype-changing view to
+            # recover the integer representation. Other operations
+            # drop the engine-only gradient tag.
+            return func(*base_args, **base_kwargs)
+
+
+def _mark_gradient(value, dtype):
+    if value is None:
+        return value
+    if isinstance(value, _Gradient):
+        if value._dtype is not dtype:
+            raise TypeError("Gradient has the wrong DType.")
+        return value
+    return _Gradient(value, dtype)
+
+
+def _gradient_as_dtype(value):
+    dtype = value._dtype
+    with torch._C._DisableTorchDispatch():
+        base = value.as_subclass(torch.Tensor)
+        view = base.as_strided(base.size(), base.stride(), base.storage_offset())
+    return view.as_subclass(dtype)
 
 
 def _cast_int(x, dtype):
@@ -87,6 +183,7 @@ def _combined_backward(ctx, *grads):
     cast_grads = _cast_values(grads, dt_cls.output_indices, _cast_int, dtype)
     output = dt_cls._dt_backward(ctx, ops, *cast_grads)
     cast_output = _cast_values(output, ctx._input_indices, _cast_float, dtype)
+    cast_output = _cast_values(cast_output, ctx._input_indices, _mark_gradient, dtype)
 
     if isinstance(cast_output, tuple):
         return (None,) + cast_output
@@ -193,18 +290,6 @@ class DTFunction(torch.autograd.Function):
         prepped_inputs = tuple(arg._float if isinstance(arg, DType) else arg for arg in args)
         call_spec = (cls, ops, input_indices)
         result = super().apply(call_spec, *prepped_inputs)
-
-        first_tensor = _find_first_grad_tensor(result)
-        if first_tensor is not None:
-            edge = get_gradient_edge(first_tensor)
-            tensor_index = 0
-            for arg in args:
-                if not isinstance(arg, torch.Tensor):
-                    continue
-                if isinstance(arg, dtype) and arg.requires_grad:
-                    arg._track_operation(edge, tensor_index)
-                tensor_index += 1
-
         return _wrap_outputs(result, dtype, cls.output_indices)
 
 
