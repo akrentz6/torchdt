@@ -232,3 +232,47 @@ def dt_empty_like(input, *, dtype=None, layout=None, device=None, requires_grad=
         source, dtype=dtype, layout=layout, device=device,
         requires_grad=requires_grad, memory_format=memory_format,
     )
+
+
+def _scalar_value(value):
+    return float(value) if isinstance(value, DType) else value
+
+
+@DType.register_func(torch.arange)
+def dt_arange(start=0, end=None, step=1, *, out=None, dtype=None, layout=torch.strided,
+              device=None, requires_grad=False, pin_memory=False):
+    if end is None:
+        start, end = 0, start
+    if not _is_dtype(dtype):
+        for value in (start, end, step):
+            if isinstance(value, DType):
+                dtype = value.__class__
+                break
+    if not _is_dtype(dtype):
+        raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
+    values = torch.arange(
+        _scalar_value(start), _scalar_value(end), _scalar_value(step),
+        dtype=dtype.conversion_dtype, layout=layout, device=device,
+        requires_grad=False, pin_memory=pin_memory,
+    )
+    result = dtype(values, requires_grad=requires_grad)
+    return out.copy_(result) if out is not None else result
+
+
+@DType.register_func(torch.linspace)
+def dt_linspace(start, end, steps, *, out=None, dtype=None, layout=torch.strided,
+                device=None, requires_grad=False, pin_memory=False):
+    if not _is_dtype(dtype):
+        for value in (start, end):
+            if isinstance(value, DType):
+                dtype = value.__class__
+                break
+    if not _is_dtype(dtype):
+        raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
+    values = torch.linspace(
+        _scalar_value(start), _scalar_value(end), steps,
+        dtype=dtype.conversion_dtype, layout=layout, device=device,
+        requires_grad=False, pin_memory=pin_memory,
+    )
+    result = dtype(values, requires_grad=requires_grad)
+    return out.copy_(result) if out is not None else result

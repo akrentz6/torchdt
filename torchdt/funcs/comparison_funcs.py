@@ -87,7 +87,9 @@ def dt_lt(input, other, *, out=None):
 
 @DType.register_func(torch.isclose, torch.Tensor.isclose,
                      cast=("input", "other", "rtol", "atol"))
-def dt_isclose(input, other, rtol=1e-05, atol=1e-08, *, out=None):
+def dt_isclose(input, other, rtol=1e-05, atol=1e-08, equal_nan=False, *, out=None):
+    if equal_nan:
+        raise NotImplementedError("equal_nan=True is not supported for DType tensors")
     result = DTIscloseFunction.apply(input, other, rtol, atol)
 
     if out is not None:
@@ -96,7 +98,9 @@ def dt_isclose(input, other, rtol=1e-05, atol=1e-08, *, out=None):
 
 @DType.register_func(torch.allclose, torch.Tensor.allclose,
                      cast=("input", "other", "rtol", "atol"))
-def dt_allclose(input, other, rtol=1e-05, atol=1e-08, *, out=None):
+def dt_allclose(input, other, rtol=1e-05, atol=1e-08, equal_nan=False, *, out=None):
+    if equal_nan:
+        raise NotImplementedError("equal_nan=True is not supported for DType tensors")
     result = DTAllcloseFunction.apply(input, other, rtol, atol)
 
     if out is not None:
@@ -123,8 +127,8 @@ def dt_all(input, dim=None, keepdim=False, *, out=None):
 
 @DType.register_func(torch.isin,
                      cast=("elements", "test_elements"))
-def dt_isin(elements, test_elements, *, out=None):
-    result = DTIsinFunction.apply(elements, test_elements)
+def dt_isin(elements, test_elements, *, assume_unique=False, invert=False, out=None):
+    result = DTIsinFunction.apply(elements, test_elements, assume_unique, invert)
 
     if out is not None:
         return out.copy_(result)

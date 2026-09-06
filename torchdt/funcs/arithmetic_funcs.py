@@ -53,7 +53,9 @@ def dt_rsub(self, other):
 
 @DType.register_func(torch.sum, torch.Tensor.sum,
                      cast=("input",))
-def dt_sum(input, dim=None, keepdim=False, *, out=None):
+def dt_sum(input, dim=None, keepdim=False, *, dtype=None, out=None):
+    if dtype is not None and dtype is not input.__class__:
+        raise NotImplementedError("sum dtype conversion is not supported for DType tensors")
     result = DTSumFunction.apply(input, dim, keepdim)
 
     if out is not None:
@@ -76,7 +78,9 @@ def dt_rmul(self, other):
 
 @DType.register_func(torch.div, torch.Tensor.div,
                      cast=("input", "other"))
-def dt_div(input, other, *, out=None):
+def dt_div(input, other, *, rounding_mode=None, out=None):
+    if rounding_mode is not None:
+        raise NotImplementedError("rounded division is not supported for DType tensors")
     result = DTDivFunction.apply(input, other)
 
     if out is not None:
@@ -149,7 +153,9 @@ def dt_log(input, *, out=None):
 
 @DType.register_func(torch.prod, torch.Tensor.prod,
                      cast=("input",))
-def dt_prod(input, dim=None, keepdim=False, *, out=None):
+def dt_prod(input, dim=None, keepdim=False, *, dtype=None, out=None):
+    if dtype is not None and dtype is not input.__class__:
+        raise NotImplementedError("prod dtype conversion is not supported for DType tensors")
     result = DTProdFunction.apply(input, dim, keepdim)
 
     if out is not None:
@@ -158,7 +164,9 @@ def dt_prod(input, dim=None, keepdim=False, *, out=None):
 
 @DType.register_func(torch.mean, torch.Tensor.mean,
                      cast=("input",))
-def dt_mean(input, dim=None, keepdim=False, *, out=None):
+def dt_mean(input, dim=None, keepdim=False, *, dtype=None, out=None):
+    if dtype is not None and dtype is not input.__class__:
+        raise NotImplementedError("mean dtype conversion is not supported for DType tensors")
     result = DTMeanFunction.apply(input, dim, keepdim)
 
     if out is not None:
@@ -191,3 +199,36 @@ def dt_transpose(input, dim0, dim1, *, out=None):
     if out is not None:
         return out.copy_(result)
     return result
+
+
+@DType.register_func(torch.mm, torch.Tensor.mm, cast=("input", "mat2"))
+def dt_mm(input, mat2, *, out=None):
+    if input.dim() != 2 or mat2.dim() != 2:
+        raise RuntimeError("mm expects two-dimensional tensors")
+    result = DTMatmulFunction.apply(input, mat2)
+    return out.copy_(result) if out is not None else result
+
+
+@DType.register_func(torch.bmm, torch.Tensor.bmm, cast=("input", "mat2"))
+def dt_bmm(input, mat2, *, out=None):
+    if input.dim() != 3 or mat2.dim() != 3:
+        raise RuntimeError("bmm expects three-dimensional tensors")
+    result = DTMatmulFunction.apply(input, mat2)
+    return out.copy_(result) if out is not None else result
+
+
+@DType.register_func(torch.addmm, torch.Tensor.addmm,
+                     cast=("input", "mat1", "mat2"))
+def dt_addmm(input, mat1, mat2, *, beta=1, alpha=1, out=None):
+    result = torch.add(torch.mul(input, beta), torch.mul(torch.matmul(mat1, mat2), alpha))
+    return out.copy_(result) if out is not None else result
+
+
+@DType.register_func(torch.baddbmm, torch.Tensor.baddbmm,
+                     cast=("input", "batch1", "batch2"))
+def dt_baddbmm(input, batch1, batch2, *, beta=1, alpha=1, out=None):
+    result = torch.add(
+        torch.mul(input, beta),
+        torch.mul(torch.matmul(batch1, batch2), alpha),
+    )
+    return out.copy_(result) if out is not None else result

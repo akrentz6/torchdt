@@ -46,31 +46,29 @@ class DTLinearFunction(DTFunction):
 
 @register_base_op("dropout")
 def dt_dropout(ops, x, p=0.5):
+    if p == 1.0:
+        return ops.zeros_like(x), ops.zeros_like(x)
     mask = ops.from_float(torch.bernoulli(torch.full(x.shape, 1 - p, device=x.device)))
-    return ops.mul(x, mask)
+    scale = ops.scalar_from_float(1.0 / (1.0 - p), device=x.device)
+    return ops.mul(ops.mul(x, mask), scale), mask
 
 class DTDropoutFunction(DTFunction):
 
     @staticmethod
-    def forward(ops, x, p=0.5):
-        return ops.dropout(x, p)
-
-    @staticmethod
-    def setup_context(ctx, ops, inputs, output):
-        _, p = inputs
-        ctx.save_for_backward(output)
+    def forward(ctx, ops, x, p=0.5):
+        output, mask = ops.dropout(x, p)
+        ctx.save_for_backward(mask)
         ctx.p = p
+        return output
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        output, = ctx.saved_tensors
-        grad_x = torch.where(
-            output == ops.scalar_from_float(0.0, device=output.device),
-            ops.scalar_from_float(0.0, device=output.device),
-            ops.mul(
-                grad_output,
-                ops.scalar_from_float(1 / (1 - ctx.p), device=grad_output.device)
-            ))
+        mask, = ctx.saved_tensors
+        if ctx.p == 1.0:
+            grad_x = ops.zeros_like(grad_output)
+        else:
+            scale = ops.scalar_from_float(1.0 / (1.0 - ctx.p), device=grad_output.device)
+            grad_x = ops.mul(ops.mul(grad_output, mask), scale)
         return grad_x, None
 
 @register_base_op("conv2d")
@@ -163,10 +161,11 @@ class DTConv2dFunction(DTFunction):
         dil_h, dil_w = dilation
         groups = ctx.groups
 
-        squeeze_batch = (x.dim() == 3)
+        squeeze_batch = x.dim() == 3
+        if squeeze_batch:
+            x = x.unsqueeze(0)
         if grad_output.dim() == 3:
             grad_output = grad_output.unsqueeze(0)
-            squeeze_batch = True
 
         N, C_out, H_out, W_out = grad_output.shape
         C_in = weight.shape[1] * groups
@@ -949,3 +948,162 @@ class DTLayerNormFunction(DTFunction):
         grad_x = ops.mul(ops.mul(inv_std, inv_N), term_inner)
 
         return grad_x, None, None, grad_weight, grad_bias
+
+
+@register_base_op("rms_norm")
+def dt_rms_norm(ops, x, normalized_shape, weight=None, eps=None):
+    reduce_dims = tuple(range(x.dim() - len(normalized_shape), x.dim()))
+    if eps is None:
+        eps = ops.scalar_from_float(torch.finfo(ops.dtype.float_dtype).eps, device=x.device)
+    mean_square = ops.mean(ops.square(x), dim=reduce_dims, keepdim=True)
+    inv_rms = ops.reciprocal(ops.sqrt(ops.add(mean_square, eps)))
+    output = ops.mul(x, inv_rms)
+    if weight is not None:
+        shape = [1] * (x.dim() - len(normalized_shape)) + list(normalized_shape)
+        output = ops.mul(output, weight.reshape(shape))
+    return output
+
+
+class DTRMSNormFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, normalized_shape, weight=None, eps=None):
+        return ops.rms_norm(x, normalized_shape, weight, eps)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, normalized_shape, weight, eps = inputs
+        ctx.normalized_shape = tuple(normalized_shape)
+        if eps is None:
+            eps = ops.scalar_from_float(torch.finfo(ops.dtype.float_dtype).eps, device=x.device)
+        ctx.save_for_backward(x, weight, eps)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        x, weight, eps = ctx.saved_tensors
+        red_dims = tuple(range(x.dim() - len(ctx.normalized_shape), x.dim()))
+        mean_square = ops.mean(ops.square(x), dim=red_dims, keepdim=True)
+        variance_eps = ops.add(mean_square, eps)
+        inv_rms = ops.reciprocal(ops.sqrt(variance_eps))
+        normalized = ops.mul(x, inv_rms)
+
+        grad_weight = None
+        if weight is not None:
+            leading_dims = tuple(range(x.dim() - len(ctx.normalized_shape)))
+            grad_weight = ops.sum(ops.mul(grad_output, normalized), dim=leading_dims)
+            shape = [1] * len(leading_dims) + list(ctx.normalized_shape)
+            grad_normalized = ops.mul(grad_output, weight.reshape(shape))
+        else:
+            grad_normalized = grad_output
+
+        mean_product = ops.mean(
+            ops.mul(grad_normalized, x), dim=red_dims, keepdim=True
+        )
+        correction = ops.div(ops.mul(x, mean_product), variance_eps)
+        grad_x = ops.mul(inv_rms, ops.sub(grad_normalized, correction))
+        return grad_x, None, grad_weight, None
+
+
+@register_base_op("group_norm")
+def dt_group_norm(ops, x, num_groups, weight=None, bias=None, eps=None):
+    if x.dim() < 2:
+        raise RuntimeError("Expected at least 2 dimensions for group_norm")
+    if num_groups <= 0:
+        raise RuntimeError("num_groups must be positive")
+    if x.shape[1] % num_groups:
+        raise RuntimeError("num_channels must be divisible by num_groups")
+    grouped = x.reshape(x.shape[0], num_groups, -1)
+    mean = ops.mean(grouped, dim=-1, keepdim=True)
+    variance = ops.var(
+        grouped, ops.scalar_from_float(0.0, device=x.device), dim=-1, keepdim=True
+    )
+    inv_std = ops.reciprocal(ops.sqrt(ops.add(variance, eps)))
+    output = ops.mul(ops.sub(grouped, mean), inv_std).reshape(x.shape)
+    broadcast_shape = (1, x.shape[1]) + (1,) * (x.dim() - 2)
+    if weight is not None:
+        output = ops.mul(output, weight.reshape(broadcast_shape))
+    if bias is not None:
+        output = ops.add(output, bias.reshape(broadcast_shape))
+    return output
+
+
+class DTGroupNormFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, num_groups, weight=None, bias=None, eps=None):
+        return ops.group_norm(x, num_groups, weight, bias, eps)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, num_groups, weight, bias, eps = inputs
+        ctx.num_groups = num_groups
+        ctx.save_for_backward(x, weight, bias, eps)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        x, weight, bias, eps = ctx.saved_tensors
+        grouped = x.reshape(x.shape[0], ctx.num_groups, -1)
+        mean = ops.mean(grouped, dim=-1, keepdim=True)
+        variance = ops.var(
+            grouped, ops.scalar_from_float(0.0, device=x.device), dim=-1, keepdim=True
+        )
+        inv_std = ops.reciprocal(ops.sqrt(ops.add(variance, eps)))
+        normalized_grouped = ops.mul(ops.sub(grouped, mean), inv_std)
+        normalized = normalized_grouped.reshape(x.shape)
+        reduce_dims = (0,) + tuple(range(2, x.dim()))
+        grad_weight = ops.sum(ops.mul(grad_output, normalized), dim=reduce_dims) if weight is not None else None
+        grad_bias = ops.sum(grad_output, dim=reduce_dims) if bias is not None else None
+
+        if weight is not None:
+            shape = (1, x.shape[1]) + (1,) * (x.dim() - 2)
+            grad_normalized = ops.mul(grad_output, weight.reshape(shape))
+        else:
+            grad_normalized = grad_output
+        grad_grouped = grad_normalized.reshape(grouped.shape)
+        count = ops.scalar_from_float(grouped.shape[-1], device=x.device)
+        sum_grad = ops.sum(grad_grouped, dim=-1, keepdim=True)
+        sum_grad_norm = ops.sum(
+            ops.mul(grad_grouped, normalized_grouped), dim=-1, keepdim=True
+        )
+        inner = ops.sub(
+            ops.sub(ops.mul(count, grad_grouped), sum_grad),
+            ops.mul(normalized_grouped, sum_grad_norm),
+        )
+        grad_x = ops.mul(ops.div(inv_std, count), inner).reshape(x.shape)
+        return grad_x, None, grad_weight, grad_bias, None
+
+
+@register_base_op("embedding")
+def dt_embedding(ops, indices, weight, padding_idx=-1):
+    if indices.dtype not in (torch.int64, torch.int32):
+        raise TypeError("embedding indices must be integer tensors")
+    if indices.numel() and torch.any((indices < 0) | (indices >= weight.shape[0])):
+        raise IndexError("embedding index out of range")
+    return weight[indices]
+
+
+class DTEmbeddingFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, indices, weight, padding_idx=-1):
+        return ops.embedding(indices, weight, padding_idx)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        indices, weight, padding_idx = inputs
+        ctx.weight_shape = weight.shape
+        ctx.device = weight.device
+        ctx.padding_idx = padding_idx
+        ctx.save_for_backward(indices)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        indices, = ctx.saved_tensors
+        grad_weight = ops.zeros(ctx.weight_shape, device=ctx.device)
+        flat_indices = indices.reshape(-1).tolist()
+        flat_gradient = grad_output.reshape(-1, ctx.weight_shape[1])
+        for row, gradient in zip(flat_indices, flat_gradient):
+            if row == ctx.padding_idx:
+                continue
+            grad_weight[row] = ops.add(grad_weight[row], gradient)
+        return None, grad_weight, None

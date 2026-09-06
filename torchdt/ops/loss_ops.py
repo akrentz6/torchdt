@@ -317,40 +317,63 @@ class DTBCEWithLogitsLossFunction(DTFunction):
 
         return grad_x, grad_y, None, None
 
+def _classification_view(x, target):
+    if target.dtype not in (torch.int64, torch.int32):
+        raise NotImplementedError("probability targets are not supported")
+    if x.dim() == 0:
+        raise ValueError("classification input must have at least one dimension")
+
+    class_dim = 0 if x.dim() == 1 else 1
+    classes = x.shape[class_dim]
+    target_shape = tuple(x.shape[:class_dim]) + tuple(x.shape[class_dim + 1:])
+    if tuple(target.shape) != target_shape:
+        raise ValueError(
+            f"Expected target shape {target_shape}, got {tuple(target.shape)}"
+        )
+    logits = x.movedim(class_dim, -1).reshape(-1, classes)
+    return logits, target.reshape(-1), target_shape, class_dim
+
+
+def _restore_classification_gradient(gradient, x_shape, class_dim):
+    target_shape = tuple(x_shape[:class_dim]) + tuple(x_shape[class_dim + 1:])
+    restored = gradient.reshape(*target_shape, x_shape[class_dim])
+    return restored.movedim(-1, class_dim)
+
+
+def _classification_loss(ops, values, target, target_shape, weight, reduction, ignore_index):
+    if reduction not in ("none", "sum", "mean"):
+        raise ValueError(f"invalid reduction '{reduction}'")
+    valid = target != ignore_index
+    safe_target = torch.where(valid, target, torch.zeros_like(target))
+    if torch.any((safe_target < 0) | (safe_target >= values.shape[1])):
+        raise IndexError("Target is out of bounds")
+
+    selected = values.gather(1, safe_target.unsqueeze(1)).squeeze(1)
+    zero = ops.scalar_from_float(0.0, device=values.device)
+    if weight is None:
+        sample_weight = ops.ones(selected.shape, device=values.device)
+    else:
+        if weight.dim() != 1 or weight.numel() != values.shape[1]:
+            raise ValueError("weight must be one-dimensional with one value per class")
+        sample_weight = weight[safe_target]
+    sample_weight = torch.where(valid, sample_weight, zero)
+    loss = torch.where(valid, ops.mul(ops.neg(selected), sample_weight), zero)
+
+    if reduction == "none":
+        return loss.reshape(target_shape)
+    total = ops.sum(loss)
+    if reduction == "sum":
+        return total
+    denominator = ops.sum(sample_weight)
+    return ops.div(total, denominator)
+
+
 @register_base_op("nll_loss")
 def dt_nll_loss(ops, x, y, weight=None, reduction='mean', ignore_index=-100):
-    if ignore_index != -100:
-        raise NotImplementedError("ignore_index is not currently implemented.")
-
-    if x.dim() == 1:
-        nll = x[y]
-    else:
-        nll = x.gather(1, y.view(-1, 1)).squeeze(1)
-
-    if weight is not None:
-        sample_weights = weight[y]
-        nll = ops.mul(nll, sample_weights)
-    loss = ops.neg(nll)
-
-    if reduction == 'none':
-        return loss
-
-    elif reduction == 'sum':
-        loss_sum = ops.sum(loss)
-        return loss_sum
-
-    elif reduction == 'mean':
-        loss_sum = ops.sum(loss)
-
-        if weight is not None:
-            weight_sum = ops.sum(sample_weights)
-            weighted_mean = ops.div(loss_sum, weight_sum)
-            return weighted_mean
-
-        else:
-            batch_size = ops.scalar_from_float(y.size(0), device=x.device)
-            mean = ops.div(loss_sum, batch_size)
-            return mean
+    values, target, target_shape, _ = _classification_view(x, y)
+    return _classification_loss(
+        ops, values, target, target_shape, weight, reduction, ignore_index
+    )
 
 class DTNLLLossFunction(DTFunction):
 
@@ -360,54 +383,38 @@ class DTNLLLossFunction(DTFunction):
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
-        x, y, weight, reduction, _ = inputs
+        x, y, weight, reduction, ignore_index = inputs
         ctx.save_for_backward(x, y, weight)
         ctx.reduction = reduction
+        ctx.ignore_index = ignore_index
 
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, y, weight = ctx.saved_tensors
+        values, target, _, class_dim = _classification_view(x, y)
+        valid = target != ctx.ignore_index
+        safe_target = torch.where(valid, target, torch.zeros_like(target))
+        rows = torch.arange(target.numel(), device=x.device)
+        flat_grad = ops.zeros_like(values)
 
-        if weight is not None:
-            grad_x = ops.zeros_like(x)
-            if grad_x.dim() == 1:
-                grad_x[y] = ops.neg(weight[y])
-
-            else:
-                batch_size = y.size(0)
-                indices = torch.arange(batch_size, device=x.device)
-                grad_x[indices, y] = ops.neg(weight[y])
-
-            if ctx.reduction == 'mean':
-                weight_sum = ops.sum(weight)
-                grad_x = ops.div(grad_x, weight_sum)
-
+        if weight is None:
+            sample_weight = ops.ones(target.shape, device=x.device)
         else:
-            grad_x = ops.zeros_like(x)
-            if grad_x.dim() == 1:
-                grad_x[y] = ops.scalar_from_float(-1.0, device=x.device)
+            sample_weight = weight[safe_target]
+        zero = ops.scalar_from_float(0.0, device=x.device)
+        sample_weight = torch.where(valid, sample_weight, zero)
+        flat_grad[rows[valid], safe_target[valid]] = ops.neg(sample_weight[valid])
 
-            else:
-                batch_size = y.size(0)
-                indices = torch.arange(batch_size, device=x.device)
-                grad_x[indices, y] = ops.scalar_from_float(-1.0, device=x.device)
-
-            if ctx.reduction == 'mean':
-                batch_size = ops.scalar_from_float(y.size(0), device=x.device)
-                grad_x = ops.div(grad_x, batch_size)
-
-        if ctx.reduction == 'none':
-            if grad_x.dim() == 1:
-                grad_x = ops.mul(grad_x, grad_output)
-
-            else:
-                batch_size = y.size(0)
-                indices = torch.arange(batch_size, device=x.device)
-                grad_x[indices, y] = ops.mul(grad_x[indices, y], grad_output)
-
+        if ctx.reduction == "mean":
+            denominator = ops.sum(sample_weight)
+            if ops.scalar_to_float(denominator) != 0.0:
+                flat_grad = ops.div(flat_grad, denominator)
+        if ctx.reduction == "none":
+            flat_grad = ops.mul(flat_grad, grad_output.reshape(-1, 1))
         else:
-            grad_x = ops.mul(grad_x, grad_output)
+            flat_grad = ops.mul(flat_grad, grad_output)
 
+        grad_x = _restore_classification_gradient(flat_grad, x.shape, class_dim)
         return grad_x, None, None, None, None
 
 @register_base_op("poisson_nll_loss")
@@ -888,50 +895,13 @@ class DTSmoothL1LossFunction(DTFunction):
 
 @register_base_op("cross_entropy")
 def dt_cross_entropy(ops, x, y, weight = None, ignore_index = -100, reduction = 'mean', label_smoothing = 0.0):
-    if ignore_index != -100:
-        raise NotImplementedError("ignore_index is not currently implemented.")
-    if label_smoothing is not None and label_smoothing != ops.scalar_from_float(
-        0.0, device=x.device
-    ):
+    if label_smoothing is not None and ops.scalar_to_float(label_smoothing) != 0.0:
         raise NotImplementedError("label_smoothing is not currently implemented.")
-
-    dim = -1 if x.dim() > 1 else 0
-    m = ops.max(x, dim=dim, keepdim=True)[0]
-    x_sub_m = ops.sub(x, m)
-    exp_x_sub_m = ops.exp(x_sub_m)
-    sum_exp_x_sub_m = ops.sum(exp_x_sub_m, dim=dim, keepdim=True)
-    log_sum_exp_x_sub_m = ops.log(sum_exp_x_sub_m)
-    log_softmax = ops.sub(x_sub_m, log_sum_exp_x_sub_m)
-
-    if log_softmax.dim() == 1:
-        nll = log_softmax[y]
-    else:
-        nll = log_softmax.gather(1, y.view(-1, 1)).squeeze(1)
-
-    if weight is not None:
-        sample_weights = weight[y]
-        nll = ops.mul(nll, sample_weights)
-    loss = ops.neg(nll)
-
-    if reduction == 'none':
-        return loss
-
-    elif reduction == 'sum':
-        loss_sum = ops.sum(loss)
-        return loss_sum
-
-    elif reduction == 'mean':
-        loss_sum = ops.sum(loss)
-
-        if weight is not None:
-            weight_sum = ops.sum(sample_weights)
-            weighted_mean = ops.div(loss_sum, weight_sum)
-            return weighted_mean
-
-        else:
-            batch_size = ops.scalar_from_float(y.size(0), device=x.device)
-            mean = ops.div(loss_sum, batch_size)
-            return mean
+    values, target, target_shape, _ = _classification_view(x, y)
+    log_probs = ops.log_softmax(values, dim=-1)
+    return _classification_loss(
+        ops, log_probs, target, target_shape, weight, reduction, ignore_index
+    )
 
 class DTCrossEntropyLossFunction(DTFunction):
 
@@ -941,62 +911,42 @@ class DTCrossEntropyLossFunction(DTFunction):
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
-        x, y, weight, _, reduction, _ = inputs
+        x, y, weight, ignore_index, reduction, _ = inputs
         ctx.save_for_backward(x, y, weight)
         ctx.reduction = reduction
+        ctx.ignore_index = ignore_index
 
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, y, weight = ctx.saved_tensors
+        values, target, _, class_dim = _classification_view(x, y)
+        valid = target != ctx.ignore_index
+        safe_target = torch.where(valid, target, torch.zeros_like(target))
+        rows = torch.arange(target.numel(), device=x.device)
 
-        if weight is not None:
-            sample_weights = weight[y]
+        flat_grad = ops.exp(ops.log_softmax(values, dim=-1))
+        if weight is None:
+            sample_weight = ops.ones(target.shape, device=x.device)
         else:
-            sample_weights = None
+            sample_weight = weight[safe_target]
+        zero = ops.scalar_from_float(0.0, device=x.device)
+        one = ops.scalar_from_float(1.0, device=x.device)
+        sample_weight = torch.where(valid, sample_weight, zero)
+        flat_grad = ops.mul(flat_grad, sample_weight.unsqueeze(1))
+        selected = flat_grad[rows[valid], safe_target[valid]]
+        flat_grad[rows[valid], safe_target[valid]] = ops.sub(
+            selected, sample_weight[valid]
+        )
+        flat_grad = torch.where(valid.unsqueeze(1), flat_grad, zero)
 
-        dim = -1 if x.dim() > 1 else 0
-        m = ops.max(x, dim=dim, keepdim=True)[0]
-        x_sub_m = ops.sub(x, m)
-        exp_x_sub_m = ops.exp(x_sub_m)
-        sum_exp_x_sub_m = ops.sum(exp_x_sub_m, dim=dim, keepdim=True)
-        log_sum_exp_x_sub_m = ops.log(sum_exp_x_sub_m)
-        log_softmax = ops.sub(x_sub_m, log_sum_exp_x_sub_m)
-        softmax = ops.exp(log_softmax)
-
-        grad_x = softmax.clone()
-        if grad_x.dim() == 1:
-            if sample_weights is not None:
-                grad_x = ops.mul(grad_x, sample_weights)
-                grad_x[y] = ops.sub(grad_x[y], sample_weights)
-            else:
-                grad_x[y] = ops.sub(
-                    grad_x[y], ops.scalar_from_float(1.0, device=x.device)
-                )
-
+        if ctx.reduction == "mean":
+            denominator = ops.sum(sample_weight)
+            if ops.scalar_to_float(denominator) != 0.0:
+                flat_grad = ops.div(flat_grad, denominator)
+        if ctx.reduction == "none":
+            flat_grad = ops.mul(flat_grad, grad_output.reshape(-1, 1))
         else:
-            idx = torch.arange(y.size(0), device=x.device)
-            if sample_weights is not None:
-                grad_x = ops.mul(grad_x, sample_weights.view(-1, 1))
-                grad_x[idx, y] = ops.sub(grad_x[idx, y], sample_weights)
-            else:
-                grad_x[idx, y] = ops.sub(
-                    grad_x[idx, y], ops.scalar_from_float(1.0, device=x.device)
-                )
+            flat_grad = ops.mul(flat_grad, grad_output)
 
-        if ctx.reduction == 'mean':
-            if sample_weights is not None:
-                denom = ops.sum(sample_weights)
-            else:
-                denom = ops.scalar_from_float(y.size(0), device=x.device)
-            grad_x = ops.div(grad_x, denom)
-
-        elif ctx.reduction == 'none':
-            if grad_x.dim() == 1:
-                grad_x = ops.mul(grad_x, grad_output)
-            else:
-                grad_x = ops.mul(grad_x, grad_output.view(-1, 1))
-
-        else:
-            grad_x = ops.mul(grad_x, grad_output)
-
+        grad_x = _restore_classification_gradient(flat_grad, x.shape, class_dim)
         return grad_x, None, None, None, None, None

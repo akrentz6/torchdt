@@ -9,6 +9,9 @@ from torchdt.ops.layer_ops import (
     DTMaxPool2dFunction,
     DTBatchNormFunction,
     DTLayerNormFunction,
+    DTRMSNormFunction,
+    DTGroupNormFunction,
+    DTEmbeddingFunction,
 )
 
 @DType.register_func(torch.nn.functional.linear,
@@ -19,6 +22,8 @@ def dt_linear(input, weight, bias=None):
 @DType.register_func(torch.nn.functional.dropout,
                      cast=("input",))
 def dt_dropout(input, p=0.5, training=True, inplace=False):
+    if inplace:
+        raise NotImplementedError("in-place dropout is not supported for DType tensors")
     if not training or p == 0.0:
         return input
     if p < 0.0 or p > 1.0:
@@ -53,4 +58,40 @@ def dt_batch_norm(input, running_mean, running_var, weight=None, bias=None, trai
 @DType.register_func(torch.nn.functional.layer_norm,
                      cast=("input", "weight", "bias", "eps"))
 def dt_layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-5):
-    return DTLayerNormFunction.apply(input, normalized_shape, weight, bias, eps)
+    return DTLayerNormFunction.apply(input, eps, normalized_shape, weight, bias)
+
+
+def dt_rms_norm(input, normalized_shape, weight=None, eps=None):
+    if eps is not None and not isinstance(eps, DType):
+        eps = input.__class__(eps, device=input.device)
+    return DTRMSNormFunction.apply(input, tuple(normalized_shape), weight, eps)
+
+
+if hasattr(torch.nn.functional, "rms_norm"):
+    DType.register_func(
+        torch.nn.functional.rms_norm, cast=("input", "weight")
+    )(dt_rms_norm)
+
+
+@DType.register_func(torch.nn.functional.group_norm,
+                     cast=("input", "weight", "bias", "eps"))
+def dt_group_norm(input, num_groups, weight=None, bias=None, eps=1e-5):
+    return DTGroupNormFunction.apply(input, num_groups, weight, bias, eps)
+
+
+@DType.register_func(torch.nn.functional.embedding, cast=("weight",))
+def dt_embedding(input, weight, padding_idx=None, max_norm=None, norm_type=2.0,
+                 scale_grad_by_freq=False, sparse=False):
+    if max_norm is not None:
+        raise NotImplementedError("embedding max_norm is not supported for DType weights")
+    if scale_grad_by_freq:
+        raise NotImplementedError("embedding scale_grad_by_freq is not supported for DType weights")
+    if sparse:
+        raise NotImplementedError("sparse DType gradients are not supported")
+    if padding_idx is None:
+        padding_idx = -1
+    elif padding_idx < 0:
+        padding_idx += weight.shape[0]
+    if padding_idx < -1 or padding_idx >= weight.shape[0]:
+        raise AssertionError("Padding_idx must be within num_embeddings")
+    return DTEmbeddingFunction.apply(input, weight, padding_idx)

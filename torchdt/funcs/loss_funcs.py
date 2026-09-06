@@ -17,88 +17,118 @@ from torchdt.ops.loss_ops import (
     DTCrossEntropyLossFunction,
 )
 
+
+def _validate_reduction(reduction, *, batchmean=False):
+    valid = {"none", "sum", "mean"}
+    if batchmean:
+        valid.add("batchmean")
+    if reduction not in valid:
+        raise ValueError(f"invalid reduction '{reduction}'")
+    return reduction
+
 @DType.register_func(torch.nn.functional.mse_loss,
                      cast=("input", "target", "weight"))
 def mse_loss(input, target, size_average=None, reduce=None, reduction='mean', weight=None):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTMSELossFunction.apply(input, target, reduction, weight)
+    return DTMSELossFunction.apply(input, target, _validate_reduction(reduction), weight)
 
 @DType.register_func(torch.nn.functional.l1_loss,
                      cast=("input", "target", "weight"))
 def l1_loss(input, target, size_average=None, reduce=None, reduction='mean', weight=None):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTL1LossFunction(input, target, reduction=reduction, weight=weight)
+    return DTL1LossFunction.apply(input, target, _validate_reduction(reduction), weight)
 
 @DType.register_func(torch.nn.functional.binary_cross_entropy,
                      cast=("input", "target", "weight"))
 def binary_cross_entropy(input, target, weight=None, size_average=None, reduce=None, reduction='mean'):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTBCELossFunction.apply(input, target, weight, reduction)
+    return DTBCELossFunction.apply(input, target, weight, _validate_reduction(reduction))
 
 @DType.register_func(torch.nn.functional.binary_cross_entropy_with_logits,
                      cast=("input", "target", "weight", "pos_weight"))
 def binary_cross_entropy_with_logits(input, target, weight=None, size_average=None, reduce=None, reduction='mean', pos_weight=None):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTBCEWithLogitsLossFunction(input, target, weight, reduction, pos_weight)
+    return DTBCEWithLogitsLossFunction.apply(
+        input, target, weight, _validate_reduction(reduction), pos_weight
+    )
 
 @DType.register_func(torch.nn.functional.nll_loss,
                      cast=("input", "weight"))
 def nll_loss(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean'):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTNLLLossFunction.apply(input, target, weight, reduction, ignore_index)
+    return DTNLLLossFunction.apply(
+        input, target, weight, _validate_reduction(reduction), ignore_index
+    )
 
 @DType.register_func(torch.nn.functional.poisson_nll_loss,
-                     cast=("input", "target"))
+                     cast=("input", "target", "eps"))
 def poisson_nll_loss(input, target, log_input=True, full=False, size_average=None, eps=1e-8, reduce=None, reduction='mean'):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTPoissonNLLLossFunction.apply(input, target, eps, log_input, full, reduction)
+    return DTPoissonNLLLossFunction.apply(
+        input, target, eps, log_input, full, _validate_reduction(reduction)
+    )
 
 @DType.register_func(torch.nn.functional.hinge_embedding_loss,
                      cast=("input", "target", "margin"))
 def hinge_embedding_loss(input, target, margin=1.0, size_average=None, reduce=None, reduction='mean'):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTHingeEmbeddingLossFunction.apply(input, target, margin, reduction)
+    return DTHingeEmbeddingLossFunction.apply(
+        input, target, margin, _validate_reduction(reduction)
+    )
 
 @DType.register_func(torch.nn.functional.kl_div,
-                     cast=("input", "target", "weight"))
+                     cast=("input", "target"))
 def kl_div(input, target, size_average=None, reduce=None, reduction='mean', log_target=False):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTKLDivLossFunction.apply(input, target, reduction, log_target)
+    return DTKLDivLossFunction.apply(
+        input, target, _validate_reduction(reduction, batchmean=True), log_target
+    )
 
 @DType.register_func(torch.nn.functional.margin_ranking_loss,
-                     cast=("input1", "input2", "target"))
+                     cast=("input1", "input2", "target", "margin"))
 def margin_ranking_loss(input1, input2, target, margin=0.0, size_average=None, reduce=None, reduction='mean'):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTMarginRankingLossFunction.apply(input1, input2, target, margin, reduction)
+    return DTMarginRankingLossFunction.apply(
+        input1, input2, target, margin, _validate_reduction(reduction)
+    )
 
 @DType.register_func(torch.nn.functional.gaussian_nll_loss,
                      cast=("input", "target", "var", "eps"))
 def gaussian_nll_loss(input, target, var, full=False, eps=1e-6, reduction='mean'):
-    return DTGaussianNLLLossFunction.apply(input, target, var, eps, full, reduction)
+    return DTGaussianNLLLossFunction.apply(
+        input, target, var, eps, full, _validate_reduction(reduction)
+    )
 
 @DType.register_func(torch.nn.functional.huber_loss,
                      cast=("input", "target", "delta", "weight"))
 def huber_loss(input, target, reduction='mean', delta=1.0, weight=None):
-    return DTHuberLossFunction.apply(input, target, delta, reduction, weight)
+    return DTHuberLossFunction.apply(
+        input, target, delta, _validate_reduction(reduction), weight
+    )
 
-@DType.register_func(torch.nn.functional.smooth_l1_loss)
+@DType.register_func(torch.nn.functional.smooth_l1_loss,
+                     cast=("input", "target", "beta"))
 def smooth_l1_loss(input, target, size_average=None, reduce=None, reduction='mean', beta=1.0):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTSmoothL1LossFunction.apply(input, target, beta, reduction)
+    return DTSmoothL1LossFunction.apply(
+        input, target, beta, _validate_reduction(reduction)
+    )
 
 @DType.register_func(torch.nn.functional.cross_entropy,
                      cast=("input", "weight", "label_smoothing"))
 def cross_entropy(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean', label_smoothing=0.0):
     if size_average is not None or reduce is not None:
         reduction = _Reduction.legacy_get_string(size_average, reduce)
-    return DTCrossEntropyLossFunction.apply(input, target, weight, ignore_index, reduction, label_smoothing)
+    return DTCrossEntropyLossFunction.apply(
+        input, target, weight, ignore_index, _validate_reduction(reduction), label_smoothing
+    )

@@ -306,7 +306,7 @@ class OpsBase:
                         weight: InternalTensor, stride: tuple[int], padding: tuple[int],
                         dilation: tuple[int], has_bias: bool, groups: int
                         ) -> tuple[InternalTensor, InternalTensor, InternalTensor]:
-        raise NotImplemented
+        raise NotImplementedError
 
     # ========== 'Base' operations with default implementations ==========
 
@@ -472,6 +472,27 @@ class OpsBase:
     def glu(cls, x: InternalTensor, dim: int = -1) -> InternalTensor:
         raise NotImplementedError
 
+    @classmethod
+    def erf(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def gelu(cls, x: InternalTensor, approximate: str = "none") -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def silu(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def softplus(cls, x: InternalTensor, beta: float = 1.0,
+                 threshold: float = 20.0) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def mish(cls, x: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
 
     @classmethod
     def broadcast_to(cls, x: InternalTensor, shape) -> InternalTensor:
@@ -539,6 +560,53 @@ class OpsBase:
 
     @classmethod
     def reshape(cls, x: InternalTensor, shape: tuple[int]) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def permute(cls, x: InternalTensor, dims: tuple[int]) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def select(cls, x: InternalTensor, dim: int, index: int) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def narrow(cls, x: InternalTensor, dim: int, start: int, length: int) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def split(cls, x: InternalTensor, split_size_or_sections, dim: int = 0):
+        raise NotImplementedError
+
+    @classmethod
+    def unbind(cls, x: InternalTensor, dim: int = 0):
+        raise NotImplementedError
+
+    @classmethod
+    def index_select(cls, x: InternalTensor, dim: int, index: Tensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def gather(cls, x: InternalTensor, dim: int, index: Tensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def take_along_dim(cls, x: InternalTensor, indices: Tensor, dim: int = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def index_add(cls, x: InternalTensor, dim: int, index: Tensor,
+                  source: InternalTensor, alpha=1) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def scatter_add(cls, x: InternalTensor, dim: int, index: Tensor,
+                    source: InternalTensor) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def masked_fill(cls, x: InternalTensor, mask: Tensor,
+                    value: InternalTensor) -> InternalTensor:
         raise NotImplementedError
 
 
@@ -659,6 +727,22 @@ class OpsBase:
     def layer_norm(cls, x: InternalTensor, eps: InternalTensor,
                    normalized_shape: tuple[int], weight: InternalTensor = None,
                    bias: InternalTensor = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def rms_norm(cls, x: InternalTensor, normalized_shape: tuple[int],
+                 weight: InternalTensor = None, eps: InternalTensor = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def group_norm(cls, x: InternalTensor, num_groups: int,
+                   weight: InternalTensor = None, bias: InternalTensor = None,
+                   eps: InternalTensor = None) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
+    def embedding(cls, indices: Tensor, weight: InternalTensor,
+                  padding_idx: int = -1) -> InternalTensor:
         raise NotImplementedError
 
 

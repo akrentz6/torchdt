@@ -35,13 +35,14 @@ no_override_funcs = {
     Tensor.numel,
     Tensor.requires_grad_,
     Tensor.register_hook,
-    Tensor.register_post_accumulate_grad_hook,
     Tensor.size,
     Tensor.storage_offset,
     Tensor.stride,
     Tensor.data_ptr,
     Tensor.__reduce_ex__
 }
+if hasattr(Tensor, "register_post_accumulate_grad_hook"):
+    no_override_funcs.add(Tensor.register_post_accumulate_grad_hook)
 # for functions that should not be overridden by __torch_function__
 # where it is hard to reference them, so we do it by name
 no_override_func_names = {
@@ -130,7 +131,8 @@ class DType(Tensor):
         register_collate_dtype_fn(cls)
 
         # tell torch that this DType is safe to save/load
-        torch.serialization.add_safe_globals([cls])
+        if hasattr(torch.serialization, "add_safe_globals"):
+            torch.serialization.add_safe_globals([cls])
 
         # create a subclass of Ops for this DType
         ops_name = f"{cls.__name__}Ops"

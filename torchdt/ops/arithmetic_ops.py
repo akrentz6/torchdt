@@ -2,6 +2,31 @@ import torch
 from torchdt.autograd import DTFunction
 from torchdt.ops import register_base_op
 
+
+def _canonical_reduction_dims(x, dim):
+    if dim is None:
+        return tuple(range(x.dim()))
+    dims = (dim,) if isinstance(dim, int) else tuple(dim)
+    if not dims:
+        return ()
+    if x.dim() == 0:
+        if any(d not in (0, -1) for d in dims):
+            raise IndexError("Dimension out of range for a scalar tensor")
+        canonical = tuple(0 for _ in dims)
+    else:
+        canonical = tuple(d % x.dim() for d in dims)
+    if len(set(canonical)) != len(canonical):
+        raise RuntimeError("dim appears multiple times in the list of dims")
+    return tuple(sorted(canonical))
+
+
+def _empty_reduction_result(ops, x, red_dims, keepdim, identity):
+    if keepdim:
+        shape = tuple(1 if dim in red_dims else size for dim, size in enumerate(x.shape))
+    else:
+        shape = tuple(size for dim, size in enumerate(x.shape) if dim not in red_dims)
+    return ops.full(shape, identity, device=x.device)
+
 class DTAddFunction(DTFunction):
 
     @staticmethod
@@ -49,20 +74,11 @@ class DTSubFunction(DTFunction):
 
 @register_base_op("sum")
 def dt_sum(ops, x, dim=None, keepdim=False):
-    if dim is None:
-        flat = x.reshape(-1)
-        out = flat[0]
-
-        for i in range(1, flat.numel()):
-            out = ops.add(out, flat[i])
-
-        if keepdim:
-            out = out.reshape([1] * x.dim())
-
-        return out
-
-    red_dims = (dim,) if isinstance(dim, int) else tuple(dim)
-    red_dims = tuple(sorted(d % x.dim() for d in red_dims))
+    red_dims = _canonical_reduction_dims(x, dim)
+    if not red_dims or x.dim() == 0:
+        return x.clone()
+    if any(x.shape[d] == 0 for d in red_dims):
+        return _empty_reduction_result(ops, x, red_dims, keepdim, 0.0)
 
     permute_order = [d for d in range(x.dim()) if d not in red_dims] + list(red_dims)
     transposed = x.permute(*permute_order)
@@ -96,6 +112,8 @@ class DTSumFunction(DTFunction):
 
     @staticmethod
     def backward(ctx, ops, grad_output):
+        if len(ctx.x_shape) == 0:
+            return grad_output.reshape(()), None, None
         grad_x = grad_output
         if ctx.dim is None:
             grad_x = grad_x.expand(ctx.x_shape)
@@ -180,13 +198,28 @@ class DTPowFunction(DTFunction):
     def setup_context(ctx, ops, inputs, output):
         x, y = inputs
         ctx.save_for_backward(x, y, output)
+        ctx.x_shape = x.shape
+        ctx.y_shape = y.shape
+        ctx.need_x = ctx.needs_input_grad[1]
+        ctx.need_y = ctx.needs_input_grad[2]
 
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, y, output = ctx.saved_tensors
 
-        grad_x = ops.mul(grad_output, ops.mul(ops.div(output, x), y))
-        grad_y = ops.mul(grad_output, ops.mul(output, ops.log(x)))
+        grad_x = None
+        if ctx.need_x:
+            one = ops.scalar_from_float(1.0, device=x.device)
+            grad_x = ops.mul(
+                grad_output,
+                ops.mul(y, ops.pow(x, ops.sub(y, one))),
+            )
+            grad_x = ops.sum_to_size(grad_x, ctx.x_shape)
+
+        grad_y = None
+        if ctx.need_y:
+            grad_y = ops.mul(grad_output, ops.mul(output, ops.log(x)))
+            grad_y = ops.sum_to_size(grad_y, ctx.y_shape)
 
         return grad_x, grad_y
 
@@ -298,22 +331,11 @@ class DTLogFunction(DTFunction):
 
 @register_base_op("prod")
 def dt_prod(ops, x, dim=None, keepdim=False):
-
-    if dim is None:
-        flat = x.reshape(-1)
-
-        out = flat[0]
-        for i in range(1, flat.numel()):
-            out = ops.mul(out, flat[i])
-
-        if keepdim:
-            out = out.reshape([1] * x.dim())
-
-        return out
-
-    # Reduction over a subset of the dimensions
-    red_dims = (dim,) if isinstance(dim, int) else tuple(dim)
-    red_dims = tuple(sorted(d % x.dim() for d in red_dims))
+    red_dims = _canonical_reduction_dims(x, dim)
+    if not red_dims or x.dim() == 0:
+        return x.clone()
+    if any(x.shape[d] == 0 for d in red_dims):
+        return _empty_reduction_result(ops, x, red_dims, keepdim, 1.0)
 
     # transpose so that the reduction dimensions are at the end, then flatten.
     permute_order = [d for d in range(x.dim()) if d not in red_dims] + list(red_dims)
@@ -347,49 +369,37 @@ class DTProdFunction(DTFunction):
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        x, output = ctx.saved_tensors
+        x, _ = ctx.saved_tensors
+        red_dims = _canonical_reduction_dims(x, ctx.dim)
+        zero = ops.scalar_from_float(0.0, device=x.device)
+        one = ops.scalar_from_float(1.0, device=x.device)
+        is_zero = ops.eq(x, zero)
+        nonzero_x = torch.where(is_zero, one, x)
+        nonzero_product = ops.prod(nonzero_x, dim=red_dims, keepdim=True)
+        zero_count = torch.sum(is_zero, dim=red_dims, keepdim=True)
+        ratio = ops.div(nonzero_product, torch.where(is_zero, one, x))
+        derivative = torch.where(
+            zero_count == 0,
+            ratio,
+            torch.where((zero_count == 1) & is_zero, nonzero_product, zero),
+        )
 
-        # 1. Broadcast the forward result so it matches x's shape
-        if ctx.dim is not None and not ctx.keepdim:
-            red_dims = (ctx.dim,) if isinstance(ctx.dim, int) else tuple(ctx.dim)
-            red_dims = tuple(sorted(d % x.dim() for d in red_dims))
-
-            for d in red_dims:
-                output = output.unsqueeze(d)
-
-        output_broadcast = output.expand_as(x)
-        ratio = ops.div(output_broadcast, x)
-
-        # broadcast grad_output to match x's shape
-        if ctx.dim is not None and not ctx.keepdim:
+        if not ctx.keepdim:
             for d in red_dims:
                 grad_output = grad_output.unsqueeze(d)
-
-        grad_output = grad_output.expand_as(x)
-        grad_x = ops.mul(grad_output, ratio)
+        grad_x = ops.mul(grad_output.expand_as(x), derivative)
 
         return grad_x, None, None
 
 @register_base_op("mean")
 def dt_mean(ops, x, dim=None, keepdim=False):
-    if dim is None:
-        dims = None
-    else:
-        if isinstance(dim, int):
-            dims = (dim,)
-        else:
-            dims = tuple(dim)
-        # canonicalise negative indices
-        dims = tuple(d % x.dim() for d in dims)
-
-    if dims is None:
-        n_elem = x.numel()
-    else:
-        n_elem = 1
+    dims = _canonical_reduction_dims(x, dim)
+    n_elem = x.numel() if dim is None else 1
+    if dim is not None and x.dim() > 0:
         for d in dims:
             n_elem *= x.shape[d]
 
-    total = ops.sum(x, dims, keepdim)
+    total = ops.sum(x, None if dim is None else dims, keepdim)
     return ops.div(total, ops.scalar_from_float(n_elem, device=x.device))
 
 class DTMeanFunction(DTFunction):
@@ -408,28 +418,18 @@ class DTMeanFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, = ctx.saved_tensors
-
-        if ctx.dim is None:
-            dims = None
-        else:
-            if isinstance(ctx.dim, int):
-                dims = (ctx.dim,)
-            else:
-                dims = tuple(ctx.dim)
-            # canonicalise negative indices
-            dims = tuple(d % x.dim() for d in dims)
-
-        if dims is None:
-            n_elem = x.numel()
-        else:
-            n_elem = 1
+        if x.dim() == 0:
+            return grad_output.reshape(()), None, None
+        dims = _canonical_reduction_dims(x, ctx.dim)
+        n_elem = x.numel() if ctx.dim is None else 1
+        if ctx.dim is not None:
             for d in dims:
                 n_elem *= x.shape[d]
 
         grad_x = ops.div(
             grad_output, ops.scalar_from_float(n_elem, device=grad_output.device)
         )
-        if dims is None:
+        if ctx.dim is None:
             grad_x = grad_x.expand(x.shape)
 
         else:
@@ -442,22 +442,20 @@ class DTMeanFunction(DTFunction):
 
 @register_base_op("var")
 def dt_var(ops, x, correction, dim=None, keepdim=False):
-    if dim is None:
-        red_dims = None
-        N = x.numel()
-
-    else:
-        red_dims = (dim,) if isinstance(dim, int) else tuple(dim)
-        red_dims = tuple(d % x.dim() for d in red_dims)
-        N = 1
-        for d in red_dims:
+    canonical_dims = _canonical_reduction_dims(x, dim)
+    red_dims = None if dim is None else canonical_dims
+    N = x.numel() if dim is None else 1
+    if dim is not None and x.dim() > 0:
+        for d in canonical_dims:
             N *= x.shape[d]
 
-    n_elems = ops.scalar_from_float(N, device=x.device)
-
-    denom = ops.sub(n_elems, correction)
-    if denom <= 0:
+    correction_value = ops.scalar_to_float(correction)
+    denominator = N - correction_value
+    if denominator <= 0:
         raise ValueError("Degrees of freedom <= 0 for slice")
+
+    n_elems = ops.scalar_from_float(N, device=x.device)
+    denom = ops.scalar_from_float(denominator, device=x.device)
 
     total_x = ops.sum(x, dim=red_dims, keepdim=True)
     mean = ops.div(total_x, n_elems)
@@ -473,7 +471,7 @@ class DTVarFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, correction, dim=None, keepdim=False):
-        return ops.var(ops, x, correction, dim, keepdim)
+        return ops.var(x, correction, dim, keepdim)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -485,17 +483,11 @@ class DTVarFunction(DTFunction):
     @staticmethod
     def backward(ctx, ops, grad_output):
         x, correction = ctx.saved_tensors
-
-        if ctx.dim is None:
-            red_dims = None
-            N = x.numel()
-
-        else:
-            red_dims = (ctx.dim,) if isinstance(ctx.dim, int) else tuple(ctx.dim)
-            red_dims = tuple(d % x.dim() for d in red_dims)
-
-            N = 1
-            for d in red_dims:
+        canonical_dims = _canonical_reduction_dims(x, ctx.dim)
+        red_dims = None if ctx.dim is None else canonical_dims
+        N = x.numel() if ctx.dim is None else 1
+        if ctx.dim is not None and x.dim() > 0:
+            for d in canonical_dims:
                 N *= x.shape[d]
 
         total_x = ops.sum(x, dim=red_dims, keepdim=True)

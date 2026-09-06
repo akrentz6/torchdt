@@ -187,7 +187,7 @@ class DTMinimumFunction(DTFunction):
 
     @staticmethod
     def forward(ops, x, y):
-        return ops.minimum(ops, x, y)
+        return ops.minimum(x, y)
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
@@ -283,7 +283,7 @@ class DTMaxFunction(DTFunction):
             return torch.where(
                 max_values, grad_x,
                 ops.scalar_from_float(0.0, device=grad_output.device)
-            ), None, None, None
+            ), None, None
 
         x, indices = ctx.saved_tensors
 
@@ -367,7 +367,7 @@ class DTMinFunction(DTFunction):
             return torch.where(
                 min_values, grad_x,
                 ops.scalar_from_float(0.0, device=grad_output.device)
-            ), None, None, None
+            ), None, None
 
         x, indices = ctx.saved_tensors
 

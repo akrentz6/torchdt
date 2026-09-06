@@ -158,7 +158,11 @@ class DTLogSigmoidFunction(DTFunction):
 
 @register_base_op("softmin")
 def dt_softmin(ops, x, dim=-1):
-    exp_neg_x = ops.exp(ops.neg(x))
+    neg_x = ops.neg(x)
+    if x.numel() == 0:
+        return x.clone()
+    maximum = ops.max(neg_x) if dim is None else ops.max(neg_x, dim=dim, keepdim=True)[0]
+    exp_neg_x = ops.exp(ops.sub(neg_x, maximum))
     sum_exp_neg_x = ops.sum(exp_neg_x, dim=dim, keepdim=True)
     return ops.div(exp_neg_x, sum_exp_neg_x)
 
@@ -183,7 +187,10 @@ class DTSoftminFunction(DTFunction):
 
 @register_base_op("softmax")
 def dt_softmax(ops, x, dim=None):
-    exp_x = ops.exp(x)
+    if x.numel() == 0:
+        return x.clone()
+    maximum = ops.max(x) if dim is None else ops.max(x, dim=dim, keepdim=True)[0]
+    exp_x = ops.exp(ops.sub(x, maximum))
     sum_exp_x = ops.sum(exp_x, dim=dim, keepdim=True)
     return ops.div(exp_x, sum_exp_x)
 
@@ -295,3 +302,175 @@ class DTGluFunction(DTFunction):
 
         grad_x = torch.cat([grad_a, grad_b], dim=ctx.dim)
         return grad_x, None
+
+
+@register_base_op("erf")
+def dt_erf(ops, x):
+    return ops.from_float(torch.erf(ops.to_float(x)))
+
+
+class DTErfFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x):
+        return ops.erf(x)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, = inputs
+        ctx.save_for_backward(x)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        x, = ctx.saved_tensors
+        coefficient = ops.scalar_from_float(2.0 / torch.pi ** 0.5, device=x.device)
+        exponent = ops.neg(ops.square(x))
+        return ops.mul(grad_output, ops.mul(coefficient, ops.exp(exponent)))
+
+
+@register_base_op("gelu")
+def dt_gelu(ops, x, approximate="none"):
+    half = ops.scalar_from_float(0.5, device=x.device)
+    one = ops.scalar_from_float(1.0, device=x.device)
+    if approximate == "none":
+        inv_sqrt_two = ops.scalar_from_float(2.0 ** -0.5, device=x.device)
+        return ops.mul(ops.mul(half, x), ops.add(one, ops.erf(ops.mul(x, inv_sqrt_two))))
+    if approximate != "tanh":
+        raise ValueError("approximate must be 'none' or 'tanh'")
+    coefficient = ops.scalar_from_float((2.0 / torch.pi) ** 0.5, device=x.device)
+    cubic = ops.mul(ops.scalar_from_float(0.044715, device=x.device), ops.mul(ops.square(x), x))
+    inner = ops.mul(coefficient, ops.add(x, cubic))
+    return ops.mul(ops.mul(half, x), ops.add(one, ops.tanh(inner)))
+
+
+class DTGeluFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, approximate="none"):
+        return ops.gelu(x, approximate)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, approximate = inputs
+        ctx.save_for_backward(x)
+        ctx.approximate = approximate
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        x, = ctx.saved_tensors
+        half = ops.scalar_from_float(0.5, device=x.device)
+        one = ops.scalar_from_float(1.0, device=x.device)
+        if ctx.approximate == "none":
+            inv_sqrt_two = ops.scalar_from_float(2.0 ** -0.5, device=x.device)
+            cdf = ops.mul(half, ops.add(one, ops.erf(ops.mul(x, inv_sqrt_two))))
+            density_scale = ops.scalar_from_float((2.0 * torch.pi) ** -0.5, device=x.device)
+            density = ops.mul(density_scale, ops.exp(ops.mul(
+                ops.scalar_from_float(-0.5, device=x.device), ops.square(x)
+            )))
+            derivative = ops.add(cdf, ops.mul(x, density))
+        else:
+            coefficient = ops.scalar_from_float((2.0 / torch.pi) ** 0.5, device=x.device)
+            cubic_coefficient = ops.scalar_from_float(0.044715, device=x.device)
+            inner = ops.mul(coefficient, ops.add(x, ops.mul(cubic_coefficient, ops.mul(ops.square(x), x))))
+            tanh_inner = ops.tanh(inner)
+            inner_derivative = ops.mul(coefficient, ops.add(
+                one,
+                ops.mul(ops.scalar_from_float(3.0 * 0.044715, device=x.device), ops.square(x)),
+            ))
+            derivative = ops.add(
+                ops.mul(half, ops.add(one, tanh_inner)),
+                ops.mul(ops.mul(half, x), ops.mul(
+                    ops.sub(one, ops.square(tanh_inner)), inner_derivative
+                )),
+            )
+        return ops.mul(grad_output, derivative), None
+
+
+@register_base_op("silu")
+def dt_silu(ops, x):
+    return ops.mul(x, ops.sigmoid(x))
+
+
+class DTSiluFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x):
+        return ops.silu(x)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, = inputs
+        ctx.save_for_backward(x)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        x, = ctx.saved_tensors
+        sigmoid = ops.sigmoid(x)
+        one = ops.scalar_from_float(1.0, device=x.device)
+        derivative = ops.mul(sigmoid, ops.add(one, ops.mul(x, ops.sub(one, sigmoid))))
+        return ops.mul(grad_output, derivative)
+
+
+@register_base_op("softplus")
+def dt_softplus(ops, x, beta=1.0, threshold=20.0):
+    beta_value = ops.scalar_from_float(beta, device=x.device)
+    threshold_value = ops.scalar_from_float(threshold, device=x.device)
+    one = ops.scalar_from_float(1.0, device=x.device)
+    scaled = ops.mul(x, beta_value)
+    unthresholded = ops.div(ops.log(ops.add(one, ops.exp(scaled))), beta_value)
+    return torch.where(ops.gt(scaled, threshold_value), x, unthresholded)
+
+
+class DTSoftplusFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, beta=1.0, threshold=20.0):
+        return ops.softplus(x, beta, threshold)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, beta, threshold = inputs
+        ctx.save_for_backward(x)
+        ctx.beta = beta
+        ctx.threshold = threshold
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        x, = ctx.saved_tensors
+        beta = ops.scalar_from_float(ctx.beta, device=x.device)
+        threshold = ops.scalar_from_float(ctx.threshold, device=x.device)
+        scaled = ops.mul(x, beta)
+        one = ops.scalar_from_float(1.0, device=x.device)
+        derivative = torch.where(ops.gt(scaled, threshold), one, ops.sigmoid(scaled))
+        return ops.mul(grad_output, derivative), None, None
+
+
+@register_base_op("mish")
+def dt_mish(ops, x):
+    return ops.mul(x, ops.tanh(ops.softplus(x)))
+
+
+class DTMishFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x):
+        return ops.mish(x)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, = inputs
+        ctx.save_for_backward(x)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        x, = ctx.saved_tensors
+        one = ops.scalar_from_float(1.0, device=x.device)
+        softplus = ops.softplus(x)
+        tanh_softplus = ops.tanh(softplus)
+        derivative = ops.add(
+            tanh_softplus,
+            ops.mul(x, ops.mul(
+                ops.sub(one, ops.square(tanh_softplus)), ops.sigmoid(x)
+            )),
+        )
+        return ops.mul(grad_output, derivative)

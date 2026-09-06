@@ -1,3 +1,5 @@
+import itertools
+import math
 import torch
 from torchdt.autograd import DTFunction
 from torchdt.ops import register_base_op
@@ -292,7 +294,13 @@ class DTGetItemFunction(DTFunction):
             idx = ctx.idx
 
         grad_x = ops.zeros(ctx.x_shape, device=ctx.x_device)
-        grad_x[idx] = grad_output
+        positions = torch.arange(
+            math.prod(ctx.x_shape), device=ctx.x_device
+        ).reshape(ctx.x_shape)[idx]
+        values = grad_output.expand(positions.shape).reshape(-1)
+        flat_grad = grad_x.reshape(-1)
+        for position, value in zip(positions.reshape(-1).tolist(), values):
+            flat_grad[position] = ops.add(flat_grad[position], value)
         return grad_x, None
 
 @register_base_op("setitem")
@@ -309,36 +317,43 @@ class DTSetItemFunction(DTFunction):
 
     @staticmethod
     def setup_context(ctx, ops, inputs, output):
-        _, idx, value = inputs
+        x, idx, value = inputs
         ctx.value_shape = value.shape
         ctx.is_idx_tensor = torch.is_tensor(idx)
+        positions = torch.arange(
+            math.prod(x.shape), device=x.device
+        ).reshape(x.shape)[idx]
         if ctx.is_idx_tensor:
-            ctx.save_for_backward(idx)
+            ctx.save_for_backward(idx, positions)
         else:
             ctx.idx = idx
+            ctx.save_for_backward(positions)
 
     @staticmethod
     def backward(ctx, ops, grad_output):
         if ctx.is_idx_tensor:
-            idx, = ctx.saved_tensors
+            idx, positions = ctx.saved_tensors
         else:
             idx = ctx.idx
+            positions, = ctx.saved_tensors
 
         grad_x = grad_output.clone()
         grad_x[idx] = ops.scalar_from_float(0.0, device=grad_x.device)
         grad_value = grad_output[idx]
+        flat_positions = positions.reshape(-1).tolist()
+        keep = torch.zeros(len(flat_positions), dtype=torch.bool, device=grad_output.device)
+        seen = set()
+        for offset in range(len(flat_positions) - 1, -1, -1):
+            position = flat_positions[offset]
+            if position not in seen:
+                keep[offset] = True
+                seen.add(position)
+        keep = keep.reshape(positions.shape)
+        zero = ops.scalar_from_float(0.0, device=grad_output.device)
+        grad_value = torch.where(keep, grad_value, zero)
+        grad_value = ops.sum_to_size(grad_value, ctx.value_shape)
 
-        if grad_value.shape != ctx.value_shape:
-            # Find the dims that were broadcast (= size 1 in value but >1 in grad_value)
-            extra_dims = (
-                [i for i, (gv, v) in enumerate(zip(grad_value.shape[-len(ctx.value_shape):],
-                                                   ctx.value_shape)) if v == 1 and gv != 1]
-                + list(range(len(grad_value.shape) - len(ctx.value_shape)))  # leading dims
-            )
-            grad_value = ops.sum(grad_value, dim=extra_dims, keepdim=True)
-            grad_value = grad_value.reshape(ctx.value_shape)
-
-        return grad_x, None, grad_value, None
+        return grad_x, None, grad_value
 
 @register_base_op("to")
 def dt_to(ops, x, device):
@@ -418,17 +433,14 @@ class DTRepeatFunction(DTFunction):
 
     @staticmethod
     def backward(ctx, ops, grad_output):
-        grad_x = grad_output
-        for dim, rep in enumerate(ctx.repeats):
-            if rep == 1:
-                continue
-
-            new_shape = list(grad_x.shape)
-            new_shape[dim] = ctx.input_shape[dim]
-            new_shape.insert(dim + 1, rep)
-            grad_x = ops.sum(grad_x.view(*new_shape), dim=dim+1)
-
-        return grad_x, None
+        padded_shape = (1,) * (len(ctx.repeats) - len(ctx.input_shape)) + ctx.input_shape
+        interleaved = []
+        for repeat, size in zip(ctx.repeats, padded_shape):
+            interleaved.extend((repeat, size))
+        grad_x = grad_output.reshape(interleaved)
+        for dim in range(2 * len(ctx.repeats) - 2, -1, -2):
+            grad_x = ops.sum(grad_x, dim=dim)
+        return grad_x.reshape(ctx.input_shape), None
 
 @register_base_op("flatten")
 def dt_flatten(ops, x, start_dim=0, end_dim=-1):
@@ -469,3 +481,331 @@ class DTReshapeFunction(DTFunction):
     def backward(ctx, ops, grad_output):
         grad_x = grad_output.reshape(ctx.original_shape)
         return grad_x, None
+
+
+@register_base_op("permute")
+def dt_permute(ops, x, dims):
+    return x.permute(dims)
+
+
+class DTPermuteFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, dims):
+        return ops.permute(x, dims)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        _, dims = inputs
+        ctx.inverse = tuple(sorted(range(len(dims)), key=dims.__getitem__))
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        return grad_output.permute(ctx.inverse), None
+
+
+@register_base_op("select")
+def dt_select(ops, x, dim, index):
+    return x.select(dim, index)
+
+
+class DTSelectFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, dim, index):
+        return ops.select(x, dim, index)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, dim, index = inputs
+        ctx.shape = x.shape
+        ctx.device = x.device
+        ctx.dim = dim
+        ctx.index = index
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        grad_x = ops.zeros(ctx.shape, device=ctx.device)
+        grad_x.select(ctx.dim, ctx.index).copy_(grad_output)
+        return grad_x, None, None
+
+
+@register_base_op("narrow")
+def dt_narrow(ops, x, dim, start, length):
+    return x.narrow(dim, start, length)
+
+
+class DTNarrowFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, dim, start, length):
+        return ops.narrow(x, dim, start, length)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, dim, start, length = inputs
+        ctx.shape = x.shape
+        ctx.device = x.device
+        ctx.dim = dim
+        ctx.start = start
+        ctx.length = length
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        grad_x = ops.zeros(ctx.shape, device=ctx.device)
+        grad_x.narrow(ctx.dim, ctx.start, ctx.length).copy_(grad_output)
+        return grad_x, None, None, None
+
+
+@register_base_op("split")
+def dt_split(ops, x, split_size_or_sections, dim=0):
+    return torch.split(x, split_size_or_sections, dim=dim)
+
+
+class DTSplitFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, split_size_or_sections, dim=0):
+        return ops.split(x, split_size_or_sections, dim)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        _, _, dim = inputs
+        ctx.dim = dim
+        ctx.shapes = [part.shape for part in output]
+        ctx.set_materialize_grads(False)
+
+    @staticmethod
+    def backward(ctx, ops, *grad_outputs):
+        device = next((grad.device for grad in grad_outputs if grad is not None), None)
+        parts = [
+            grad if grad is not None else ops.zeros(shape, device=device)
+            for grad, shape in zip(grad_outputs, ctx.shapes)
+        ]
+        return torch.cat(parts, dim=ctx.dim), None, None
+
+
+@register_base_op("unbind")
+def dt_unbind(ops, x, dim=0):
+    return torch.unbind(x, dim=dim)
+
+
+class DTUnbindFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, dim=0):
+        return ops.unbind(x, dim)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, dim = inputs
+        ctx.dim = dim
+        ctx.part_shape = output[0].shape if output else x.shape[:dim] + x.shape[dim + 1:]
+        ctx.device = x.device
+        ctx.set_materialize_grads(False)
+
+    @staticmethod
+    def backward(ctx, ops, *grad_outputs):
+        parts = [
+            grad if grad is not None else ops.zeros(ctx.part_shape, device=ctx.device)
+            for grad in grad_outputs
+        ]
+        return torch.stack(parts, dim=ctx.dim), None
+
+
+def _scatter_add_along_dim(ops, destination, dim, index, source):
+    dim %= destination.dim()
+    result = destination.clone()
+    if index.dim() != result.dim() or source.dim() != result.dim():
+        raise RuntimeError("index, source, and input must have the same number of dimensions")
+    if index.dtype != torch.int64:
+        raise RuntimeError("scatter_add index must have dtype torch.int64")
+    if any(index.shape[d] > source.shape[d] for d in range(index.dim())):
+        raise RuntimeError("scatter_add index shape must not exceed source shape")
+    if any(
+        index.shape[d] > result.shape[d]
+        for d in range(index.dim()) if d != dim
+    ):
+        raise RuntimeError("scatter_add index shape must not exceed input shape outside dim")
+    if index.numel() and torch.any((index < 0) | (index >= result.shape[dim])):
+        raise RuntimeError("index out of bounds in scatter_add")
+    for index_coord in itertools.product(*(range(size) for size in index.shape)):
+        target_coord = list(index_coord)
+        target_coord[dim] = int(index[index_coord].item())
+        target_coord = tuple(target_coord)
+        result[target_coord] = ops.add(result[target_coord], source[index_coord])
+    return result
+
+
+@register_base_op("index_select")
+def dt_index_select(ops, x, dim, index):
+    return torch.index_select(x, dim, index)
+
+
+class DTIndexSelectFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, dim, index):
+        return ops.index_select(x, dim, index)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, dim, index = inputs
+        ctx.shape = x.shape
+        ctx.device = x.device
+        ctx.dim = dim
+        ctx.save_for_backward(index)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        index, = ctx.saved_tensors
+        grad_x = ops.zeros(ctx.shape, device=ctx.device)
+        grad_x = ops.index_add(grad_x, ctx.dim, index, grad_output)
+        return grad_x, None, None
+
+
+@register_base_op("gather")
+def dt_gather(ops, x, dim, index):
+    return torch.gather(x, dim, index)
+
+
+class DTGatherFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, dim, index):
+        return ops.gather(x, dim, index)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, dim, index = inputs
+        ctx.shape = x.shape
+        ctx.device = x.device
+        ctx.dim = dim
+        ctx.save_for_backward(index)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        index, = ctx.saved_tensors
+        grad_x = ops.zeros(ctx.shape, device=ctx.device)
+        grad_x = ops.scatter_add(grad_x, ctx.dim, index, grad_output)
+        return grad_x, None, None
+
+
+@register_base_op("take_along_dim")
+def dt_take_along_dim(ops, x, indices, dim=None):
+    return torch.take_along_dim(x, indices, dim=dim)
+
+
+class DTTakeAlongDimFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, indices, dim=None):
+        return ops.take_along_dim(x, indices, dim)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        x, indices, dim = inputs
+        ctx.shape = x.shape
+        ctx.device = x.device
+        ctx.dim = dim
+        ctx.save_for_backward(indices)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        indices, = ctx.saved_tensors
+        if ctx.dim is None:
+            flat = ops.zeros((math.prod(ctx.shape),), device=ctx.device)
+            flat = ops.scatter_add(flat, 0, indices.reshape(-1), grad_output.reshape(-1))
+            grad_x = flat.reshape(ctx.shape)
+        else:
+            grad_x = ops.zeros(ctx.shape, device=ctx.device)
+            grad_x = ops.scatter_add(grad_x, ctx.dim, indices, grad_output)
+        return grad_x, None, None
+
+
+@register_base_op("index_add")
+def dt_index_add(ops, x, dim, index, source, alpha=1):
+    if alpha != 1:
+        raise NotImplementedError("DType index_add currently requires alpha=1")
+    dim %= x.dim()
+    if index.dim() != 1 or index.dtype not in (torch.int64, torch.int32):
+        raise RuntimeError("index_add index must be a one-dimensional integer tensor")
+    if index.numel() and torch.any((index < 0) | (index >= x.shape[dim])):
+        raise IndexError("index out of range in index_add")
+    expected = list(x.shape)
+    expected[dim] = index.numel()
+    if tuple(source.shape) != tuple(expected):
+        raise RuntimeError(f"source shape must be {tuple(expected)}, got {tuple(source.shape)}")
+    expanded_index = index.reshape(
+        *([1] * dim), index.numel(), *([1] * (x.dim() - dim - 1))
+    ).expand(source.shape)
+    return _scatter_add_along_dim(ops, x, dim, expanded_index, source)
+
+
+class DTIndexAddFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, dim, index, source, alpha=1):
+        return ops.index_add(x, dim, index, source, alpha)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        _, dim, index, _, alpha = inputs
+        ctx.dim = dim
+        ctx.alpha = alpha
+        ctx.save_for_backward(index)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        index, = ctx.saved_tensors
+        grad_source = ops.index_select(grad_output, ctx.dim, index)
+        return grad_output, None, None, grad_source, None
+
+
+@register_base_op("scatter_add")
+def dt_scatter_add(ops, x, dim, index, source):
+    return _scatter_add_along_dim(ops, x, dim, index, source)
+
+
+class DTScatterAddFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, dim, index, source):
+        return ops.scatter_add(x, dim, index, source)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        _, dim, index, _ = inputs
+        ctx.dim = dim
+        ctx.save_for_backward(index)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        index, = ctx.saved_tensors
+        grad_source = ops.gather(grad_output, ctx.dim, index)
+        return grad_output, None, None, grad_source
+
+
+@register_base_op("masked_fill")
+def dt_masked_fill(ops, x, mask, value):
+    if mask.dtype is not torch.bool:
+        raise TypeError("masked_fill mask must be boolean")
+    return torch.where(mask, value, x)
+
+
+class DTMaskedFillFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, mask, value):
+        return ops.masked_fill(x, mask, value)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        _, mask, _ = inputs
+        ctx.save_for_backward(mask)
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        mask, = ctx.saved_tensors
+        zero = ops.scalar_from_float(0.0, device=grad_output.device)
+        return torch.where(mask, zero, grad_output), None, None

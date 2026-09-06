@@ -7,3 +7,4 @@ from . import loss_funcs
 from . import layer_funcs
 from . import creation_funcs
 from . import init_funcs
+from . import attention_funcs
