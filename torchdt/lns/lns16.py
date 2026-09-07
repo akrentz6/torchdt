@@ -25,6 +25,8 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
         validate_precision(prec, table)
         precision = prec
         base = lns_base(precision)
+        tab_sbdb = None
+        tab_ez = None
         tab_exp = None
         LNS16.ops.clear_scalar_cache()
 
@@ -44,6 +46,12 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
             def lns16_exp(ops, x):
                 idx = (x.to(torch.int32) - torch.iinfo(torch.int16).min).to(torch.long)
                 return tab_exp[idx]
+        else:
+            LNS16.register_op("add")(lns16_add)
+            # A table configuration installs a dtype-specific exp override.
+            # Returning to analytic mode must expose the shared implementation.
+            LNS16.ops._implementations.get("python", {}).pop("exp", None)
+            LNS16.ops._direct_ops.clear()
 
     @classmethod
     def enable_triton(cls, accumulator: bool | str = False):
@@ -295,6 +303,8 @@ def _checked_add(x: Tensor, y: Tensor, overflow_sign: Tensor) -> Tensor:
 @LNS16.register_op("from_float")
 def lns16_from_float(ops, t: Tensor) -> Tensor:
     t = t.to(dtype=torch.float64)
+    if torch.any(torch.isnan(t)):
+        raise ValueError("LNS16 cannot encode NaN values")
     abs_t = torch.abs(t)
 
     log_t = torch.log(abs_t) / torch.log(base)

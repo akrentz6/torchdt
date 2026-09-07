@@ -71,6 +71,8 @@ def _checked_add(x: Tensor, y: Tensor, overflow_sign: Tensor) -> Tensor:
 @LNS32.register_op("from_float")
 def lns32_from_float(ops, t: Tensor) -> Tensor:
     t = t.to(dtype=torch.float64)
+    if torch.any(torch.isnan(t)):
+        raise ValueError("LNS32 cannot encode NaN values")
     abs_t = torch.abs(t)
 
     log_t = torch.log(abs_t) / torch.log(base)

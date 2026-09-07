@@ -1,5 +1,6 @@
 import hashlib
 import math
+import struct
 
 import torch
 from torchdt.ops import TritonAccumulatorOps, TritonScalarOps, register_triton_ops, require_triton
@@ -253,6 +254,7 @@ def make_lns_triton_scalar_ops(
     tab_ez=None,
 ) -> TritonScalarOps:
     triton, tl = require_triton()
+    from triton.language.extra import libdevice
 
     tl_int_dtype = _lns_triton_int_dtype(bitwidth, tl)
 
@@ -265,7 +267,10 @@ def make_lns_triton_scalar_ops(
     # LOG2_BASE = tl.constexpr(log2_base_value)
     # NAN_VALUE = tl.constexpr(0)
 
-    LOG_BASE = tl.constexpr(torch.log(base).item())
+    LOG_BASE_VALUE = torch.log(base).item()
+    LOG_BASE_BITS = tl.constexpr(
+        struct.unpack("q", struct.pack("d", LOG_BASE_VALUE))[0]
+    )
     ZERO = tl.constexpr(zero_value)
     POS_INF = tl.constexpr(pos_inf_value)
     NEG_INF = tl.constexpr(neg_inf_value)
@@ -327,9 +332,10 @@ def make_lns_triton_scalar_ops(
     @triton.jit
     def from_float(x):
         abs_x = tl.abs(tl.cast(x, tl.float64))
-        log_x = tl.log(abs_x) / tl.cast(LOG_BASE, tl.float64)
+        log_base = tl.cast(LOG_BASE_BITS, tl.float64, bitcast=True)
+        log_x = libdevice.log(abs_x) / log_base
 
-        rounded = tl.where(log_x >= 0, tl.floor(log_x + 0.5), tl.ceil(log_x - 0.5))
+        rounded = libdevice.rint(log_x)
         sign_bit = tl.cast(x < 0, tl_int_dtype)
         finite_rounded = tl.minimum(
             tl.maximum(rounded, tl.cast(MIN_FINITE_LOG, tl.float64)),
@@ -351,7 +357,8 @@ def make_lns_triton_scalar_ops(
         log_x = x >> 1
         sign = tl.where((x & 1) == 1, -1.0, 1.0)
 
-        abs_x = tl.exp(tl.cast(LOG_BASE, tl.float64) * tl.cast(log_x, tl.float64))
+        log_base = tl.cast(LOG_BASE_BITS, tl.float64, bitcast=True)
+        abs_x = libdevice.exp(log_base * tl.cast(log_x, tl.float64))
         float_x = sign * abs_x
 
         return tl.where(
@@ -487,23 +494,24 @@ def make_lns_triton_scalar_ops(
         @triton.jit
         def add(x, y):
             max_operand = tl.maximum(x, y)
+            log_base = tl.cast(LOG_BASE_BITS, tl.float64, bitcast=True)
 
             abs_diff = tl.abs((x >> 1) - (y >> 1)).to(tl.float64)
             sign_diff = ((x ^ y) & 1).to(tl.float64)
 
-            power_term = tl.exp(LOG_BASE * -abs_diff)
+            power_term = libdevice.exp(log_base * -abs_diff)
             magnitude = tl.abs(1.0 - 2.0 * sign_diff + power_term)
 
-            log_term = tl.log(magnitude) / LOG_BASE
-            rounded = tl.where(log_term >= 0, tl.floor(log_term + 0.5), tl.ceil(log_term - 0.5))
+            log_term = libdevice.log(magnitude) / log_base
+            rounded = libdevice.rint(log_term)
             sbdb = rounded.to(tl_int_dtype) * 2
 
             result = checked_add(max_operand, sbdb, max_operand & 1)
             return tl.where(x == ZERO, y, tl.where(y == ZERO, x, tl.where(x == neg(y), tl.cast(ZERO, tl_int_dtype), result)))
 
-        _bump_triton_jit_hash(add, LOG_BASE=LOG_BASE, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
+        _bump_triton_jit_hash(add, LOG_BASE_BITS=LOG_BASE_BITS, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
 
-    _bump_triton_jit_hash(from_float, LOG_BASE=LOG_BASE, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
+    _bump_triton_jit_hash(from_float, LOG_BASE_BITS=LOG_BASE_BITS, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
     # _bump_triton_jit_hash(
     #     from_float,
     #     LOG_BASE=LOG_BASE,
@@ -516,7 +524,7 @@ def make_lns_triton_scalar_ops(
     #     use_fast_from_float=use_fast_from_float,
     # )
 
-    _bump_triton_jit_hash(to_float, LOG_BASE=LOG_BASE, ZERO=ZERO, bitwidth=bitwidth)
+    _bump_triton_jit_hash(to_float, LOG_BASE_BITS=LOG_BASE_BITS, ZERO=ZERO, bitwidth=bitwidth)
     _bump_triton_jit_hash(mul, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
     _bump_triton_jit_hash(div, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
     _bump_triton_jit_hash(sqrt, ZERO=ZERO, bitwidth=bitwidth)

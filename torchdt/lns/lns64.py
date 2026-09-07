@@ -24,6 +24,8 @@ class LNS64(DType, bitwidth=64):
         validate_precision(prec, table)
         precision = prec
         base = lns_base(precision)
+        tab_sbdb = None
+        tab_ez = None
         LNS64.ops.clear_scalar_cache()
 
         if table:
@@ -36,6 +38,8 @@ class LNS64(DType, bitwidth=64):
                 filestem=filestem,
             )
             register_table_add(LNS64, zero=ZERO, tab_sbdb=tab_sbdb, tab_ez=tab_ez)
+        else:
+            LNS64.register_op("add")(lns64_add)
 
     @classmethod
     def enable_triton(cls):
@@ -67,6 +71,8 @@ def _checked_add(x: Tensor, y: Tensor, overflow_sign: Tensor) -> Tensor:
 @LNS64.register_op("from_float")
 def lns64_from_float(ops, t: Tensor) -> Tensor:
     t = t.to(dtype=torch.float64)
+    if torch.any(torch.isnan(t)):
+        raise ValueError("LNS64 cannot encode NaN values")
     abs_t = torch.abs(t)
 
     log_t = torch.log(abs_t) / torch.log(base)
