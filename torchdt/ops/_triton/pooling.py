@@ -113,6 +113,12 @@ def register_ops(context):
 
     @dtype_cls.register_op("max_pool2d", backend="triton")
     def dt_max_pool2d(ops, x, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
+        if x.dim() == 3:
+            raise NotImplementedError(
+                "Triton max_pool2d does not support unbatched 3D input; disable the Triton backend for this operation"
+            )
+        if x.dim() != 4:
+            raise RuntimeError("max_pool2d input must be a 3D or 4D tensor")
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
         if isinstance(padding, int):
@@ -139,6 +145,9 @@ def register_ops(context):
 
         s_x_n, s_x_c, s_x_h, s_x_w = x.stride()
         s_y_n, s_y_c, s_y_h, s_y_w = output.stride()
+
+        if output.numel() == 0:
+            return (output, indices) if return_indices else output
 
         grid = lambda META: (N * C, Hout, triton.cdiv(Wout, META["BLOCK_HW"]))
         max_pool2d_kernel[grid](
@@ -420,6 +429,14 @@ def register_ops(context):
 
     @dtype_cls.register_op("adaptive_avg_pool2d", backend="triton")
     def dt_adaptive_avg_pool2d(ops, x, output_size):
+        if x.dim() == 3:
+            raise NotImplementedError(
+                "Triton adaptive_avg_pool2d does not support unbatched 3D input; disable the Triton backend for this operation"
+            )
+        if x.dim() != 4:
+            raise RuntimeError("adaptive_avg_pool2d input must be a 3D or 4D tensor")
+        if isinstance(output_size, int):
+            output_size = (output_size, output_size)
         N, C, H, W = x.shape
         Hout, Wout = output_size
 
@@ -427,6 +444,9 @@ def register_ops(context):
 
         s_x_n, s_x_c, s_x_h, s_x_w = x.stride()
         s_y_n, s_y_c, s_y_h, s_y_w = output.stride()
+
+        if output.numel() == 0:
+            return output
 
         Kh_max = _max_adaptive_window(H, Hout)
         Kw_max = _max_adaptive_window(W, Wout)
@@ -595,5 +615,4 @@ def register_ops(context):
                              cast=("input",), backend="triton")
     def dt_adaptive_avg_pool2d(input, output_size):
         return DTAdaptiveAvgPool2dFunction.apply(input, output_size)
-
 

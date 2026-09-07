@@ -271,6 +271,20 @@ def register_ops(context):
         target_stride_meta = _metadata_tensor(tuple(target.stride()), target.device)
         return target_shape, target_shape_meta, x_nonclass_stride_meta, target_stride_meta, x_class_stride
 
+    def _validate_nll_inputs(x, target, weight, ignore_index):
+        if target.dtype not in (torch.int64, torch.int32):
+            raise NotImplementedError("probability targets are not supported")
+        target_shape, _, _ = _nll_target_shape_and_strides(x, target)
+        class_dim = 0 if x.dim() == 1 else 1
+        classes = x.shape[class_dim]
+        if weight is not None and (weight.dim() != 1 or weight.numel() != classes):
+            raise ValueError("weight must be one-dimensional with one value per class")
+        if target.numel():
+            invalid = (target != ignore_index) & ((target < 0) | (target >= classes))
+            if torch.any(invalid):
+                raise IndexError("Target is out of bounds")
+        return target_shape
+
     def _nll_empty_weight(device):
         return torch.empty(0, device=device, dtype=dtype_cls.int_dtype)
 
@@ -312,6 +326,8 @@ def register_ops(context):
     def dt_nll_loss(ops, x, target, weight=None, reduction='mean', ignore_index=-100, return_denominator=False):
         if reduction not in ("none", "sum", "mean"):
             raise ValueError(f"Invalid reduction: {reduction}")
+
+        _validate_nll_inputs(x, target, weight, ignore_index)
 
         target_shape, target_shape_meta, x_nonclass_stride_meta, target_stride_meta, x_class_stride = _nll_metadata(x, target)
         weight, weight_stride, has_weight = _nll_weight_and_stride(weight, x.device)
@@ -427,6 +443,7 @@ def register_ops(context):
     def nll_loss(input, target, weight=None, size_average=None, ignore_index=-100, reduce=None, reduction='mean'):
         if size_average is not None or reduce is not None:
             reduction = _Reduction.legacy_get_string(size_average, reduce)
+        if reduction not in ("none", "sum", "mean"):
+            raise ValueError(f"invalid reduction '{reduction}'")
         return DTNLLLossFunction.apply(input, target, weight, reduction, ignore_index)
-
 

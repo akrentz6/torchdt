@@ -86,6 +86,7 @@ def register_ops(context):
             triton.Config({"BLOCK_T": 1024}, num_warps=4, num_stages=1),
         ],
         key=["ntiles"],
+        restore_value=["rm_ptr"],
     )
     @triton.jit
     def batch_norm2d_mean_finalize_kernel(
@@ -173,6 +174,7 @@ def register_ops(context):
             triton.Config({"BLOCK_T": 1024}, num_warps=4, num_stages=1),
         ],
         key=["ntiles"],
+        restore_value=["rv_ptr"],
     )
     @triton.jit
     def batch_norm2d_var_finalize_kernel(
@@ -307,11 +309,41 @@ def register_ops(context):
 
     @dtype_cls.register_op("batch_norm", backend="triton")
     def dt_batch_norm(ops, x, running_mean, running_var, momentum, eps, weight=None, bias=None, training=False):
+        if x.dim() != 4:
+            raise NotImplementedError(
+                "Triton batch_norm currently supports only batched 4D inputs"
+            )
         PARTIAL_BLOCK = 128
 
         N, C, H, W = x.shape
         HW = H * W
         count = N * H * W
+        if running_mean is None or running_var is None:
+            raise NotImplementedError(
+                "Triton batch_norm requires running_mean and running_var"
+            )
+        for name, tensor in (
+            ("running_mean", running_mean),
+            ("running_var", running_var),
+            ("weight", weight),
+            ("bias", bias),
+        ):
+            if tensor is None:
+                continue
+            if tensor.dim() != 1 or tensor.numel() != C:
+                raise ValueError(f"batch_norm {name} must have {C} elements")
+            if not tensor.is_contiguous():
+                raise NotImplementedError(
+                    f"Triton batch_norm requires contiguous {name}"
+                )
+        if training and count <= 1:
+            raise ValueError(
+                "Expected more than 1 value per channel when training"
+            )
+        if count == 0:
+            raise NotImplementedError(
+                "Triton batch_norm does not support zero-length inputs"
+            )
         partial_tiles = triton.cdiv(count, PARTIAL_BLOCK)
 
         has_weight = weight is not None
@@ -749,7 +781,8 @@ def register_ops(context):
                              cast=("input", "running_mean", "running_var", "weight", "bias"),
                              backend="triton")
     def dt_batch_norm(input, running_mean, running_var, weight=None, bias=None, training=False, momentum=0.1, eps=1e-5):
-        assert input.dim() == 4, "torchdt only supports 2D batch norm for now"
+        if input.dim() != 4:
+            raise NotImplementedError(
+                "Triton batch_norm currently supports only batched 4D inputs"
+            )
         return DTBatchNormFunction.apply(input, running_mean, running_var, weight, bias, training, momentum, eps)
-
-

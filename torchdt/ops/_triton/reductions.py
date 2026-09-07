@@ -3,6 +3,7 @@ import math
 import torch
 
 from torchdt.autograd import DTFunction
+from torchdt.ops.arithmetic_ops import _canonical_reduction_dims
 
 def register_ops(context):
     triton = context.triton
@@ -251,6 +252,137 @@ def register_ops(context):
         )
         return out
 
+    @triton.jit
+    def masked_softmax_forward_kernel(
+        x_ptr, blocked_ptr, y_ptr,
+        kept_shape_ptr,
+        x_kept_stride_ptr, blocked_kept_stride_ptr, y_kept_stride_ptr,
+        M, N, x_reduce_stride, blocked_reduce_stride, y_reduce_stride,
+        KEPT_NDIM: tl.constexpr,
+        CONTIGUOUS_LAST: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        if CONTIGUOUS_LAST:
+            x_base = row * N
+            blocked_base = row * N
+            y_base = row * N
+        else:
+            x_base = reduction_row_base_offset(
+                row, kept_shape_ptr, x_kept_stride_ptr, KEPT_NDIM
+            )
+            blocked_base = reduction_row_base_offset(
+                row, kept_shape_ptr, blocked_kept_stride_ptr, KEPT_NDIM
+            )
+            y_base = reduction_row_base_offset(
+                row, kept_shape_ptr, y_kept_stride_ptr, KEPT_NDIM
+            )
+
+        lane = tl.arange(0, BLOCK)
+        row_max = tl.cast(_NEG_INF, tl_int_dtype)
+        has_value = False
+        for start in range(0, N, BLOCK):
+            idx = start + lane
+            in_bounds = idx < N
+            blocked = tl.load(
+                blocked_ptr + blocked_base + idx * blocked_reduce_stride,
+                mask=in_bounds, other=True,
+            )
+            valid = in_bounds & ~blocked
+            x = tl.load(
+                x_ptr + x_base + idx * x_reduce_stride,
+                mask=valid, other=_NEG_INF,
+            )
+            tile_max = tl.reduce(x, axis=0, combine_fn=max_combine_fn)
+            row_max = tl.where(gt(tile_max, row_max), tile_max, row_max)
+            has_value |= tl.sum(valid.to(tl.int32), axis=0) != 0
+
+        sum_acc = to_accumulator(tl.cast(_ZERO, tl_int_dtype))
+        for start in range(0, N, BLOCK):
+            idx = start + lane
+            in_bounds = idx < N
+            blocked = tl.load(
+                blocked_ptr + blocked_base + idx * blocked_reduce_stride,
+                mask=in_bounds, other=True,
+            )
+            valid = in_bounds & ~blocked
+            x = tl.load(
+                x_ptr + x_base + idx * x_reduce_stride,
+                mask=valid, other=row_max,
+            )
+            exp_value = tl.where(
+                valid, exp(sub(x, row_max)), tl.cast(_ZERO, tl_int_dtype)
+            )
+            sum_acc = acc_add(
+                sum_acc,
+                tl.reduce(to_accumulator(exp_value), axis=0, combine_fn=acc_add),
+            )
+            tl.store(
+                y_ptr + y_base + idx * y_reduce_stride, exp_value, mask=in_bounds
+            )
+
+        sum_value = from_accumulator(sum_acc)
+        safe_sum = tl.where(has_value, sum_value, tl.cast(_ONE, tl_int_dtype))
+        for start in range(0, N, BLOCK):
+            idx = start + lane
+            in_bounds = idx < N
+            temporary = tl.load(
+                y_ptr + y_base + idx * y_reduce_stride,
+                mask=in_bounds, other=_ZERO,
+            )
+            result = tl.where(
+                has_value, div(temporary, safe_sum), tl.cast(_ZERO, tl_int_dtype)
+            )
+            tl.store(y_ptr + y_base + idx * y_reduce_stride, result, mask=in_bounds)
+
+    if exp is not None and div is not None and sub is not None and gt is not None:
+        @dtype_cls.register_op("masked_softmax", backend="triton")
+        def dt_masked_softmax(ops, x, blocked, dim=-1):
+            if blocked.dtype != torch.bool:
+                raise TypeError("masked_softmax requires a boolean blocked mask")
+            try:
+                blocked = blocked.expand(x.shape)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"blocked mask shape {tuple(blocked.shape)} is not broadcastable to {tuple(x.shape)}"
+                ) from exc
+            if x.dim() == 0:
+                raise RuntimeError("masked_softmax requires an input with at least one dimension")
+            reduce_dim = int(dim) % x.dim()
+            out = torch.empty_like(x)
+            if out.numel() == 0:
+                return out
+
+            kept_dims = tuple(d for d in range(x.dim()) if d != reduce_dim)
+            kept_shape = tuple(x.shape[d] for d in kept_dims)
+            M = math.prod(kept_shape) if kept_shape else 1
+            N = x.shape[reduce_dim]
+            shape_meta = _metadata_tensor(kept_shape, x.device)
+            x_stride_meta = _metadata_tensor(
+                tuple(x.stride(d) for d in kept_dims), x.device
+            )
+            blocked_stride_meta = _metadata_tensor(
+                tuple(blocked.stride(d) for d in kept_dims), x.device
+            )
+            out_stride_meta = _metadata_tensor(
+                tuple(out.stride(d) for d in kept_dims), x.device
+            )
+            fast = (
+                x.is_contiguous() and blocked.is_contiguous() and out.is_contiguous()
+                and reduce_dim == x.dim() - 1
+            )
+            block = _reduction_block_size(N)
+            num_warps = 1 if block <= 128 else (2 if block <= 256 else 4)
+            masked_softmax_forward_kernel[(M,)](
+                x, blocked, out,
+                shape_meta, x_stride_meta, blocked_stride_meta, out_stride_meta,
+                M, N,
+                x.stride(reduce_dim), blocked.stride(reduce_dim), out.stride(reduce_dim),
+                len(kept_dims), fast,
+                BLOCK=block, num_warps=num_warps,
+            )
+            return out
+
     if exp is not None and div is not None and sub is not None and mul is not None:
         @dtype_cls.register_op("softmax", backend="triton")
         def dt_softmax(ops, x, dim=None):
@@ -389,6 +521,10 @@ def register_ops(context):
             cast=("input",), backend="triton",
         )
         def dt_softmax(input, dim=None, _stacklevel=3, dtype=None, *, out=None):
+            if dtype is not None and dtype is not input.__class__:
+                raise NotImplementedError(
+                    "softmax dtype conversion is not supported for DType tensors"
+                )
             result = DTSoftmaxFunction.apply(input, dim)
 
             if out is not None:
@@ -400,6 +536,10 @@ def register_ops(context):
             cast=("input",), backend="triton",
         )
         def dt_log_softmax(input, dim=None, _stacklevel=3, dtype=None, *, out=None):
+            if dtype is not None and dtype is not input.__class__:
+                raise NotImplementedError(
+                    "log_softmax dtype conversion is not supported for DType tensors"
+                )
             result = DTLogSoftmaxFunction.apply(input, dim)
 
             if out is not None:
@@ -444,17 +584,9 @@ def register_ops(context):
         orig_shape = x.shape
         ndim = x.dim()
 
-        if dim is None:
-            reduce_dims = tuple(range(ndim))
-        elif isinstance(dim, int):
-            reduce_dims = (dim,)
-        else:
-            reduce_dims = tuple(dim)
+        reduce_dims = _canonical_reduction_dims(x, dim)
 
-        reduce_dims = tuple(d + ndim if d < 0 else d for d in reduce_dims)
-        reduce_dims = tuple(sorted(set(reduce_dims)))
-
-        if len(reduce_dims) == 0:
+        if len(reduce_dims) == 0 or ndim == 0:
             return x.clone()
 
         kept_dims = tuple(d for d in range(ndim) if d not in reduce_dims)
@@ -471,6 +603,14 @@ def register_ops(context):
         stride_row, stride_col = y.stride()
 
         out = torch.empty((M,), device=x.device, dtype=dtype_cls.int_dtype)
+        if M == 0:
+            if keepdim:
+                out_shape = list(orig_shape)
+                for d in reduce_dims:
+                    out_shape[d] = 1
+            else:
+                out_shape = [orig_shape[d] for d in kept_dims]
+            return out.reshape(out_shape) if out_shape else out.view(())
         grid = (M,)
 
         sum_kernel[grid](
@@ -502,5 +642,3 @@ def register_ops(context):
         @dtype_cls.register_op("mean", backend="triton")
         def dt_mean(ops, x, dim=None, keepdim=False):
             return sum_or_mean(ops, x, dim, keepdim, True)
-
-

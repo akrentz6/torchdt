@@ -168,6 +168,19 @@ def register_ops(context):
 
         C = torch.empty((batch, M, N), device=A.device, dtype=dtype_cls.int_dtype)
 
+        if C.numel() == 0:
+            if len(batch_shape) == 0:
+                C = C.reshape(M, N)
+            else:
+                C = C.reshape(*batch_shape, M, N)
+            if a_was_1d and b_was_1d:
+                return C.squeeze(-1).squeeze(-2)
+            if a_was_1d:
+                return C.squeeze(-2)
+            if b_was_1d:
+                return C.squeeze(-1)
+            return C
+
         stride_ab, stride_am, stride_ak = A2.stride()
         stride_bb, stride_bk, stride_bn = B2.stride()
         stride_cb, stride_cm, stride_cn = C.stride()
@@ -203,4 +216,3 @@ def register_ops(context):
             C = C.squeeze(-1)
 
         return C
-

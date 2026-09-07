@@ -60,6 +60,7 @@ def register_ops(context):
         groups: tl.constexpr,
         s_x_n, s_x_c, s_x_h, s_x_w,
         s_w_co, s_w_cinperg, s_w_kh, s_w_kw,
+        s_b_c,
         s_y_n, s_y_c, s_y_h, s_y_w,
         HAS_BIAS: tl.constexpr,
         BLOCK_OC: tl.constexpr,
@@ -118,7 +119,7 @@ def register_ops(context):
                     acc = acc_add(acc, to_accumulator(prod))
 
         if HAS_BIAS:
-            bias = to_accumulator(tl.load(B_ptr + oc_offsets, mask=mask_oc, other=_ZERO))
+            bias = to_accumulator(tl.load(B_ptr + oc_offsets * s_b_c, mask=mask_oc, other=_ZERO))
             acc = acc_add(acc, bias[:, None])
 
         out_ptrs = Yb + oc_offsets[:, None] * s_y_c + h[None, :] * s_y_h + w[None, :] * s_y_w
@@ -126,9 +127,20 @@ def register_ops(context):
 
     @dtype_cls.register_op("conv2d", backend="triton")
     def dt_conv2d(ops, x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+        if x.dim() == 3:
+            raise NotImplementedError(
+                "Triton conv2d does not support unbatched 3D input; disable the Triton backend for this operation"
+            )
+        if x.dim() != 4:
+            raise RuntimeError("conv2d input must be a 3D or 4D tensor")
         has_bias = bias is not None
         if bias is None:
             bias = weight
+
+        if groups <= 0:
+            raise ValueError("groups must be a positive integer")
+        if weight.dim() != 4:
+            raise RuntimeError("conv2d weight must be a 4D tensor")
 
         if isinstance(stride, int):
             stride = (stride, stride)
@@ -143,21 +155,32 @@ def register_ops(context):
         ph, pw = padding
         dh, dw = dilation
 
-        assert Cin % groups == 0, "Cin must be divisible by groups"
-        assert Cout % groups == 0, "Cout must be divisible by groups"
-        assert Cin_per_w == (Cin // groups), "w.shape[1] must equal Cin/groups"
+        if Cin % groups:
+            raise ValueError("input channels must be divisible by groups")
+        if Cout % groups:
+            raise ValueError("output channels must be divisible by groups")
+        if Cin_per_w != Cin // groups:
+            raise ValueError("weight.shape[1] must equal input channels divided by groups")
+        if has_bias and (bias.dim() != 1 or bias.numel() != Cout):
+            raise ValueError("conv2d bias must have one element per output channel")
 
         Kh_eff = dh * (Kh - 1) + 1
         Kw_eff = dw * (Kw - 1) + 1
 
         Hout = (H + 2 * ph - Kh_eff) // sh + 1
         Wout = (W + 2 * pw - Kw_eff) // sw + 1
+        if Hout <= 0 or Wout <= 0:
+            raise RuntimeError("calculated conv2d output size is too small")
 
         y = torch.empty((N, Cout, Hout, Wout), device=x.device, dtype=dtype_cls.int_dtype)
 
         s_x_n, s_x_c, s_x_h, s_x_w = x.stride()
         s_w_co, s_w_cinperg, s_w_kh, s_w_kw = weight.stride()
+        s_b_c = bias.stride(0) if has_bias else 0
         s_y_n, s_y_c, s_y_h, s_y_w = y.stride()
+
+        if y.numel() == 0:
+            return y
 
         Cout_g = Cout // groups
         grid = lambda META: (
@@ -177,6 +200,7 @@ def register_ops(context):
             groups,
             s_x_n, s_x_c, s_x_h, s_x_w,
             s_w_co, s_w_cinperg, s_w_kh, s_w_kw,
+            s_b_c,
             s_y_n, s_y_c, s_y_h, s_y_w,
             HAS_BIAS=has_bias,
         )
@@ -575,5 +599,3 @@ def register_ops(context):
                              cast=("input", "weight", "bias"), backend="triton")
     def dt_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
         return DTConv2dFunction.apply(input, weight, bias, stride, padding, dilation, groups)
-
-
