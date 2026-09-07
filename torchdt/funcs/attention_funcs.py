@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 
 from torchdt import DType
+from torchdt.ops.activation_ops import DTMaskedSoftmaxFunction
 
 
 def _normalise_attention_mask(mask, scores, *, batch_heads=None):
@@ -42,29 +43,7 @@ def _apply_additive_mask(scores, mask):
 def _masked_softmax(scores, blocked, dim=-1):
     if blocked is None:
         return torch.softmax(scores, dim=dim)
-    blocked = blocked.expand(scores.shape)
-    dim %= scores.dim()
-    if scores.shape[dim] == 0:
-        return scores.clone()
-
-    valid = ~blocked
-    first_value = scores.select(dim, 0)
-    has_value = valid.select(dim, 0)
-    zero = scores.__class__(0.0, device=scores.device)
-    maximum = torch.where(has_value, first_value, zero)
-    for position in range(1, scores.shape[dim]):
-        candidate = scores.select(dim, position)
-        candidate_valid = valid.select(dim, position)
-        take = candidate_valid & (~has_value | torch.gt(candidate, maximum))
-        maximum = torch.where(take, candidate, maximum)
-        has_value = has_value | candidate_valid
-
-    shifted = torch.sub(scores, maximum.unsqueeze(dim))
-    exponentials = torch.where(valid, torch.exp(shifted), zero)
-    denominator = torch.sum(exponentials, dim=dim, keepdim=True)
-    safe_denominator = torch.where(has_value.unsqueeze(dim), denominator, scores.__class__(1.0, device=scores.device))
-    probabilities = torch.div(exponentials, safe_denominator)
-    return torch.where(has_value.unsqueeze(dim), probabilities, zero)
+    return DTMaskedSoftmaxFunction.apply(scores, blocked, dim)
 
 
 def _attention(query, key, value, attn_mask, dropout_p, is_causal, scale):

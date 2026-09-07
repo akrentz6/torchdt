@@ -213,6 +213,64 @@ class DTSoftmaxFunction(DTFunction):
         grad_x = ops.mul(output, ops.sub(grad_output, dot_product))
         return grad_x, None
 
+@register_base_op("masked_softmax")
+def dt_masked_softmax(ops, x, blocked, dim=-1):
+    if blocked.dtype != torch.bool:
+        raise TypeError("masked_softmax requires a boolean blocked mask")
+    try:
+        blocked = blocked.expand(x.shape)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"blocked mask shape {tuple(blocked.shape)} is not broadcastable to {tuple(x.shape)}"
+        ) from exc
+    if x.dim() == 0:
+        raise RuntimeError("masked_softmax requires an input with at least one dimension")
+    dim = int(dim) % x.dim()
+    if x.shape[dim] == 0:
+        return x.clone()
+
+    valid = ~blocked
+    first_value = x.select(dim, 0)
+    has_value = valid.select(dim, 0)
+    zero = ops.zeros(first_value.shape, device=x.device)
+    maximum = torch.where(has_value, first_value, zero)
+    for position in range(1, x.shape[dim]):
+        candidate = x.select(dim, position)
+        candidate_valid = valid.select(dim, position)
+        take = candidate_valid & (~has_value | ops.gt(candidate, maximum))
+        maximum = torch.where(take, candidate, maximum)
+        has_value = has_value | candidate_valid
+
+    shifted = ops.sub(x, maximum.unsqueeze(dim))
+    exponentials = torch.where(valid, ops.exp(shifted), ops.zeros_like(x))
+    denominator = ops.sum(exponentials, dim=dim, keepdim=True)
+    safe_denominator = torch.where(
+        has_value.unsqueeze(dim), denominator, ops.ones_like(denominator)
+    )
+    probabilities = ops.div(exponentials, safe_denominator)
+    return torch.where(has_value.unsqueeze(dim), probabilities, ops.zeros_like(x))
+
+class DTMaskedSoftmaxFunction(DTFunction):
+
+    @staticmethod
+    def forward(ops, x, blocked, dim=-1):
+        return ops.masked_softmax(x, blocked, dim)
+
+    @staticmethod
+    def setup_context(ctx, ops, inputs, output):
+        _, _, dim = inputs
+        ctx.save_for_backward(output)
+        ctx.dim = dim
+
+    @staticmethod
+    def backward(ctx, ops, grad_output):
+        output, = ctx.saved_tensors
+        dot_product = ops.sum(
+            ops.mul(grad_output, output), dim=ctx.dim, keepdim=True
+        )
+        grad_x = ops.mul(output, ops.sub(grad_output, dot_product))
+        return grad_x, None, None
+
 @register_base_op("log_softmax")
 def dt_log_softmax(ops, x, dim=None):
     if dim is None:

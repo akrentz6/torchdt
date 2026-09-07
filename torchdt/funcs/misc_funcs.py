@@ -119,7 +119,7 @@ def dt_view(input, *shape):
 
 @DType.register_func(torch.Tensor.contiguous,
                      cast=("input",))
-def dt_contiguous(input, memory_format=torch.preserve_format):
+def dt_contiguous(input, memory_format=torch.contiguous_format):
     return DTContiguousFunction.apply(input, memory_format)
 
 @DType.register_func(torch.Tensor.repeat,

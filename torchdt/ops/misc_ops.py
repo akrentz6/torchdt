@@ -402,7 +402,7 @@ def dt_contiguous(ops, x, memory_format):
 class DTContiguousFunction(DTFunction):
 
     @staticmethod
-    def forward(ops, x, memory_format=torch.preserve_format):
+    def forward(ops, x, memory_format=torch.contiguous_format):
         return ops.contiguous(x, memory_format)
 
     @staticmethod

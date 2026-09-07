@@ -461,6 +461,11 @@ class OpsBase:
         raise NotImplementedError
 
     @classmethod
+    def masked_softmax(cls, x: InternalTensor, blocked: Tensor,
+                       dim: int = -1) -> InternalTensor:
+        raise NotImplementedError
+
+    @classmethod
     def log_softmax(cls, x: InternalTensor, dim: int = None) -> InternalTensor:
         raise NotImplementedError
 
