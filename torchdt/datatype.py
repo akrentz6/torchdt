@@ -433,3 +433,59 @@ class ToDType(torch.autograd.Function):
 
         ops = grad_output.__class__.ops.direct_for_device(grad_output.device)
         return ops.to_float(grad_output._int), None
+
+
+def support_matrix():
+    """Report per-dtype operation availability for CPU and CUDA dispatch."""
+    dtype_classes = []
+    pending = list(DType.__subclasses__())
+    while pending:
+        dtype_cls = pending.pop()
+        pending.extend(dtype_cls.__subclasses__())
+        if hasattr(dtype_cls, "ops"):
+            dtype_classes.append(dtype_cls)
+
+    def function_name(function):
+        module = getattr(function, "__module__", function.__class__.__module__)
+        qualname = getattr(
+            function, "__qualname__", getattr(function, "__name__", repr(function))
+        )
+        return f"{module}.{qualname}"
+
+    matrix = {}
+    for dtype_cls in sorted(set(dtype_classes), key=lambda value: value.__name__):
+        devices = {}
+        for device_type in ("cpu", "cuda"):
+            backend = dtype_cls.ops._enabled_backends.get(device_type, "python")
+            backend_ops = dtype_cls.ops._implementations.get(backend, {})
+            python_ops = dict(OpsBase._base_implementations)
+            python_ops.update(dtype_cls.ops._implementations.get("python", {}))
+            op_status = {}
+            for name in sorted(OpsBase._op_names):
+                if backend != "python" and name in backend_ops:
+                    op_status[name] = "native"
+                elif name in python_ops:
+                    op_status[name] = "python" if backend == "python" else "python_fallback"
+                else:
+                    op_status[name] = "unsupported"
+
+            backend_functions = dtype_cls._torch_func_implementations.get(backend, {})
+            python_functions = dict(DType.torch_funcs)
+            python_functions.update(dtype_cls._torch_func_implementations.get("python", {}))
+            functions = set(python_functions) | set(backend_functions)
+            function_status = {}
+            for function in sorted(functions, key=function_name):
+                name = function_name(function)
+                if backend != "python" and function in backend_functions:
+                    function_status[name] = "native"
+                else:
+                    function_status[name] = (
+                        "python" if backend == "python" else "python_fallback"
+                    )
+            devices[device_type] = {
+                "backend": backend,
+                "operations": op_status,
+                "torch_functions": function_status,
+            }
+        matrix[dtype_cls.__name__] = devices
+    return matrix
