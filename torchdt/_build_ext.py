@@ -45,7 +45,7 @@ class BuildCxxExtension(BuildExtension):
             super().run()
         except (CompileError, LinkError, PlatformError) as exc:
             warnings.warn(
-                "C++ backend for xlnstorch was not built; "
+                "C++ backend for torchdt was not built; "
                 "installation will succeed but will run in pure-python mode.",
                 RuntimeWarning,
             )
