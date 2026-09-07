@@ -132,7 +132,9 @@ def register_ops(context):
 
     @dtype_cls.register_op("to_float", backend="triton")
     def dt_to_float(ops, x):
-        out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(x, torch.float32)
+        out, shape_meta, stride_meta, ndim, contiguous = _prepare_unary(
+            x, dtype_cls.conversion_dtype
+        )
         if out.numel() == 0:
             return out
 
@@ -599,4 +601,3 @@ def register_ops(context):
         def dt_relu(input, inplace=False):
             result = DTReLUFunction.apply(input)
             return result
-

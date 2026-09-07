@@ -219,6 +219,12 @@ class _PositMixin:
         cls.es = es
         cls.ops.clear_scalar_cache()
 
+    @classmethod
+    def enable_triton(cls) -> None:
+        from ._triton import enable_posit_triton_backend
+
+        enable_posit_triton_backend(cls)
+
 
 class Posit16(_PositMixin, DType, bitwidth=16):
     es = 1
