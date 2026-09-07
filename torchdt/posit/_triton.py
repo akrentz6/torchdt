@@ -11,7 +11,9 @@ _WIDE_BITS = _LIMB_BITS * _LIMBS
 
 
 def enable_posit_triton_backend(dtype_cls: type) -> None:
-    fingerprint = (dtype_cls.bitwidth, dtype_cls.es)
+    from torchdt.triton import _autotune_revision
+
+    fingerprint = (dtype_cls.bitwidth, dtype_cls.es, _autotune_revision())
     if getattr(dtype_cls.ops, "_triton_fingerprint", None) == fingerprint:
         return
     register_triton_ops(dtype_cls, make_posit_triton_scalar_ops(dtype_cls))

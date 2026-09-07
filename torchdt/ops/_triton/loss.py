@@ -1,7 +1,9 @@
 import torch
+
 from torch.nn import _reduction as _Reduction
 
 from torchdt.autograd import DTFunction
+from torchdt.ops._triton.autotune import autotune_configs
 
 def register_ops(context):
     triton = context.triton
@@ -59,13 +61,7 @@ def register_ops(context):
         return x_offsets, t_offsets
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK": 128},  num_warps=1, num_stages=1),
-            triton.Config({"BLOCK": 256},  num_warps=2, num_stages=1),
-            triton.Config({"BLOCK": 512},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK": 1024}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK": 1024}, num_warps=8, num_stages=1),
-        ],
+        configs=autotune_configs("nll_loss", triton),
         key=["total", "HAS_WEIGHT", "HAS_DENOM", "TARGET_NDIM"],
     )
     @triton.jit
@@ -150,13 +146,7 @@ def register_ops(context):
             tl.store(denom_ptr + pid, from_accumulator(denom_partial))
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK": 128},  num_warps=1, num_stages=1),
-            triton.Config({"BLOCK": 256},  num_warps=2, num_stages=1),
-            triton.Config({"BLOCK": 512},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK": 1024}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK": 1024}, num_warps=8, num_stages=1),
-        ],
+        configs=autotune_configs("nll_denominator", triton),
         key=["total", "HAS_WEIGHT", "TARGET_NDIM"],
     )
     @triton.jit
@@ -189,13 +179,7 @@ def register_ops(context):
         tl.store(denom_ptr + offs, denom, mask=mask)
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK": 128},  num_warps=1, num_stages=1),
-            triton.Config({"BLOCK": 256},  num_warps=2, num_stages=1),
-            triton.Config({"BLOCK": 512},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK": 1024}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK": 1024}, num_warps=8, num_stages=1),
-        ],
+        configs=autotune_configs("nll_loss_backward", triton),
         key=["total", "HAS_WEIGHT", "REDUCTION_NONE", "REDUCTION_MEAN", "TARGET_NDIM"],
     )
     @triton.jit
@@ -446,4 +430,3 @@ def register_ops(context):
         if reduction not in ("none", "sum", "mean"):
             raise ValueError(f"invalid reduction '{reduction}'")
         return DTNLLLossFunction.apply(input, target, weight, reduction, ignore_index)
-

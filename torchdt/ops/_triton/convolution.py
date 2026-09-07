@@ -1,6 +1,7 @@
 import torch
 
 from torchdt.autograd import DTFunction
+from torchdt.ops._triton.autotune import autotune_configs
 
 def register_ops(context):
     triton = context.triton
@@ -39,13 +40,7 @@ def register_ops(context):
     can_register_sign = context.can_register_sign
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_OC": 8,  "BLOCK_HW": 128}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_OC": 4,  "BLOCK_HW": 128}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_OC": 8,  "BLOCK_HW": 64},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_OC": 16, "BLOCK_HW": 64},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_OC": 4,  "BLOCK_HW": 256}, num_warps=4, num_stages=1),
-        ],
+        configs=autotune_configs("conv2d", triton),
         key=["Cin", "H", "W", "Cout", "Kh", "Kw", "Hout", "Wout", "sh", "sw", "ph", "pw", "dh", "dw", "groups"],
     )
     @triton.jit
@@ -208,12 +203,7 @@ def register_ops(context):
         return y
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_IC": 4, "BLOCK_HW": 64}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_IC": 8, "BLOCK_HW": 32}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_IC": 2, "BLOCK_HW": 128}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_IC": 4, "BLOCK_HW": 32}, num_warps=2, num_stages=1),
-        ],
+        configs=autotune_configs("conv2d_dinput", triton),
         key=["Cin", "H", "W", "Cout", "Kh", "Kw", "Hout", "Wout", "sh", "sw", "ph", "pw", "dh", "dw", "groups"],
     )
     @triton.jit
@@ -318,12 +308,7 @@ def register_ops(context):
         return grad_input
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_OC": 4, "BLOCK_IC": 4, "BLOCK_NHW": 64}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_OC": 8, "BLOCK_IC": 4, "BLOCK_NHW": 32}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_OC": 4, "BLOCK_IC": 8, "BLOCK_NHW": 32}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_OC": 2, "BLOCK_IC": 4, "BLOCK_NHW": 64}, num_warps=2, num_stages=1),
-        ],
+        configs=autotune_configs("conv2d_dweight", triton),
         key=["N", "Cin", "H", "W", "Cout", "Kh", "Kw", "Hout", "Wout", "sh", "sw", "ph", "pw", "dh", "dw", "groups", "SPLIT_K"],
     )
     @triton.jit
@@ -483,11 +468,7 @@ def register_ops(context):
         return grad_weight
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_NHW": 1024}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_NHW": 512},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_NHW": 2048}, num_warps=8, num_stages=1),
-        ],
+        configs=autotune_configs("conv2d_dbias", triton),
         key=["N", "Hout", "Wout"],
     )
     @triton.jit

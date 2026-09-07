@@ -2,6 +2,7 @@ import math
 
 import torch
 
+from torchdt.ops._triton.autotune import autotune_configs
 from torchdt.autograd import DTFunction
 from torchdt.ops.arithmetic_ops import _canonical_reduction_dims
 
@@ -548,13 +549,7 @@ def register_ops(context):
 
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK": 128},  num_warps=2, num_stages=2),
-            triton.Config({"BLOCK": 64},   num_warps=1, num_stages=2),
-            triton.Config({"BLOCK": 128},  num_warps=1, num_stages=2),
-            triton.Config({"BLOCK": 256},  num_warps=2, num_stages=2),
-            triton.Config({"BLOCK": 256},  num_warps=4, num_stages=2),
-        ],
+        configs=autotune_configs("sum", triton),
         key=["N", "DO_MEAN"],
     )
     @triton.jit

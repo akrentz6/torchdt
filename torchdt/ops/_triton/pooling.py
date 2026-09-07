@@ -1,6 +1,7 @@
 import torch
 
 from torchdt.autograd import DTFunction
+from torchdt.ops._triton.autotune import autotune_configs
 
 def register_ops(context):
     triton = context.triton
@@ -39,11 +40,7 @@ def register_ops(context):
     can_register_sign = context.can_register_sign
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_HW": 64},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_HW": 32},  num_warps=2, num_stages=1),
-            triton.Config({"BLOCK_HW": 128}, num_warps=4, num_stages=1),
-        ],
+        configs=autotune_configs("max_pool2d", triton),
         key=["H", "W", "Hout", "Wout", "Kh", "Kw", "sh", "sw", "ph", "pw", "dh", "dw"],
     )
     @triton.jit
@@ -341,13 +338,7 @@ def register_ops(context):
 
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_C": 8,  "BLOCK_HW": 128}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_C": 4,  "BLOCK_HW": 128}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_C": 8,  "BLOCK_HW": 64},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_C": 16, "BLOCK_HW": 64},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_C": 4,  "BLOCK_HW": 256}, num_warps=4, num_stages=1),
-        ],
+        configs=autotune_configs("adaptive_avg_pool2d", triton),
         key=["C", "H", "W", "Hout", "Wout", "Kh_max", "Kw_max"],
     )
     @triton.jit
@@ -467,13 +458,7 @@ def register_ops(context):
         return output
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_C": 8,  "BLOCK_HW": 128}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_C": 4,  "BLOCK_HW": 128}, num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_C": 8,  "BLOCK_HW": 64},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_C": 16, "BLOCK_HW": 64},  num_warps=4, num_stages=1),
-            triton.Config({"BLOCK_C": 4,  "BLOCK_HW": 256}, num_warps=4, num_stages=1),
-        ],
+        configs=autotune_configs("adaptive_avg_pool2d_dinput", triton),
         key=["C", "H", "W", "Hout", "Wout", "OVERLAP_H_MAX", "OVERLAP_W_MAX"],
     )
     @triton.jit
@@ -615,4 +600,3 @@ def register_ops(context):
                              cast=("input",), backend="triton")
     def dt_adaptive_avg_pool2d(input, output_size):
         return DTAdaptiveAvgPool2dFunction.apply(input, output_size)
-

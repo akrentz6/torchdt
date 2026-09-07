@@ -58,6 +58,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
         from dataclasses import replace
 
         from torchdt.ops import TritonAccumulatorOps, register_triton_ops, require_triton
+        from torchdt.triton import _autotune_revision
         from ._triton import (
             _bump_triton_jit_hash,
             _lns_triton_int_dtype,
@@ -83,6 +84,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
         fingerprint = (
             precision,
             accumulator_mode,
+            _autotune_revision(),
             tab_sbdb.data_ptr() if tab_sbdb is not None else None,
             tab_ez.data_ptr() if tab_ez is not None else None,
             tab_exp.data_ptr() if tab_exp is not None else None,

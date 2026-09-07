@@ -2,6 +2,8 @@ import math
 
 import torch
 
+from torchdt.ops._triton.autotune import autotune_configs
+
 def register_ops(context):
     triton = context.triton
     tl = context.tl
@@ -39,15 +41,7 @@ def register_ops(context):
     can_register_sign = context.can_register_sign
 
     @triton.autotune(
-        configs=[
-            triton.Config({"BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 8 }, num_warps=4, num_stages=2),
-            triton.Config({"BLOCK_M": 16, "BLOCK_N": 32, "BLOCK_K": 8 }, num_warps=2, num_stages=2),
-            triton.Config({"BLOCK_M": 32, "BLOCK_N": 16, "BLOCK_K": 8 }, num_warps=2, num_stages=2),
-            triton.Config({"BLOCK_M": 16, "BLOCK_N": 16, "BLOCK_K": 8 }, num_warps=1, num_stages=2),
-            triton.Config({"BLOCK_M": 16, "BLOCK_N": 32, "BLOCK_K": 4 }, num_warps=2, num_stages=2),
-            triton.Config({"BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 4 }, num_warps=4, num_stages=2),
-            triton.Config({"BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 16}, num_warps=4, num_stages=2),
-        ],
+        configs=autotune_configs("matmul", triton),
         key=["M_BUCKET", "N_BUCKET", "K_BUCKET"],
     )
     @triton.jit

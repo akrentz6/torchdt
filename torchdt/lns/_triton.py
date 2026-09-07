@@ -217,8 +217,11 @@ def enable_lns_triton_backend(
     tab_ez=None,
     accumulator_ops: TritonAccumulatorOps = None,
 ) -> None:
+    from torchdt.triton import _autotune_revision
+
     fingerprint = (
         dtype_cls.bitwidth,
+        _autotune_revision(),
         float(base),
         zero_value,
         pos_inf_value,
