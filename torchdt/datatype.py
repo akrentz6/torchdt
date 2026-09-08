@@ -228,6 +228,13 @@ class DType(Tensor):
             Tensor.grad.__set__(self, value)
 
     def register_hook(self, hook):
+        """Register a backward hook receiving a gradient in this custom format.
+
+        The hook may return ``None`` to leave the gradient unchanged, a tensor
+        of the same custom class, or an ordinary tensor to encode in this
+        format. A different custom class is rejected. Returns a removable hook
+        handle, as in PyTorch.
+        """
         from torchdt.autograd import _Gradient, _gradient_as_dtype, _mark_gradient
 
         def wrapped(gradient):
@@ -388,9 +395,22 @@ class DType(Tensor):
             return self.view(_int_dtype[self.bitwidth])
 
     def to_float(self):
+        """Decode values into an ordinary floating-point tensor on this device.
+
+        The result contains numerical values rather than encoded storage bits.
+        Decoding is intended for inspection and export, and does not preserve
+        the autograd graph. Call ``backward()`` on the custom tensor itself.
+        """
         return self.ops.to_float(self._int)
 
     def copy_(self, src, non_blocking=False):
+        """Copy tensor values into this tensor in place and return ``self``.
+
+        A source of the same custom class copies encoded bits. Other tensor
+        sources are decoded if needed and encoded in this format. ``src`` must
+        be a tensor and have a shape broadcastable to the destination.
+        ``non_blocking`` is forwarded to the underlying integer tensor copy.
+        """
         if not isinstance(src, Tensor):
             raise TypeError("copy_(): argument 'src' must be Tensor")
 

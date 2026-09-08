@@ -17,6 +17,9 @@ authors = [{name = "Alexander Krentz", email = "alexkrentz2@gmail.com"}]
 keywords = ["python", "pytorch", "machine learning"]
 dependencies = ["torch>=2.0", "numpy"]
 
+[project.optional-dependencies]
+docs = ["sphinx>=7,<9"]
+
 [project.urls]
 "Homepage" = "https://github.com/akrentz6/torchdt"
 
