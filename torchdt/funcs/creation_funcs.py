@@ -10,6 +10,29 @@ def _size_tuple(size):
     return size[0] if len(size) == 1 and isinstance(size[0], (tuple, list, torch.Size)) else size
 
 
+@DType.register_func(torch.tensor)
+def dt_tensor(data, *, dtype=None, device=None, requires_grad=False, pin_memory=False):
+    if not _is_dtype(dtype):
+        raise TypeError(f"dtype must be a subclass of DType, got {dtype}")
+
+    with torch.no_grad():
+        if type(data) is dtype:
+            # Preserve codes that cannot round-trip through conversion_dtype.
+            internal = torch.tensor(
+                data._int, dtype=dtype.int_dtype, device=device,
+                pin_memory=pin_memory,
+            )
+        else:
+            values = data.to_float() if isinstance(data, DType) else data
+            values = torch.tensor(values, dtype=dtype.conversion_dtype, device=device)
+            internal = dtype.ops.direct_for_device(values.device).from_float(values)
+            if pin_memory:
+                internal = internal.pin_memory()
+
+        result = dtype(internal, internal=True)
+    return result.requires_grad_(requires_grad)
+
+
 def _custom_full(
     dtype, size, fill_value, device, requires_grad,
     layout=torch.strided, pin_memory=False, memory_format=None,
