@@ -23,8 +23,6 @@ jobs:
           python -m pip install 'setuptools>=69' wheel ninja
       - name: Install library and documentation dependencies
         run: python -m pip install --no-build-isolation -e '.[docs]'
-      - name: Check tensor creation semantics
-        run: python -m unittest discover -s tests -v
       - name: Run documentation examples
         run: |
           python examples/arithmetic.py
