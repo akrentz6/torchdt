@@ -24,7 +24,7 @@ def main():
     x = torch.tensor([1.0, 2.0], dtype=LNS16, requires_grad=True)
     Square.apply(x).sum().backward()
     print(x.grad)
-    torch.testing.assert_close(x.grad.to_float(), torch.tensor([2., 4.], dtype=torch.float32))
+    torch.testing.assert_close(x.grad.to_float(), torch.tensor([2., 4.], dtype=torch.float64))
 
 
 if __name__ == "__main__":
