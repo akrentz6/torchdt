@@ -1,0 +1,36 @@
+name: Documentation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TORCHDT_NO_CPP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install CPU PyTorch and build dependencies
+        run: |
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'setuptools>=69' wheel ninja
+      - name: Install library and documentation dependencies
+        run: python -m pip install --no-build-isolation -e '.[docs]'
+      - name: Check tensor creation semantics
+        run: python -m unittest discover -s tests -v
+      - name: Run documentation examples
+        run: |
+          python examples/arithmetic.py
+          python examples/train_regression.py
+          python examples/batching.py
+          python examples/custom_function.py
+          python examples/custom_dtype.py
+      - name: Build documentation with warnings treated as errors
+        run: python -m sphinx -b html -W --keep-going docs docs/_build/html
