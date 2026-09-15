@@ -3,6 +3,7 @@ import math
 import torch
 
 from torchdt.ops._triton.autotune import autotune_configs
+from torchdt.ops._triton.numerical import checked_autotune
 from torchdt.autograd import DTFunction
 from torchdt.ops.arithmetic_ops import _canonical_reduction_dims
 
@@ -548,7 +549,8 @@ def register_ops(context):
             return result
 
 
-    @triton.autotune(
+    @checked_autotune(
+        "sum", context,
         configs=autotune_configs("sum", triton),
         key=["N", "DO_MEAN"],
     )

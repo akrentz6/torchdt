@@ -81,3 +81,20 @@ Policies in ``torchdt.triton`` select, replace, or exclude configurations by ker
    LNS16.enable_triton()
 
 Selecting the first candidate demonstrates the API; it is not a performance recommendation. Benchmark your actual shapes and separate initial compilation and autotuning from steady-state execution time.
+
+Numerical pruning
+~~~~~~~~~~~~~~~~~
+
+Addition order can make some autotune configurations inaccurate. Numerical pruning is disabled by default; enable it to check candidates against floating-point references before timing:
+
+.. code-block:: python
+
+   from torchdt.triton import set_autotune_numerical_check
+
+   set_autotune_numerical_check(True, atol=0.04, rtol=0.08)
+   # Run your workload.
+   set_autotune_numerical_check(False)
+
+This applies to all autotuned kernels and registered datatypes. Pass ``kernels=["sum", "matmul"]`` to limit checking. Changes take effect immediately, without calling ``enable_triton()`` again.
+
+Candidates must satisfy ``abs(actual - expected) <= atol + rtol * abs(expected)`` on decoded values; an empty passing set raises an error. Checking runs once per autotune key and device, adding overhead during tuning. Later calls skip validation and retuning, with only a small Python policy/cache lookup overhead. New input values are not checked; shapes in the same tuning bucket share the chosen config. Tolerances apply per kernel stage, so errors can accumulate across a multi-stage operation. See :doc:`api/backends` for details.

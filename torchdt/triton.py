@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from threading import RLock
 from types import MappingProxyType
@@ -13,6 +15,7 @@ __all__ = [
     "reset_autotune_configs",
     "select_autotune_config",
     "set_autotune_configs",
+    "set_autotune_numerical_check",
 ]
 
 
@@ -57,6 +60,8 @@ class AutotuneConfig:
 
 _overrides: dict[str, tuple[AutotuneConfig, ...]] = {}
 _exclusions: dict[str, tuple[object, ...]] = {}
+_numerical_policies: dict[str, tuple[float, float]] = {}
+_numerical_revisions: dict[str, int] = {}
 _revision = 0
 _lock = RLock()
 
@@ -209,3 +214,46 @@ def _resolve_autotune_configs(
 
 def _autotune_revision() -> int:
     return _revision
+
+
+def set_autotune_numerical_check(
+    enabled: bool = False, *, atol: float = 0.0, rtol: float = 0.0,
+    kernels: Iterable[str] = AUTOTUNE_KERNELS,
+) -> None:
+    """
+    Opt into numerical pruning when autotuning a new key.
+
+    Compare decoded outputs against float64 arithmetic on decoded inputs using
+    abs(actual - expected) <= atol + rtol * abs(expected), requiring finite
+    values. All configs (including a single forced config) are validated before
+    timing. If none pass, raise rather than silently use an inaccurate config.
+    Checked configs are cached per autotune key and device. Later calls reuse
+    the result without checking new values. Updating this policy invalidates
+    checked caches for the selected kernels. Disabled by default; applies to
+    all torchdt datatypes.
+    """
+    if not isinstance(enabled, bool):
+        raise TypeError("enabled must be a bool")
+    atol, rtol = float(atol), float(rtol)
+    if not all(math.isfinite(t) and t >= 0 for t in (atol, rtol)):
+        raise ValueError("atol and rtol must be finite and non-negative")
+    names = (kernels,) if isinstance(kernels, str) else tuple(kernels)
+    for name in names:
+        _check_kernel(name)
+    with _lock:
+        for name in names:
+            _numerical_revisions[name] = _numerical_revisions.get(name, 0) + 1
+            if enabled:
+                _numerical_policies[name] = (atol, rtol)
+            else:
+                _numerical_policies.pop(name, None)
+
+
+def _get_numerical_policy(kernel: str):
+    with _lock:
+        return _numerical_policies.get(kernel)
+
+
+def _get_numerical_policy_state(kernel: str):
+    with _lock:
+        return _numerical_policies.get(kernel), _numerical_revisions.get(kernel, 0)

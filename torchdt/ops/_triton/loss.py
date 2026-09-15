@@ -4,6 +4,7 @@ from torch.nn import _reduction as _Reduction
 
 from torchdt.autograd import DTFunction
 from torchdt.ops._triton.autotune import autotune_configs
+from torchdt.ops._triton.numerical import checked_autotune
 
 def register_ops(context):
     triton = context.triton
@@ -60,7 +61,8 @@ def register_ops(context):
 
         return x_offsets, t_offsets
 
-    @triton.autotune(
+    @checked_autotune(
+        "nll_loss", context,
         configs=autotune_configs("nll_loss", triton),
         key=["total", "HAS_WEIGHT", "HAS_DENOM", "TARGET_NDIM"],
     )
@@ -145,7 +147,8 @@ def register_ops(context):
             denom_partial = tl.reduce(to_accumulator(denominator), axis=0, combine_fn=acc_add)
             tl.store(denom_ptr + pid, from_accumulator(denom_partial))
 
-    @triton.autotune(
+    @checked_autotune(
+        "nll_denominator", context,
         configs=autotune_configs("nll_denominator", triton),
         key=["total", "HAS_WEIGHT", "TARGET_NDIM"],
     )
@@ -178,9 +181,10 @@ def register_ops(context):
         denom = tl.where(valid, denom, tl.cast(_ZERO, tl_int_dtype))
         tl.store(denom_ptr + offs, denom, mask=mask)
 
-    @triton.autotune(
+    @checked_autotune(
+        "nll_loss_backward", context,
         configs=autotune_configs("nll_loss_backward", triton),
-        key=["total", "HAS_WEIGHT", "REDUCTION_NONE", "REDUCTION_MEAN", "TARGET_NDIM"],
+    key=["total", "HAS_WEIGHT", "REDUCTION_NONE", "REDUCTION_MEAN", "TARGET_NDIM"],
     )
     @triton.jit
     def nll_loss_backward_kernel(

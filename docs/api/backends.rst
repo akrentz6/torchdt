@@ -32,6 +32,13 @@ Policies are process-wide and keyed by the names in ``AUTOTUNE_KERNELS``. After 
 
    Clear overrides and exclusions for one kernel, or all kernels if omitted.
 
+Numerical pruning
+-----------------
+
+.. autofunction:: torchdt.triton.set_autotune_numerical_check(enabled=False, *, atol=0.0, rtol=0.0, kernels=AUTOTUNE_KERNELS)
+
+   ``kernels`` accepts a kernel name or iterable of names. Tolerances must be finite and non-negative. Settings are process-wide and take effect immediately, invalidating checked caches for the selected kernels. ``reset_autotune_configs()`` does not reset them; use ``enabled=False`` to disable checking.
+
 Validation
 ----------
 

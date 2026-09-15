@@ -35,6 +35,7 @@ class TritonRegistrationContext:
     clamp: Callable
     sign: Callable
     acc_int_dtype: torch.dtype
+    acc_to_float: Callable
     acc_from_float: Callable
     acc_add: Callable
     acc_div: Optional[Callable]
@@ -188,6 +189,7 @@ def create_registration_context(
         clamp=clamp,
         sign=sign,
         acc_int_dtype=acc_int_dtype,
+        acc_to_float=accumulator_scalar_ops.to_float,
         acc_from_float=acc_from_float,
         acc_add=acc_add,
         acc_div=acc_div,

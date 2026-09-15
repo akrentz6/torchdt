@@ -2,6 +2,7 @@ import torch
 
 from torchdt.autograd import DTFunction
 from torchdt.ops._triton.autotune import autotune_configs
+from torchdt.ops._triton.numerical import checked_autotune
 
 def register_ops(context):
     triton = context.triton
@@ -39,7 +40,8 @@ def register_ops(context):
     _metadata_tensor = context.metadata_tensor
     can_register_sign = context.can_register_sign
 
-    @triton.autotune(
+    @checked_autotune(
+        "conv2d", context,
         configs=autotune_configs("conv2d", triton),
         key=["Cin", "H", "W", "Cout", "Kh", "Kw", "Hout", "Wout", "sh", "sw", "ph", "pw", "dh", "dw", "groups"],
     )
@@ -202,7 +204,8 @@ def register_ops(context):
 
         return y
 
-    @triton.autotune(
+    @checked_autotune(
+        "conv2d_dinput", context,
         configs=autotune_configs("conv2d_dinput", triton),
         key=["Cin", "H", "W", "Cout", "Kh", "Kw", "Hout", "Wout", "sh", "sw", "ph", "pw", "dh", "dw", "groups"],
     )
@@ -307,7 +310,8 @@ def register_ops(context):
         )
         return grad_input
 
-    @triton.autotune(
+    @checked_autotune(
+        "conv2d_dweight", context,
         configs=autotune_configs("conv2d_dweight", triton),
         key=["N", "Cin", "H", "W", "Cout", "Kh", "Kw", "Hout", "Wout", "sh", "sw", "ph", "pw", "dh", "dw", "groups", "SPLIT_K"],
     )
@@ -467,7 +471,8 @@ def register_ops(context):
             )
         return grad_weight
 
-    @triton.autotune(
+    @checked_autotune(
+        "conv2d_dbias", context,
         configs=autotune_configs("conv2d_dbias", triton),
         key=["N", "Hout", "Wout"],
     )

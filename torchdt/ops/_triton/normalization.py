@@ -2,6 +2,7 @@ import torch
 
 from torchdt.autograd import DTFunction
 from torchdt.ops._triton.autotune import autotune_configs
+from torchdt.ops._triton.numerical import checked_autotune
 
 def register_ops(context):
     triton = context.triton
@@ -39,7 +40,8 @@ def register_ops(context):
     _metadata_tensor = context.metadata_tensor
     can_register_sign = context.can_register_sign
 
-    @triton.autotune(
+    @checked_autotune(
+        "batch_norm2d_sum", context,
         configs=autotune_configs("batch_norm2d_sum", triton),
         key=["count", "HW", "W"],
     )
@@ -71,7 +73,8 @@ def register_ops(context):
 
         tl.store(partial_sum_ptr + pid0 * ps_s0 + pid1 * ps_s1, block_sum)
 
-    @triton.autotune(
+    @checked_autotune(
+        "batch_norm2d_mean_finalize", context,
         configs=autotune_configs("batch_norm2d_mean_finalize", triton),
         key=["ntiles"],
         restore_value=["rm_ptr"],
@@ -109,7 +112,8 @@ def register_ops(context):
         tl.store(rm_ptr + pid, new_rm)
         tl.store(sm_ptr + pid, mean)
 
-    @triton.autotune(
+    @checked_autotune(
+        "batch_norm2d_centered_var", context,
         configs=autotune_configs("batch_norm2d_centered_var", triton),
         key=["count", "HW", "W"],
     )
@@ -146,7 +150,8 @@ def register_ops(context):
 
         tl.store(partial_var_ptr + pid0 * pv_s0 + pid1 * pv_s1, block_var_sum)
 
-    @triton.autotune(
+    @checked_autotune(
+        "batch_norm2d_var_finalize", context,
         configs=autotune_configs("batch_norm2d_var_finalize", triton),
         key=["ntiles"],
         restore_value=["rv_ptr"],
@@ -214,7 +219,8 @@ def register_ops(context):
         tl.store(sm_ptr + pid, mean)
         tl.store(sis_ptr + pid, invstd)
 
-    @triton.autotune(
+    @checked_autotune(
+        "batch_norm2d_forward", context,
         configs=autotune_configs("batch_norm2d_forward", triton),
         key=["count", "HW", "W", "EVAL_FUSED"],
     )
@@ -399,7 +405,8 @@ def register_ops(context):
 
         return output, save_mean, save_invstd
 
-    @triton.autotune(
+    @checked_autotune(
+        "batch_norm2d_backward_partials", context,
         configs=autotune_configs("batch_norm2d_backward_partials", triton),
         key=["N", "HW", "W"],
     )
@@ -450,7 +457,8 @@ def register_ops(context):
         tl.store(p_dy_ptr + pid0 * (N * num_hw_blks) + tile_id, partial_dy)
         tl.store(p_dy_xhat_ptr + pid0 * (N * num_hw_blks) + tile_id, partial_dy_xhat)
 
-    @triton.autotune(
+    @checked_autotune(
+        "batch_norm2d_backward_finalize", context,
         configs=autotune_configs("batch_norm2d_backward_finalize", triton),
         key=["K"],
     )
@@ -488,7 +496,8 @@ def register_ops(context):
         tl.store(m_dy_ptr + pid, from_accumulator(acc_div(sum_dy, count_dt)))
         tl.store(m_dy_xhat_ptr + pid, from_accumulator(acc_div(sum_dy_xhat, count_dt)))
 
-    @triton.autotune(
+    @checked_autotune(
+        "batch_norm2d_dinput_train", context,
         configs=autotune_configs("batch_norm2d_dinput_train", triton),
         key=["HW", "W"],
     )
@@ -542,7 +551,8 @@ def register_ops(context):
 
         tl.store(dx_ptrs, dx, mask=mask)
 
-    @triton.autotune(
+    @checked_autotune(
+        "batch_norm2d_dinput_eval", context,
         configs=autotune_configs("batch_norm2d_dinput_eval", triton),
         key=["HW", "W"],
     )

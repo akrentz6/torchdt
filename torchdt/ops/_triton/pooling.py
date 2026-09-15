@@ -2,6 +2,7 @@ import torch
 
 from torchdt.autograd import DTFunction
 from torchdt.ops._triton.autotune import autotune_configs
+from torchdt.ops._triton.numerical import checked_autotune
 
 def register_ops(context):
     triton = context.triton
@@ -39,7 +40,8 @@ def register_ops(context):
     _metadata_tensor = context.metadata_tensor
     can_register_sign = context.can_register_sign
 
-    @triton.autotune(
+    @checked_autotune(
+        "max_pool2d", context,
         configs=autotune_configs("max_pool2d", triton),
         key=["H", "W", "Hout", "Wout", "Kh", "Kw", "sh", "sw", "ph", "pw", "dh", "dw"],
     )
@@ -337,7 +339,8 @@ def register_ops(context):
         return DTMaxPool2dFunction.apply(input, kernel_size, stride, padding, dilation, ceil_mode, return_indices)
 
 
-    @triton.autotune(
+    @checked_autotune(
+        "adaptive_avg_pool2d", context,
         configs=autotune_configs("adaptive_avg_pool2d", triton),
         key=["C", "H", "W", "Hout", "Wout", "Kh_max", "Kw_max"],
     )
@@ -457,7 +460,8 @@ def register_ops(context):
 
         return output
 
-    @triton.autotune(
+    @checked_autotune(
+        "adaptive_avg_pool2d_dinput", context,
         configs=autotune_configs("adaptive_avg_pool2d_dinput", triton),
         key=["C", "H", "W", "Hout", "Wout", "OVERLAP_H_MAX", "OVERLAP_W_MAX"],
     )

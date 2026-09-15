@@ -3,6 +3,7 @@ import math
 import torch
 
 from torchdt.ops._triton.autotune import autotune_configs
+from torchdt.ops._triton.numerical import checked_autotune
 
 def register_ops(context):
     triton = context.triton
@@ -40,7 +41,8 @@ def register_ops(context):
     _metadata_tensor = context.metadata_tensor
     can_register_sign = context.can_register_sign
 
-    @triton.autotune(
+    @checked_autotune(
+        "matmul", context,
         configs=autotune_configs("matmul", triton),
         key=["M_BUCKET", "N_BUCKET", "K_BUCKET"],
     )
