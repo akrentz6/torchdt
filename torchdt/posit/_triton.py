@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from torchdt.ops import TritonScalarOps, register_triton_ops, require_triton
+from torchdt.ops.triton_ops import _jit_with_captured_constants as _posit_jit
 
 
 _LIMB_BITS = 30
@@ -56,12 +57,12 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
     SQRT_TOP_PAIR = tl.constexpr((2 * precision + 10) // 2)
     FLOAT_SIGNIFICAND_SCALE = tl.constexpr(float(1 << (precision - 1)))
 
-    @triton.jit
+    @_posit_jit
     def wide_zero(value):
         zero = tl.cast(value * 0, tl.int64)
         return zero, zero, zero, zero, zero, zero
 
-    @triton.jit
+    @_posit_jit
     def wide_from_int(value):
         value = tl.cast(value, tl.int64)
         return (
@@ -73,7 +74,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
             value * 0,
         )
 
-    @triton.jit
+    @_posit_jit
     def wide_select(mask, x, y):
         return (
             tl.where(mask, x[0], y[0]), tl.where(mask, x[1], y[1]),
@@ -81,11 +82,11 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
             tl.where(mask, x[4], y[4]), tl.where(mask, x[5], y[5]),
         )
 
-    @triton.jit
+    @_posit_jit
     def wide_is_zero(x):
         return ((x[0] | x[1] | x[2] | x[3] | x[4] | x[5]) == 0)
 
-    @triton.jit
+    @_posit_jit
     def wide_add(x, y):
         v0 = x[0] + y[0]
         z0 = v0 & LIMB_MASK
@@ -100,7 +101,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         v5 = x[5] + y[5] + (v4 >> LIMB_BITS)
         return z0, z1, z2, z3, z4, v5 & LIMB_MASK
 
-    @triton.jit
+    @_posit_jit
     def wide_sub(x, y):
         v0 = x[0] - y[0]
         b0 = v0 < 0
@@ -120,7 +121,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         v5 = x[5] - y[5] - b4.to(tl.int64)
         return z0, z1, z2, z3, z4, tl.where(v5 < 0, v5 + LIMB_BASE, v5)
 
-    @triton.jit
+    @_posit_jit
     def wide_ge(x, y):
         greater = x[5] > y[5]
         equal = x[5] == y[5]
@@ -131,7 +132,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         greater |= equal & (x[0] > y[0]); equal &= x[0] == y[0]
         return greater | equal
 
-    @triton.jit
+    @_posit_jit
     def wide_shl_one(x):
         v0 = x[0] << 1
         z0 = v0 & LIMB_MASK
@@ -146,7 +147,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         v5 = (x[5] << 1) | (v4 >> LIMB_BITS)
         return z0, z1, z2, z3, z4, v5 & LIMB_MASK
 
-    @triton.jit
+    @_posit_jit
     def wide_shr_one(x):
         z5 = x[5] >> 1
         z4 = (x[4] >> 1) | ((x[5] & 1) << 29)
@@ -156,13 +157,13 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         z0 = (x[0] >> 1) | ((x[1] & 1) << 29)
         return (z0, z1, z2, z3, z4, z5), x[0] & 1
 
-    @triton.jit
+    @_posit_jit
     def wide_shl(x, amount: tl.constexpr):
         for _ in tl.static_range(0, amount):
             x = wide_shl_one(x)
         return x
 
-    @triton.jit
+    @_posit_jit
     def wide_shr_jam(x, amount):
         amount = tl.minimum(tl.maximum(amount, 0), WIDE_BITS)
         sticky = amount < 0
@@ -173,7 +174,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
             x = wide_select(active, shifted, x)
         return (x[0] | sticky.to(tl.int64), x[1], x[2], x[3], x[4], x[5])
 
-    @triton.jit
+    @_posit_jit
     def wide_bit(x, index):
         valid = (index >= 0) & (index < WIDE_BITS)
         safe = tl.minimum(tl.maximum(index, 0), WIDE_BITS - 1)
@@ -190,7 +191,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         )
         return tl.where(valid, (value >> offset) & 1, 0)
 
-    @triton.jit
+    @_posit_jit
     def wide_set_bit(x, index: tl.constexpr, bit):
         value = bit.to(tl.int64) << (index % LIMB_BITS)
         if index // LIMB_BITS == 0:
@@ -206,14 +207,14 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         else:
             return x[0], x[1], x[2], x[3], x[4], x[5] | value
 
-    @triton.jit
+    @_posit_jit
     def wide_bit_length(x):
         length = x[0] * 0
         for i in tl.static_range(0, WIDE_BITS):
             length = tl.where(wide_bit(x, i) != 0, i + 1, length)
         return length
 
-    @triton.jit
+    @_posit_jit
     def wide_any_below(x, index):
         result = index < 0
         result &= False
@@ -223,7 +224,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
             result |= (x[i] & mask) != 0
         return result
 
-    @triton.jit
+    @_posit_jit
     def wide_mul(x, y):
         a0 = x[0] * y[0]
         a1 = x[0] * y[1] + x[1] * y[0]
@@ -242,7 +243,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         z4 = v4 & LIMB_MASK
         return z0, z1, z2, z3, z4, (v4 >> LIMB_BITS) & LIMB_MASK
 
-    @triton.jit
+    @_posit_jit
     def wide_divmod(numerator, denominator, top_bit: tl.constexpr):
         quotient = wide_zero(numerator[0])
         remainder = wide_zero(numerator[0])
@@ -255,7 +256,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
             quotient = wide_set_bit(quotient, index, take)
         return quotient, remainder
 
-    @triton.jit
+    @_posit_jit
     def wide_isqrt(value, top_pair: tl.constexpr):
         root = wide_zero(value[0])
         remainder = wide_zero(value[0])
@@ -273,26 +274,26 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
             root = wide_set_bit(root, 0, take)
         return root, remainder
 
-    @triton.jit
+    @_posit_jit
     def floor_div(value, divisor: tl.constexpr):
         quotient = value // divisor
         remainder = value - quotient * divisor
         return quotient - ((value < 0) & (remainder != 0)).to(tl.int64)
 
-    @triton.jit
+    @_posit_jit
     def normalise_scale(k, exponent):
         carry = floor_div(exponent, USEED)
         return k + carry, exponent - carry * USEED
 
-    @triton.jit
+    @_posit_jit
     def add_to_scale(k, exponent, delta):
         return normalise_scale(k, exponent + delta)
 
-    @triton.jit
+    @_posit_jit
     def scale_ge(kx, ex, ky, ey):
         return (kx > ky) | ((kx == ky) & (ex >= ey))
 
-    @triton.jit
+    @_posit_jit
     def scale_distance(kh, eh, kl, el):
         kd = kh - kl
         if USEED <= WIDE_BITS:
@@ -304,7 +305,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
             tl.where(kd == 1, adjacent, WIDE_BITS),
         )
 
-    @triton.jit
+    @_posit_jit
     def decode(code):
         code = code.to(tl_int_dtype)
         nar = code == NAR
@@ -337,7 +338,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         fixed = tl.where(zero | nar, 0, fixed)
         return nar, zero, negative, k, exponent, fixed
 
-    @triton.jit
+    @_posit_jit
     def stream_bit(j: tl.constexpr, run, positive_regime, exponent, magnitude, position):
         in_run = j < run
         at_terminator = j == run
@@ -353,7 +354,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
                      tl.where(in_exponent, exp_bit, fraction_bit)),
         )
 
-    @triton.jit
+    @_posit_jit
     def pack(negative, k, exponent, magnitude, sticky_below):
         bit_length = wide_bit_length(magnitude)
         position = bit_length - 1
@@ -402,12 +403,12 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         code = tl.where(nonzero, code, 0)
         return tl.where(negative & nonzero, -code, code).to(tl_int_dtype)
 
-    @triton.jit
+    @_posit_jit
     def unpack(code):
         nar, zero, negative, k, exponent, fixed = decode(code)
         return nar, zero, negative, k, exponent, wide_from_int(fixed)
 
-    @triton.jit
+    @_posit_jit
     def from_float(value):
         value = value.to(tl.float64)
         bits = tl.cast(value, tl.int64, bitcast=True)
@@ -432,7 +433,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         encoded = tl.where(zero, 0, encoded)
         return tl.where(special, NAR, encoded).to(tl_int_dtype)
 
-    @triton.jit
+    @_posit_jit
     def to_float(code):
         nar, zero, negative, k, exponent, fixed = decode(code)
         if USEED <= 2048:
@@ -451,11 +452,11 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         result = tl.where(zero, 0.0, result)
         return tl.where(nar, float("nan"), result)
 
-    @triton.jit
+    @_posit_jit
     def neg(x):
         return tl.where(x == NAR, x, -x).to(tl_int_dtype)
 
-    @triton.jit
+    @_posit_jit
     def add(x, y):
         nx, zx, sx, kx, ex, mx = unpack(x)
         ny, zy, sy, ky, ey, my = unpack(y)
@@ -478,11 +479,11 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         result = tl.where(zx, y, tl.where(zy, x, result))
         return tl.where(nx | ny, NAR, result).to(tl_int_dtype)
 
-    @triton.jit
+    @_posit_jit
     def sub(x, y):
         return add(x, neg(y))
 
-    @triton.jit
+    @_posit_jit
     def mul(x, y):
         nx, zx, sx, kx, ex, mx = unpack(x)
         ny, zy, sy, ky, ey, my = unpack(y)
@@ -496,7 +497,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         result = tl.where(zx | zy, 0, result)
         return tl.where(nx | ny, NAR, result).to(tl_int_dtype)
 
-    @triton.jit
+    @_posit_jit
     def div(x, y):
         nx, zx, sx, kx, ex, mx = unpack(x)
         ny, zy, sy, ky, ey, my = unpack(y)
@@ -514,7 +515,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         result = tl.where(zx & ~(zy | ny), 0, result)
         return tl.where(nx | ny | zy, NAR, result).to(tl_int_dtype)
 
-    @triton.jit
+    @_posit_jit
     def sqrt(x):
         nar, zero, negative, k, exponent, magnitude = unpack(x)
         if ES == 0:
@@ -539,30 +540,30 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         result = tl.where(zero, 0, result)
         return tl.where(nar | negative, NAR, result).to(tl_int_dtype)
 
-    @triton.jit
+    @_posit_jit
     def gt(x, y):
         return x > y
 
-    @triton.jit
+    @_posit_jit
     def ge(x, y):
         return x >= y
 
-    @triton.jit
+    @_posit_jit
     def lt(x, y):
         return x < y
 
-    @triton.jit
+    @_posit_jit
     def le(x, y):
         return x <= y
 
-    @triton.jit
+    @_posit_jit
     def sign(x):
         return tl.where(
             x == NAR, NAR,
             tl.where(x > 0, ONE, tl.where(x < 0, -ONE, 0)),
         ).to(tl_int_dtype)
 
-    @triton.jit
+    @_posit_jit
     def exp(x):
         nar = x == NAR
         value = to_float(x)
@@ -572,7 +573,7 @@ def make_posit_triton_scalar_ops(dtype_cls: type) -> TritonScalarOps:
         result = tl.where((evaluated == 0.0) & ~nar, 1, result)
         return tl.where(nar, NAR, result).to(tl_int_dtype)
 
-    @triton.jit
+    @_posit_jit
     def log(x):
         invalid = (x == NAR) | (x <= 0)
         safe = tl.where(invalid, ONE, x)

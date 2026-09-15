@@ -1,15 +1,9 @@
-import hashlib
 import math
 import struct
 
 import torch
 from torchdt.ops import TritonAccumulatorOps, TritonScalarOps, register_triton_ops, require_triton
-
-
-def _bump_triton_jit_hash(fn, **values):
-    items = tuple(sorted((key, repr(getattr(value, "value", value))) for key, value in values.items()))
-    fn.hash = hashlib.sha256(repr(items).encode()).hexdigest()
-    return fn
+from torchdt.ops.triton_ops import _jit_with_captured_constants as _lns_jit
 
 
 def _lns_triton_int_dtype(bitwidth: int, tl):
@@ -61,7 +55,7 @@ def make_lpvip_triton_add(precision, zero_value, pos_inf_value, neg_inf_value, t
     OPP_PRE_FAR = tl.constexpr(5 * (1 << precision) // 8)
     OPP_PRE_OFFSET = tl.constexpr(9 * (1 << precision) // 8)
 
-    @triton.jit
+    @_lns_jit
     def mitchell(w):
         w = tl.cast(w, WORK_INT)
         integer_part = w >> F
@@ -77,7 +71,7 @@ def make_lpvip_triton_add(precision, zero_value, pos_inf_value, neg_inf_value, t
         DB_TABLE_DATA_PTR = tl.constexpr(tab_sbdb.data_ptr())
         DB_TABLE_EZ = tl.constexpr(tab_ez.item())
 
-        @triton.jit
+        @_lns_jit
         def db_correction(d, z, use_db):
             table_z = tl.maximum(-d, tl.cast(DB_TABLE_EZ, WORK_INT))
             index = 2 * DB_TABLE_SIZE + table_z
@@ -85,12 +79,8 @@ def make_lpvip_triton_add(precision, zero_value, pos_inf_value, neg_inf_value, t
             gaussian_db = tl.cast(tl.load(table_ptr + index, mask=use_db, other=0), WORK_INT) >> 1
             return -gaussian_db
 
-        db_mode = "table"
-        db_table_ptr = tab_sbdb.data_ptr()
-        db_table_ez = tab_ez.item()
-
     else:
-        @triton.jit
+        @_lns_jit
         def db_correction(d, z, use_db):
             d_real = tl.cast(d, tl.float64) / tl.cast(SCALE, tl.float64)
             magnitude = libdevice.expm1(d_real * tl.cast(LN2, tl.float64))
@@ -100,11 +90,7 @@ def make_lpvip_triton_add(precision, zero_value, pos_inf_value, neg_inf_value, t
             truncated = tl.where(biased >= 0, tl.floor(biased), tl.ceil(biased))
             return -tl.cast(truncated, WORK_INT) - z
 
-        db_mode = "ideal"
-        db_table_ptr = None
-        db_table_ez = None
-
-    @triton.jit
+    @_lns_jit
     def add(x, y):
         log_x = tl.cast(x >> 1, WORK_INT)
         log_y = tl.cast(y >> 1, WORK_INT)
@@ -177,32 +163,6 @@ def make_lpvip_triton_add(precision, zero_value, pos_inf_value, neg_inf_value, t
             ),
         )
 
-    _bump_triton_jit_hash(
-        mitchell, F=F, SCALE=SCALE, FRACTION_MASK=FRACTION_MASK, WORK_INT=WORK_INT
-    )
-    _bump_triton_jit_hash(
-        db_correction,
-        F=F,
-        SCALE=SCALE,
-        LN2=LN2,
-        mode=db_mode,
-        WORK_INT=WORK_INT,
-        table=db_table_ptr,
-        table_ez=db_table_ez,
-    )
-    _bump_triton_jit_hash(
-        add,
-        F=F,
-        SCALE=SCALE,
-        ESSZER=ESSZER,
-        ZERO=ZERO,
-        POS_INF=POS_INF,
-        NEG_INF=NEG_INF,
-        db_mode=db_mode,
-        db_table=db_table_ptr,
-        db_table_ez=db_table_ez,
-        WORK_INT=WORK_INT,
-    )
     return add
 
 
@@ -282,7 +242,7 @@ def make_lns_triton_scalar_ops(
     MIN_FINITE_LOG = tl.constexpr((zero_value >> 1) + 1)
     MAX_FINITE_LOG = tl.constexpr((pos_inf_value >> 1) - 1)
 
-    # @triton.jit
+    # @_lns_jit
     # def from_float(x):
     #     abs_x = tl.abs(tl.cast(x, tl.float32))
     #     bits = tl.cast(abs_x, tl.int32, bitcast=True)
@@ -332,7 +292,7 @@ def make_lns_triton_scalar_ops(
     #         tl.where(exponent_bits == 0xff, inf, result),
     #     )
 
-    @triton.jit
+    @_lns_jit
     def from_float(x):
         abs_x = tl.abs(tl.cast(x, tl.float64))
         log_base = tl.cast(LOG_BASE_BITS, tl.float64, bitcast=True)
@@ -355,7 +315,7 @@ def make_lns_triton_scalar_ops(
             tl.where(overflow, inf, tl.where(underflow, tl.cast(ZERO, tl_int_dtype), packed)),
         )
 
-    @triton.jit
+    @_lns_jit
     def to_float(x):
         log_x = x >> 1
         sign = tl.where((x & 1) == 1, -1.0, 1.0)
@@ -370,11 +330,11 @@ def make_lns_triton_scalar_ops(
             tl.where(x == POS_INF, float("inf"), tl.where(x == NEG_INF, float("-inf"), float_x.to(tl.float32))),
         )
 
-    @triton.jit
+    @_lns_jit
     def sub(x, y):
         return add(x, neg(y))
 
-    @triton.jit
+    @_lns_jit
     def checked_add(a, b, overflow_sign):
         result = tl.cast(a + b, tl_int_dtype)
 
@@ -384,14 +344,14 @@ def make_lns_triton_scalar_ops(
 
         return tl.where(underflow, tl.cast(ZERO, tl_int_dtype), tl.where(overflow, inf_signed, result))
 
-    @triton.jit
+    @_lns_jit
     def mul(x, y):
         y_magnitude = y - (y & 1)
         prod_unsigned = checked_add(x, y_magnitude, x & 1)
         prod = tl.where(prod_unsigned == ZERO, tl.cast(ZERO, tl_int_dtype), prod_unsigned ^ (y & 1))
         return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), tl.where(y == tl.cast(ZERO, tl_int_dtype), tl.cast(ZERO, tl_int_dtype), prod))
 
-    @triton.jit
+    @_lns_jit
     def div(x, y):
         safe_y = tl.where(y == ZERO, tl.cast(0, tl_int_dtype), y)
         divisor_delta = -safe_y + (safe_y & 1)
@@ -400,16 +360,16 @@ def make_lns_triton_scalar_ops(
         div_by_zero = tl.where((x & 1) == 0, tl.cast(POS_INF, tl_int_dtype), tl.cast(NEG_INF, tl_int_dtype))
         return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), tl.where(y == ZERO, div_by_zero, quotient))
 
-    @triton.jit
+    @_lns_jit
     def sqrt(x):
         result = ((x & (-2)) // 2) & (-2)
         return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), tl.where(x == POS_INF, tl.cast(POS_INF, tl_int_dtype), result))
 
-    @triton.jit
+    @_lns_jit
     def neg(x):
         return tl.where(x == ZERO, tl.cast(ZERO, tl_int_dtype), x ^ 1)
 
-    @triton.jit
+    @_lns_jit
     def gt(x, y):
         x_log = x >> 1
         y_log = y >> 1
@@ -422,7 +382,7 @@ def make_lns_triton_scalar_ops(
 
         return x_pos_y_neg | (both_pos & (x_log > y_log)) | (both_neg & (y_log > x_log))
 
-    @triton.jit
+    @_lns_jit
     def ge(x, y):
         x_log = x >> 1
         y_log = y >> 1
@@ -435,7 +395,7 @@ def make_lns_triton_scalar_ops(
 
         return x_pos_y_neg | (both_pos & (x_log >= y_log)) | (both_neg & (y_log >= x_log))
 
-    @triton.jit
+    @_lns_jit
     def lt(x, y):
         x_log = x >> 1
         y_log = y >> 1
@@ -448,7 +408,7 @@ def make_lns_triton_scalar_ops(
 
         return x_neg_y_pos | (both_pos & (x_log < y_log)) | (both_neg & (y_log < x_log))
 
-    @triton.jit
+    @_lns_jit
     def le(x, y):
         x_log = x >> 1
         y_log = y >> 1
@@ -469,7 +429,7 @@ def make_lns_triton_scalar_ops(
         tab_sbdb_data_ptr = tl.constexpr(tab_sbdb.data_ptr())
         tab_ez_item = tl.constexpr(tab_ez.item())
 
-        @triton.jit
+        @_lns_jit
         def add(x, y):
             max_operand = tl.maximum(x, y)
 
@@ -483,18 +443,8 @@ def make_lns_triton_scalar_ops(
             result = checked_add(max_operand, sbdb, max_operand & 1)
             return tl.where(x == ZERO, y, tl.where(y == ZERO, x, tl.where(x == neg(y), tl.cast(ZERO, tl_int_dtype), result)))
 
-        _bump_triton_jit_hash(
-            add,
-            ZERO=ZERO,
-            POS_INF=POS_INF,
-            NEG_INF=NEG_INF,
-            tab_sbdb=tab_sbdb.data_ptr(),
-            tab_ez=tab_ez.item(),
-            bitwidth=bitwidth,
-        )
-
     else:
-        @triton.jit
+        @_lns_jit
         def add(x, y):
             max_operand = tl.maximum(x, y)
             log_base = tl.cast(LOG_BASE_BITS, tl.float64, bitcast=True)
@@ -511,26 +461,6 @@ def make_lns_triton_scalar_ops(
 
             result = checked_add(max_operand, sbdb, max_operand & 1)
             return tl.where(x == ZERO, y, tl.where(y == ZERO, x, tl.where(x == neg(y), tl.cast(ZERO, tl_int_dtype), result)))
-
-        _bump_triton_jit_hash(add, LOG_BASE_BITS=LOG_BASE_BITS, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
-
-    _bump_triton_jit_hash(from_float, LOG_BASE_BITS=LOG_BASE_BITS, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
-    # _bump_triton_jit_hash(
-    #     from_float,
-    #     LOG_BASE=LOG_BASE,
-    #     LOG2_BASE=LOG2_BASE,
-    #     ZERO=ZERO,
-    #     POS_INF=POS_INF,
-    #     NEG_INF=NEG_INF,
-    #     NAN_VALUE=NAN_VALUE,
-    #     bitwidth=bitwidth,
-    #     use_fast_from_float=use_fast_from_float,
-    # )
-
-    _bump_triton_jit_hash(to_float, LOG_BASE_BITS=LOG_BASE_BITS, ZERO=ZERO, bitwidth=bitwidth)
-    _bump_triton_jit_hash(mul, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
-    _bump_triton_jit_hash(div, ZERO=ZERO, POS_INF=POS_INF, NEG_INF=NEG_INF, bitwidth=bitwidth)
-    _bump_triton_jit_hash(sqrt, ZERO=ZERO, bitwidth=bitwidth)
 
     return TritonScalarOps(
         from_float=from_float,

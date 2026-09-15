@@ -60,7 +60,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
         from torchdt.ops import TritonAccumulatorOps, register_triton_ops, require_triton
         from torchdt.triton import _autotune_revision
         from ._triton import (
-            _bump_triton_jit_hash,
+            _lns_jit,
             _lns_triton_int_dtype,
             make_lns_triton_scalar_ops,
             make_lpvip_triton_add,
@@ -99,7 +99,6 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
 
         triton, tl = require_triton()
 
-        VALUE_PRECISION = tl.constexpr(precision)
         VALUE_ZERO = tl.constexpr(ZERO.item())
         VALUE_POS_INF = tl.constexpr(POS_INF.item())
         VALUE_NEG_INF = tl.constexpr(NEG_INF.item())
@@ -110,7 +109,6 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
 
         accumulator_ops = None
         if use_accumulator:
-            ACC_PRECISION = tl.constexpr(lns32.precision)
             ACC_ZERO = tl.constexpr(lns32.ZERO.item())
             ACC_POS_INF = tl.constexpr(lns32.POS_INF.item())
             ACC_NEG_INF = tl.constexpr(lns32.NEG_INF.item())
@@ -124,7 +122,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
             # so this common embedding cannot overflow or underflow.
             EXACT_TO_ACC = tl.constexpr(0 <= lns32.precision - precision <= 16)
 
-            @triton.jit
+            @_lns_jit
             def to_lns32(x):
                 log_x = tl.cast(x >> 1, tl.int32)
                 sign_bit = tl.cast(x & 1, tl.int32)
@@ -158,7 +156,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
                              tl.where(x == VALUE_NEG_INF, tl.cast(ACC_NEG_INF, tl.int32), converted)),
                 )
 
-            @triton.jit
+            @_lns_jit
             def from_lns32(x):
                 log_x = x >> 1
                 sign_bit = tl.cast(x & 1, tl.int16)
@@ -187,30 +185,6 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
                     tl.where(x == ACC_POS_INF, tl.cast(VALUE_POS_INF, tl.int16),
                              tl.where(x == ACC_NEG_INF, tl.cast(VALUE_NEG_INF, tl.int16), converted)),
                 )
-
-            _bump_triton_jit_hash(
-                to_lns32,
-                VALUE_PRECISION=VALUE_PRECISION,
-                VALUE_ZERO=VALUE_ZERO,
-                VALUE_POS_INF=VALUE_POS_INF,
-                VALUE_NEG_INF=VALUE_NEG_INF,
-                ACC_PRECISION=ACC_PRECISION,
-                EXACT_TO_ACC=EXACT_TO_ACC,
-                ACC_ZERO=ACC_ZERO,
-                ACC_POS_INF=ACC_POS_INF,
-                ACC_NEG_INF=ACC_NEG_INF,
-            )
-            _bump_triton_jit_hash(
-                from_lns32,
-                VALUE_PRECISION=VALUE_PRECISION,
-                VALUE_ZERO=VALUE_ZERO,
-                VALUE_POS_INF=VALUE_POS_INF,
-                VALUE_NEG_INF=VALUE_NEG_INF,
-                ACC_PRECISION=ACC_PRECISION,
-                ACC_ZERO=ACC_ZERO,
-                ACC_POS_INF=ACC_POS_INF,
-                ACC_NEG_INF=ACC_NEG_INF,
-            )
 
             accumulator_scalar_ops = make_lns_triton_scalar_ops(
                 bitwidth=32,
@@ -256,20 +230,11 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
             tl_int_dtype = _lns_triton_int_dtype(16, tl)
             EXP_TABLE_DATA_PTR = tl.constexpr(tab_exp.data_ptr())
 
-            @triton.jit
+            @_lns_jit
             def exp(x):
                 idx = tl.cast(x, tl.int64) - tl.cast(VALUE_ZERO, tl.int64)
                 table_ptr = tl.cast(EXP_TABLE_DATA_PTR, tl.pointer_type(tl_int_dtype))
                 return tl.load(table_ptr + idx)
-
-            _bump_triton_jit_hash(
-                exp,
-                VALUE_PRECISION=VALUE_PRECISION,
-                VALUE_ZERO=VALUE_ZERO,
-                VALUE_POS_INF=VALUE_POS_INF,
-                VALUE_NEG_INF=VALUE_NEG_INF,
-                exp_table=tab_exp.data_ptr(),
-            )
 
             scalar_ops = replace(scalar_ops, exp=exp)
 
