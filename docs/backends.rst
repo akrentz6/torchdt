@@ -37,8 +37,6 @@ Ensure ``TORCHDT_NO_CPP`` is unset. Enable the supplied LNS16, LNS32, or LNS64 b
 
 The native backend follows ``set_prec`` and supports analytic and table-based arithmetic for all three widths. Changing settings refreshes enabled contexts, so create tensors after configuration. Native reductions use a fixed parallel tree, so rounded results can differ from Python's sequential accumulation. An unavailable extension raises ``ImportError``. Set ``TORCHDT_STRICT_CPP=1`` during installation to require a successful native build.
 
-See :doc:`native-backend` for arithmetic details, native API migration, validation, and CUDA preparation.
-
 Triton on CUDA
 --------------
 
