@@ -1,0 +1,55 @@
+name: Native backend
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      cuda:
+        description: Run CUDA build and Triton checks on a self-hosted CUDA runner
+        type: boolean
+        default: false
+jobs:
+  cpu:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.10'
+            torch: 'torch==2.0.1'
+          - os: ubuntu-latest
+            python: '3.12'
+            torch: 'torch'
+          - os: macos-latest
+            python: '3.12'
+            torch: 'torch'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install 'setuptools>=69' wheel ninja 'numpy<2' '${{ matrix.torch }}'
+      - run: python -m pip install --no-build-isolation --no-deps -e .
+        env:
+          TORCHDT_STRICT_CPP: '1'
+          MAX_JOBS: '2'
+      - run: python -c 'from torchdt.ops.cpp_ops import C; assert C is not None'
+      - run: python -m unittest discover -s tests/native -v
+      - run: python tests/native/check_registry_plugin.py
+      - run: python tests/native/check_shared_cpu.py
+      - run: c++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all tests/native/scalar_sanitizer.cpp -o /tmp/scalar-check && /tmp/scalar-check
+      - run: python -m pip wheel --no-build-isolation --no-deps -w /tmp/python-only .
+        env:
+          TORCHDT_NO_CPP: '1'
+  cuda-preparation:
+    if: github.event_name == 'workflow_dispatch' && inputs.cuda
+    runs-on: [self-hosted, linux, cuda]
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install 'setuptools>=69' wheel ninja numpy
+      - run: python -m pip install --no-build-isolation --no-deps -e .
+        env:
+          TORCHDT_STRICT_CPP: '1'
+          TORCHDT_BUILD_CUDA: '1'
+          MAX_JOBS: '2'
+      - run: python -m unittest discover -s tests/native -v
