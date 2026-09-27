@@ -16,7 +16,7 @@ _float_dtype = {
 }
 
 _int_dtype = {
-    8: torch.uint8,
+    8: torch.int8,
     16: torch.int16,
     32: torch.int32,
     64: torch.int64
@@ -157,6 +157,16 @@ class DType(Tensor):
         # allow normal imports to see it
         # module = sys.modules[cls.__module__]
         # setattr(module, ops_name, ops_cls)
+
+    @classmethod
+    def cpp_backend_config(cls, backend):
+        """
+        Return backend-defined native options for a new registration snapshot.
+
+        Override in the datatype module when its native backend needs settings.
+        Values may be integers, floats, tensors, or other dispatcher IValues.
+        """
+        return {}
 
     @classmethod
     def enable_cpp_backend(cls, backend=None):
@@ -477,7 +487,8 @@ def support_matrix():
         devices = {}
         for device_type in ("cpu", "cuda"):
             backend = dtype_cls.ops._enabled_backends.get(device_type, "python")
-            backend_ops = dtype_cls.ops._implementations.get(backend, {})
+            backend_ops = dict(dtype_cls.ops._implementations.get(backend, {}))
+            backend_ops.update(dtype_cls.ops._direct_implementations.get(backend, {}))
             python_ops = dict(OpsBase._base_implementations)
             python_ops.update(dtype_cls.ops._implementations.get("python", {}))
             op_status = {}

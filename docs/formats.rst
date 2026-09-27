@@ -70,4 +70,4 @@ Configuration lifetime
 
 Settings apply to the whole dtype class in the process. Changing ``prec`` or ``es`` changes how existing encoded tensors are interpreted; it does not re-encode their values. Configure the format **before** creating tensors, parameters, or optimizers, and recreate them when changing settings.
 
-Record format settings alongside checkpoints. Restore those settings before loading or interpreting encoded tensors. If using Triton, configure first, then call ``enable_triton()`` again after a setting or autotune policy changes.
+Record format settings alongside checkpoints. Restore those settings before loading or interpreting encoded tensors. Enabled C++ and Triton configurations refresh after ``set_prec``. After changing an autotune policy, call ``enable_triton()`` again.

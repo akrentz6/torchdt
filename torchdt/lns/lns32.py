@@ -15,7 +15,14 @@ base = lns_base(precision)
 tab_sbdb = None
 tab_ez = None
 
-class LNS32(DType, bitwidth=32):
+class LNS32(DType, bitwidth=32, cpp_backend="lns"):
+
+    @classmethod
+    def cpp_backend_config(cls, backend):
+        if backend == "lns":
+            from ._config import native_config
+            return native_config(cls)
+        return super().cpp_backend_config(backend)
 
     @staticmethod
     def set_prec(prec: int, table: bool = False, table_device: str = None, filestem: str = "tab"):
@@ -40,6 +47,9 @@ class LNS32(DType, bitwidth=32):
             register_table_add(LNS32, zero=ZERO, tab_sbdb=tab_sbdb, tab_ez=tab_ez)
         else:
             LNS32.register_op("add")(lns32_add)
+
+        from ._config import refresh_backends
+        refresh_backends(LNS32)
 
     @classmethod
     def enable_triton(cls):

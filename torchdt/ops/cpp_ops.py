@@ -5,35 +5,60 @@ except ImportError:
 from torchdt.autograd import DTFunction
 import torch
 
+class NativeHandle:
+
+    def __init__(self, name, bitwidth, **options):
+        self.context = torch.classes.torchdt_native.Context(name, bitwidth, options)
+        self.capabilities = frozenset(self.context.capabilities())
+        for method in self.capabilities:
+            setattr(self, method, self.__getattr__(method))
+
+    def __getattr__(self, method):
+        if method not in self.capabilities:
+            raise AttributeError(method)
+        native = torch.ops.torchdt_native
+        context = self.context
+        unary = {"from_float", "to_float", "neg", "abs", "sign", "sqrt"}
+        binary = {"add", "sub", "mul", "div", "pow", "ge", "gt", "le", "lt"}
+        if method in unary:
+            return lambda x: native.unary(x, context, method)
+        if method in binary:
+            return lambda x, y: native.binary(x, y, context, method)
+        if method == "sum":
+            def reduce(x, dim=None, keepdim=False):
+                if isinstance(dim, int):
+                    dim = [dim]
+                return native.sum(x, context, dim, keepdim)
+            return reduce
+        return lambda *args: getattr(native, method)(*args, context)
+
+
 def register_cpp_ops(dtype_cls: type, backend: str) -> None:
     if C is None:
-        raise ImportError("C++ extension is not built. Please build the C++ extension to use C++ backend.")
-
-    bitwidth = dtype_cls.bitwidth
-    handle = C.get_backend(backend, bitwidth)
-
-    for method in ("from_float", "to_float", "add", "sub", "mul", "div",
-                   "ge", "gt", "le", "lt", "matmul", "matmul_backward",
-                   "conv2d", "conv2d_backward"):
+        raise ImportError("C++ extension is not built. Build it to use the C++ backend.")
+    config = dtype_cls.cpp_backend_config(backend)
+    handle = NativeHandle(backend, dtype_cls.bitwidth, **config)
+    # Drop obsolete direct registrations when replacing a configuration/factory.
+    dtype_cls.ops._direct_implementations["cpp"] = {}
+    dtype_cls.ops._direct_ops.clear()
+    dtype_cls.ops.clear_scalar_cache()
+    functions = dtype_cls._torch_func_implementations.get("cpp", {})
+    for function in (torch.matmul, torch.Tensor.matmul, torch.nn.functional.conv2d):
+        functions.pop(function, None)
+    dtype_cls._direct_torch_funcs.clear()
+    for method in handle.capabilities:
         dtype_cls.register_op(method, backend="cpp", direct=True)(getattr(handle, method))
-
-    def cpp_sum(x, dim=None, keepdim=False):
-        if isinstance(dim, int):
-            dim = [dim]
-        return handle.sum(x, dim, keepdim)
-
-    dtype_cls.register_op("sum", backend="cpp", direct=True)(cpp_sum)
-
-    # also register new torch. funcs to call ops that call into c++ for backward
-    dtype_cls.register_func(
-        torch.matmul, torch.Tensor.matmul,
-        cast=("input", "other"), backend="cpp"
-    )(matmul_func)
-    dtype_cls.register_func(
-        torch.nn.functional.conv2d,
-        cast=("input", "weight", "bias"), backend="cpp"
-    )(conv2d_func)
-
+    if {"matmul", "matmul_backward"} <= handle.capabilities:
+        dtype_cls.register_func(
+            torch.matmul, torch.Tensor.matmul,
+            cast=("input", "other"), backend="cpp"
+        )(matmul_func)
+    if {"conv2d", "conv2d_backward"} <= handle.capabilities:
+        dtype_cls.register_func(
+            torch.nn.functional.conv2d,
+            cast=("input", "weight", "bias"), backend="cpp"
+        )(conv2d_func)
+    dtype_cls.ops._native_handle = handle
     dtype_cls.ops.enable_backend("cpp", "cpu")
 
 class DTMatmulFunction(DTFunction):

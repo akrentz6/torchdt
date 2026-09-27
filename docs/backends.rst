@@ -26,16 +26,18 @@ The optional extension is built by default during installation and needs a C++17
    python -m pip install 'setuptools>=69' wheel ninja
    python -m pip install --no-build-isolation -e .
 
-Ensure ``TORCHDT_NO_CPP`` is unset. Enable the supplied LNS16 backend explicitly:
+Ensure ``TORCHDT_NO_CPP`` is unset. Enable the supplied LNS16, LNS32, or LNS64 backend explicitly as below:
 
 .. code-block:: python
 
    from torchdt.lns import LNS16
 
-   LNS16.set_prec(10)
+   LNS16.set_prec(7)
    LNS16.enable_cpp_backend()
 
-The current C++ LNS16 implementation hard-codes precision 10. Calling Python's ``set_prec`` does not change that native precision. Set Python precision to 10 before enabling C++ so fallback operations use the same encoding, and create all tensors afterward. The native special-value and overflow handling also differs from Python; validate it separately before relying on it in an experiment. An unavailable extension raises ``ImportError``.
+The native backend follows ``set_prec`` and supports analytic and table-based arithmetic for all three widths. Changing settings refreshes enabled contexts, so create tensors after configuration. Native reductions use a fixed parallel tree, so rounded results can differ from Python's sequential accumulation. An unavailable extension raises ``ImportError``. Set ``TORCHDT_STRICT_CPP=1`` during installation to require a successful native build.
+
+See :doc:`native-backend` for arithmetic details, native API migration, validation, and CUDA preparation.
 
 Triton on CUDA
 --------------

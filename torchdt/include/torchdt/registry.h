@@ -1,107 +1,61 @@
-#ifndef REGISTRY_H
-#define REGISTRY_H
-
-#include <cstdint>
-#include <type_traits>
-#include <string>
-#include <map>
+#pragma once
+#include <ATen/ATen.h>
+#include <functional>
 #include <memory>
 #include <mutex>
-#include <sstream>
-#include <iostream>
-#include <cassert>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
-// map bitwidth to storage type
-template <size_t bitwidth>
-struct StorageFor {
-    static_assert(
-        bitwidth == 8 || bitwidth == 16 || bitwidth == 32 || bitwidth == 64,
-        "Supported bitwidths: 8,16,32,64"
-    );
-
-    using type = typename std::conditional<
-        bitwidth == 8, int8_t,
-        typename std::conditional<
-            bitwidth == 16, int16_t,
-            typename std::conditional<
-                bitwidth == 32, int32_t,
-                int64_t
-            >::type
-        >::type
-    >::type;
+namespace torchdt::native {
+using Tensor = at::Tensor;
+using OptionalTensor = c10::optional<Tensor>;
+using Dims = std::vector<int64_t>;
+struct Config {
+    int64_t bitwidth;
+    // Backend-specific options
+    c10::Dict<std::string, c10::IValue> options;
 };
 
-// runtime container of op-function pointers for a specific bitwidth/StorageT template
-template<size_t bitwidth>
-struct Ops {
-    using StorageT = typename StorageFor<bitwidth>::type;
-    using BinOp = StorageT(*)(StorageT, StorageT);
-    using BoolBinOp = bool(*)(StorageT, StorageT);
-
-    StorageT(*from_float)(float) = nullptr;
-    float(*to_float)(StorageT) = nullptr;
-
-    BinOp add = nullptr;
-    BinOp sub = nullptr;
-    BinOp mul = nullptr;
-    BinOp div = nullptr;
-
-    BoolBinOp ge = nullptr;
-    BoolBinOp gt = nullptr;
-    BoolBinOp le = nullptr;
-    BoolBinOp lt = nullptr;
+// A registration is immutable and owned by each live context, so replacing
+// a factory affects only newly created contexts, not existing ones.
+struct TensorKernels {
+    virtual ~TensorKernels() = default;
+    virtual std::vector<std::string> capabilities() const = 0;
+    virtual Tensor unary(const Tensor&, const std::string&) const {
+        TORCH_CHECK(false, "Native unary operation is not registered");
+    }
+    virtual Tensor binary(const Tensor&, const Tensor&, const std::string&) const {
+        TORCH_CHECK(false, "Native binary operation is not registered");
+    }
+    virtual Tensor sum(const Tensor&, c10::optional<Dims>, bool) const {
+        TORCH_CHECK(false, "Native sum is not registered");
+    }
+    virtual Tensor matmul(const Tensor&, const Tensor&) const {
+        TORCH_CHECK(false, "Native matmul is not registered");
+    }
+    virtual std::vector<Tensor> matmul_backward(const Tensor&, const Tensor&, const Tensor&) const {
+        TORCH_CHECK(false, "Native matmul_backward is not registered");
+    }
+    virtual Tensor conv2d(const Tensor&, const Tensor&, const OptionalTensor&,
+                         const Dims&, const Dims&, const Dims&, int64_t) const {
+        TORCH_CHECK(false, "Native conv2d is not registered");
+    }
+    virtual std::vector<Tensor> conv2d_backward(const Tensor&, const Tensor&, const Tensor&,
+                         const Dims&, const Dims&, const Dims&, bool, int64_t) const {
+        TORCH_CHECK(false, "Native conv2d_backward is not registered");
+    }
 };
-
-// simple key construction
-inline std::string make_key(const std::string &name, size_t bitwidth) {
-    std::ostringstream ss;
-    ss << name << ":" << bitwidth;
-    return ss.str();
-}
-
-// Registry singleton
+using Factory = std::function<std::shared_ptr<const TensorKernels>(const Config&)>;
 class Registry {
 public:
-    static Registry &instance() {
-        static Registry r;
-        return r;
-    }
-
-    template <size_t bitwidth>
-    void register_ops(const std::string &name, std::shared_ptr<Ops<bitwidth>> ops) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        std::string key = make_key(name, bitwidth);
-        if (map_.count(key))
-            std::cerr << "Warning: overriding registration for " << key << "\n";
-        map_[key] = ops;
-    }
-
-    // typed getter, returns nullptr if not found or if wrong bitwidth
-    template <size_t bitwidth>
-    Ops<bitwidth>* get_ops_typed(const std::string &name) {
-        std::lock_guard<std::mutex> guard(mutex_);
-        std::string key = make_key(name, bitwidth);
-        auto it = map_.find(key);
-        if (it == map_.end()) return nullptr;
-        return static_cast<Ops<bitwidth>*>(it->second.get());
-    }
-
+    static Registry& instance();
+    void register_factory(const std::string& name, int64_t bits,
+                          const std::string& device, Factory factory);
+    std::shared_ptr<const TensorKernels> create(const std::string& name,
+                          const std::string& device, const Config& config) const;
 private:
-    Registry() = default;
-    std::map<std::string, std::shared_ptr<void>> map_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, Factory> factories_;
 };
-
-// helper macro for user registration
-#define REGISTER_DTYPE(NAME_STR, BITWIDTH, OPS_VAR)                                     \
-namespace {                                                                             \
-    struct _reg_helper_##BITWIDTH##_##__LINE__ {                                        \
-        _reg_helper_##BITWIDTH##_##__LINE__() {                                         \
-            auto ptr = std::make_shared< Ops<BITWIDTH> >((OPS_VAR));                    \
-            Registry::instance().register_ops<BITWIDTH>((NAME_STR), ptr);               \
-        }                                                                               \
-    };                                                                                  \
-    static _reg_helper_##BITWIDTH##_##__LINE__ _reg_instance_##BITWIDTH##_##__LINE__;   \
-}
-
-#endif // REGISTRY_H
+} // namespace torchdt::native

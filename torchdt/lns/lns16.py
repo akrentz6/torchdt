@@ -18,6 +18,13 @@ tab_exp = None
 
 class LNS16(DType, bitwidth=16, cpp_backend="lns"):
 
+    @classmethod
+    def cpp_backend_config(cls, backend):
+        if backend == "lns":
+            from ._config import native_config
+            return native_config(cls)
+        return super().cpp_backend_config(backend)
+
     @staticmethod
     def set_prec(prec: int, table: bool = False, table_device: str = None, filestem: str = "tab"):
         global base, precision, tab_sbdb, tab_ez, tab_exp
@@ -52,6 +59,9 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
             # Returning to analytic mode must expose the shared implementation.
             LNS16.ops._implementations.get("python", {}).pop("exp", None)
             LNS16.ops._direct_ops.clear()
+
+        from ._config import refresh_backends
+        refresh_backends(LNS16)
 
     @classmethod
     def enable_triton(cls, accumulator: bool | str = False):
@@ -244,6 +254,7 @@ class LNS16(DType, bitwidth=16, cpp_backend="lns"):
             accumulator_ops=accumulator_ops,
         )
         cls.ops._triton_fingerprint = fingerprint
+        cls.ops._lns_accumulator_mode = accumulator
 
 def _make_lns16_exp_lookup_table(device=None) -> Tensor:
     info = torch.iinfo(torch.int16)
