@@ -29,6 +29,7 @@ include-package-data = true
 [tool.setuptools.package-data]
 "torchdt" = [
     "include/torchdt/**/*.h",
+    "include/torchdt/**/*.cuh",
     "csrc/**/*.cpp",
     "csrc/**/*.h",
     "csrc/**/*.cu",

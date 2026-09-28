@@ -52,6 +52,7 @@ public:
     static Registry& instance();
     void register_factory(const std::string& name, int64_t bits,
                           const std::string& device, Factory factory);
+    bool contains(const std::string& name, int64_t bits, const std::string& device) const;
     std::shared_ptr<const TensorKernels> create(const std::string& name,
                           const std::string& device, const Config& config) const;
 private:

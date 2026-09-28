@@ -10,6 +10,10 @@ void Registry::register_factory(const std::string& name, int64_t bits,
     std::lock_guard<std::mutex> lock(mutex_);
     factories_[key(name, bits, device)] = std::move(factory);
 }
+bool Registry::contains(const std::string& name, int64_t bits, const std::string& device) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return factories_.count(key(name, bits, device)) != 0;
+}
 std::shared_ptr<const TensorKernels> Registry::create(const std::string& name,
                               const std::string& device, const Config& config) const {
     Factory factory;

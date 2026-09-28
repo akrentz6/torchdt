@@ -5,7 +5,7 @@ import warnings
 from torch.utils.cpp_extension import BuildExtension, include_paths, library_paths
 
 CPU_SOURCES = ("extension.cpp", "registry.cpp", "lns/cpu.cpp")
-CUDA_SOURCES = ("lns/cuda/compile_probe.cu",)
+CUDA_SOURCES = ("lns/cuda/kernels.cu",)
 
 
 def enabled(name):
@@ -50,8 +50,9 @@ class BuildCxxExtension(BuildExtension):
             ext.libraries = ["c10", "torch", "torch_cpu", "torch_python"]
             if self.with_cuda:
                 ext.libraries += ["cudart", "c10_cuda", "torch_cuda"]
+                ext.define_macros = list(ext.define_macros or []) + [("TORCHDT_WITH_CUDA", "1")]
             cxx_flags = ["/O2", "/std:c++17"] if os.name == "nt" else ["-O3", "-std=c++17"]
-            ext.extra_compile_args = {"cxx": cxx_flags, "nvcc": ["-O3", "-std=c++17"]}
+            ext.extra_compile_args = {"cxx": cxx_flags, "nvcc": ["-O3", "-std=c++17", "--extended-lambda", "--expt-relaxed-constexpr", "--fmad=false"]}
             # ATen's inline parallel_for is silently serial without _OPENMP
             # when the installed PyTorch uses its OpenMP backend.
             config_header = Path(includes[0]) / "ATen" / "Config.h"

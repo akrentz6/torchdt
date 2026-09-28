@@ -1,5 +1,5 @@
 #pragma once
-// Tensor-free arithmetic shared by CPU kernels and the CUDA compile probe.
+// Tensor-free LNS arithmetic shared by CPU and CUDA kernels.
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -22,6 +22,16 @@ struct Math {
     TORCHDT_HD static double log(double x) { return ::log(x); }
     TORCHDT_HD static double pow(double x, double y) { return ::pow(x, y); }
     TORCHDT_HD static double abs(double x) { return ::fabs(x); }
+    TORCHDT_HD static double scale_log(double x, double log_base) {
+#ifdef __CUDA_ARCH__
+        // Python divides by a CPU scalar tensor. ATen's CUDA scalar-divisor
+        // path multiplies by its reciprocal; direct division rounds differently
+        // at encoding boundaries. Preserve those two rounding steps explicitly.
+        return x * (1.0 / log_base);
+#else
+        return x / log_base;
+#endif
+    }
     // Independent of the process floating-point rounding mode.
     TORCHDT_HD static double round(double x) {
         if (!(x >= -std::numeric_limits<double>::max() &&
@@ -61,6 +71,12 @@ template<int Bits> struct LnsTraits {
     // conversion, while out-of-range int32/int64 conversions use INT_MIN.
     // Explicit checks avoid undefined C++ floating-to-integer conversions.
     TORCHDT_HD static S cast(double x) {
+#ifdef __CUDA_ARCH__
+        // ATen CUDA narrows int16 through a saturating int32 conversion.
+        // Wide casts saturate too; NaN maps to INT_MIN. CPU differs.
+        if constexpr (Bits == 64) return __double2ll_rz(x);
+        else return signed_bits(U(__double2int_rz(x)));
+#else
         if constexpr (Bits == 16) {
             if (!(x >= -0x1p63 && x < 0x1p63)) return 0;
             return signed_bits(U(int64_t(x)));
@@ -69,6 +85,7 @@ template<int Bits> struct LnsTraits {
             if (!(x >= -limit && x < limit)) return zero;
             return S(x);
         }
+#endif
     }
 };
 
@@ -93,7 +110,7 @@ template<int Bits, class M = Math> struct LnsScalar : LnsTraits<Bits> {
     }
     TORCHDT_HD S from_float(double x) const {
         if (x == 0) return zero;
-        double r = M::round(M::log(M::abs(x)) / config.log_base);
+        double r = M::round(M::scale_log(M::log(M::abs(x)), config.log_base));
         if (r >= double(max_log)) return x < 0 ? neg_inf : pos_inf;
         if (r <= double(min_log)) return zero;
         return T::signed_bits(typename T::U(typename T::U(shl(cast(r))) | (x < 0 ? 1 : 0)));
@@ -125,7 +142,7 @@ template<int Bits, class M = Math> struct LnsScalar : LnsTraits<Bits> {
         }
         double power = M::pow(config.base, -double(distance));
         double magnitude = M::abs(1.0 - 2.0 * ((x ^ y) & 1) + power);
-        correction = shl(cast(M::round(M::log(magnitude) / config.log_base)));
+        correction = shl(cast(M::round(M::scale_log(M::log(magnitude), config.log_base))));
         return checked_add(maximum, correction, maximum & 1);
     }
     TORCHDT_HD S sub(S x, S y) const { return add(x, neg(y)); }

@@ -37,6 +37,17 @@ Ensure ``TORCHDT_NO_CPP`` is unset. Enable the supplied LNS16, LNS32, or LNS64 b
 
 The native backend follows ``set_prec`` and supports analytic and table-based arithmetic for all three widths. Changing settings refreshes enabled contexts, so create tensors after configuration. Native reductions use a fixed parallel tree, so rounded results can differ from Python's sequential accumulation. An unavailable extension raises ``ImportError``. Set ``TORCHDT_STRICT_CPP=1`` during installation to require a successful native build.
 
+Native C++/CUDA
+---------------
+
+To include CUDA kernels, use a CUDA-enabled PyTorch installation and a matching CUDA toolkit (including its compiler and development headers):
+
+.. code-block:: console
+
+   TORCHDT_BUILD_CUDA=1 TORCHDT_STRICT_CPP=1 python -m pip install --no-build-isolation -e .
+
+``LNS16.enable_cpp_backend()`` (and the corresponding LNS32/LNS64 method) enables both CPU and CUDA registrations when built with CUDA. It preserves a CUDA backend already explicitly selected, such as Triton.
+
 Triton on CUDA
 --------------
 

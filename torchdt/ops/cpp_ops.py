@@ -8,8 +8,13 @@ import torch
 class NativeHandle:
 
     def __init__(self, name, bitwidth, **options):
-        self.context = torch.classes.torchdt_native.Context(name, bitwidth, options)
-        self.capabilities = frozenset(self.context.capabilities())
+        self.context = torch.classes.torchdt_native.Context(name, bitwidth, "cpu", options)
+        self.contexts = {"cpu": self.context}
+        if C.has_backend(name, bitwidth, "cuda"):
+            self.contexts["cuda"] = torch.classes.torchdt_native.Context(name, bitwidth, "cuda", options)
+        self.device_capabilities = {device: frozenset(context.capabilities())
+                                    for device, context in self.contexts.items()}
+        self.capabilities = frozenset.intersection(*self.device_capabilities.values())
         for method in self.capabilities:
             setattr(self, method, self.__getattr__(method))
 
@@ -17,25 +22,27 @@ class NativeHandle:
         if method not in self.capabilities:
             raise AttributeError(method)
         native = torch.ops.torchdt_native
-        context = self.context
+        contexts = self.contexts
+        context = lambda x: contexts[x.device.type]
         unary = {"from_float", "to_float", "neg", "abs", "sign", "sqrt"}
         binary = {"add", "sub", "mul", "div", "pow", "ge", "gt", "le", "lt"}
         if method in unary:
-            return lambda x: native.unary(x, context, method)
+            return lambda x: native.unary(x, context(x), method)
         if method in binary:
-            return lambda x, y: native.binary(x, y, context, method)
+            return lambda x, y: native.binary(x, y, context(x), method)
         if method == "sum":
             def reduce(x, dim=None, keepdim=False):
                 if isinstance(dim, int):
                     dim = [dim]
-                return native.sum(x, context, dim, keepdim)
+                return native.sum(x, context(x), dim, keepdim)
             return reduce
-        return lambda *args: getattr(native, method)(*args, context)
+        return lambda *args: getattr(native, method)(*args, context(args[0]))
 
 
 def register_cpp_ops(dtype_cls: type, backend: str) -> None:
     if C is None:
         raise ImportError("C++ extension is not built. Build it to use the C++ backend.")
+    # Preserve an explicitly selected CUDA backend (e.g. Triton).
     config = dtype_cls.cpp_backend_config(backend)
     handle = NativeHandle(backend, dtype_cls.bitwidth, **config)
     # Drop obsolete direct registrations when replacing a configuration/factory.
@@ -60,6 +67,8 @@ def register_cpp_ops(dtype_cls: type, backend: str) -> None:
         )(conv2d_func)
     dtype_cls.ops._native_handle = handle
     dtype_cls.ops.enable_backend("cpp", "cpu")
+    if "cuda" in handle.contexts and dtype_cls.ops._enabled_backends.get("cuda", "cpp") == "cpp":
+        dtype_cls.ops.enable_backend("cpp", "cuda")
 
 class DTMatmulFunction(DTFunction):
 
